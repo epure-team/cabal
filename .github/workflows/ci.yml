@@ -12,9 +12,16 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build and Test
-    runs-on: ubuntu-latest
-
+    name: Build & Test (${{ matrix.os }}, OCaml ${{ matrix.ocaml-compiler }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        ocaml-compiler: ['5.3.0']
+        include:
+          - os: ubuntu-latest
+            ocaml-compiler: '5.2.0'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,10 +29,10 @@ jobs:
       - name: Set up OCaml
         uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: 5.3.0
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
       - name: Install dependencies
-        run: opam install . --deps-only --with-test -y
+        run: opam install . --deps-only --with-test --with-doc -y
 
       - name: Build install target
         run: opam exec -- dune build @install
@@ -33,5 +40,39 @@ jobs:
       - name: Run tests
         run: opam exec -- dune runtest
 
+      - name: Build documentation
+        run: opam exec -- dune build @doc
+
       - name: Lint opam package
         run: opam lint cabal.opam
+
+  coverage:
+    name: Coverage (Ubuntu, OCaml 5.3.0)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.3.0'
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test -y
+
+      - name: Run tests with bisect_ppx instrumentation
+        run: |
+          opam exec -- dune runtest --instrument-with bisect_ppx --force
+
+      - name: Generate coverage report
+        run: |
+          opam exec -- bisect-ppx-report summary
+          opam exec -- bisect-ppx-report html -o _coverage
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: _coverage/
+          retention-days: 14
