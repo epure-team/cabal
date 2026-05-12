@@ -313,11 +313,13 @@ let rec ensure_parent_dir path =
 let read_file_opt path =
   try
     let ic = open_in_bin path in
-    let n = in_channel_length ic in
-    let buf = Bytes.create n in
-    really_input ic buf 0 n ;
-    close_in ic ;
-    Some (Bytes.to_string buf)
+    Fun.protect
+      ~finally:(fun () -> try close_in ic with _ -> ())
+      (fun () ->
+        let n = in_channel_length ic in
+        let buf = Bytes.create n in
+        really_input ic buf 0 n ;
+        Some (Bytes.to_string buf))
   with _ -> None
 
 type sidecar_metadata = {
