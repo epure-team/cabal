@@ -48,15 +48,36 @@ let float_field_opt obj key default =
   | Some (`String s) -> ( try float_of_string s with _ -> default)
   | _ -> default
 
-let env_mappings_field obj key =
+(** [env_mappings_field ~source obj key] reads an "env"-style sub-mapping.
+    Non-string values are dropped (env vars must be strings on a process
+    boundary) but each drop emits a [Diagnostics.warn] tagged with the
+    YAML [source] and the offending field, so misconfigured adapters
+    don't fail mysteriously at backend invocation time. *)
+let env_mappings_field ~source obj key =
   match List.assoc_opt key obj with
   | Some (`O pairs) ->
-      let mappings =
-        List.filter_map
-          (fun (k, v) -> match v with `String s -> Some (k, s) | _ -> None)
-          pairs
-      in
-      mappings
+    List.filter_map
+      (fun (k, v) ->
+        match v with
+        | `String s -> Some (k, s)
+        | other ->
+          let kind =
+            match other with
+            | `Bool _ -> "bool"
+            | `Float _ -> "number"
+            | `O _ -> "mapping"
+            | `A _ -> "sequence"
+            | `Null -> "null"
+            | `String _ -> "string"
+          in
+          Diagnostics.warn
+            "[adapter_loader] %s: ignoring env mapping %S — expected \
+             string, got %s"
+            source
+            k
+            kind ;
+          None)
+      pairs
   | _ -> []
 
 (* --- Validate ------------------------------------------------------------- *)
@@ -79,7 +100,7 @@ let load_string ~source s =
       let* display_name = string_field obj "display_name" in
       let* invocation_command = string_field obj "invocation_command" in
       let* template_set = string_field obj "template_set" in
-      let env_mappings = env_mappings_field obj "env" in
+      let env_mappings = env_mappings_field ~source obj "env" in
       let timeout_seconds = float_field_opt obj "timeout_seconds" 300.0 in
       let cfg =
         {
