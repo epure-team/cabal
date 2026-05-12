@@ -74,6 +74,11 @@
  (modules test_session_event_log))
 
 (test
+ (name test_backend_event_redaction)
+ (libraries cabal alcotest yojson fmt)
+ (modules test_backend_event_redaction))
+
+(test
  (name test_resource_guardian)
  (libraries cabal alcotest)
  (modules test_resource_guardian))
