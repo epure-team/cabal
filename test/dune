@@ -84,6 +84,11 @@
  (modules test_validated_namespace))
 
 (test
+ (name test_backend_config_writer)
+ (libraries cabal alcotest unix str)
+ (modules test_backend_config_writer))
+
+(test
  (name test_resource_guardian)
  (libraries cabal alcotest)
  (modules test_resource_guardian))
