@@ -79,6 +79,11 @@
  (modules test_backend_event_redaction))
 
 (test
+ (name test_validated_namespace)
+ (libraries cabal alcotest)
+ (modules test_validated_namespace))
+
+(test
  (name test_resource_guardian)
  (libraries cabal alcotest)
  (modules test_resource_guardian))

@@ -76,6 +76,12 @@ let validate_managed_namespace (namespace : managed_namespace) =
     Error "invalid managed namespace: display_name must be non-empty"
   else validate_config_dir namespace.config_dir
 
+type validated_namespace = managed_namespace
+
+let validate_namespace (ns : managed_namespace) :
+    (validated_namespace, string) result =
+  match validate_managed_namespace ns with Ok () -> Ok ns | Error e -> Error e
+
 (* Host-provided LSP configuration. *)
 
 type lsp_file_association = {extension : string; language_id : string}
