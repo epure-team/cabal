@@ -1,0 +1,124 @@
+(test
+ (name test_backend)
+ (libraries cabal alcotest eio eio_posix yojson unix)
+ (modules test_backend))
+
+(test
+ (name test_backend_registry)
+ (libraries cabal alcotest)
+ (modules test_backend_registry))
+
+(test
+ (name test_backend_version)
+ (libraries cabal alcotest eio eio_posix unix)
+ (modules test_backend_version))
+
+(test
+ (name test_backend_config_gen)
+ (libraries cabal alcotest eio eio_posix yojson unix)
+ (modules test_backend_config_gen))
+
+(test
+ (name test_backend_project_config_validation)
+ (libraries cabal alcotest eio eio_posix unix)
+ (modules test_backend_project_config_validation))
+
+(test
+ (name test_backend_process)
+ (libraries cabal alcotest eio eio_posix yojson)
+ (modules test_backend_process))
+
+(test
+ (name test_adapter_loader)
+ (libraries cabal alcotest unix)
+ (modules test_adapter_loader))
+
+(test
+ (name test_claude_code)
+ (libraries cabal alcotest eio eio_posix yojson)
+ (modules test_claude_code))
+
+(test
+ (name test_codex_cli)
+ (libraries cabal alcotest eio eio_posix)
+ (modules test_codex_cli))
+
+(test
+ (name test_gemini_cli)
+ (libraries cabal alcotest eio eio_posix)
+ (modules test_gemini_cli))
+
+(test
+ (name test_opencode_cli)
+ (libraries cabal alcotest eio eio_posix yojson unix)
+ (modules test_opencode_cli))
+
+(test
+ (name test_copilot_cli)
+ (libraries cabal alcotest eio eio_posix unix)
+ (modules test_copilot_cli))
+
+(test
+ (name test_real_backend_smoke)
+ (libraries cabal alcotest eio eio_posix yojson unix)
+ (modules test_real_backend_smoke))
+
+(test
+ (name test_session_trimmer)
+ (libraries cabal alcotest yojson)
+ (modules test_session_trimmer))
+
+(test
+ (name test_resource_guardian)
+ (libraries cabal alcotest)
+ (modules test_resource_guardian))
+
+(test
+ (name test_demo_477)
+ (libraries cabal alcotest)
+ (modules test_demo_477))
+
+(test
+ (name test_demo_479)
+ (libraries cabal alcotest unix)
+ (modules test_demo_479))
+
+(test
+ (name test_demo_480)
+ (libraries cabal alcotest)
+ (modules test_demo_480))
+
+(test
+ (name test_demo_481)
+ (libraries cabal alcotest eio eio_posix unix)
+ (modules test_demo_481))
+
+(test
+ (name test_demo_482)
+ (libraries cabal alcotest eio eio_posix yojson unix)
+ (modules test_demo_482))
+
+(test
+ (name test_demo_483)
+ (libraries cabal alcotest eio eio_posix unix)
+ (modules test_demo_483))
+
+(test
+ (name test_demo_484)
+ (libraries cabal alcotest eio eio_posix yojson)
+ (modules test_demo_484))
+
+(test
+ (name test_demo_485)
+ (libraries cabal alcotest)
+ (modules test_demo_485))
+
+(test
+ (name test_demo_516)
+ (libraries cabal alcotest)
+ (modules test_demo_516))
+
+(test
+ (name test_demo_517)
+ (libraries cabal alcotest eio eio_main eio_posix)
+ (modules test_demo_517))
