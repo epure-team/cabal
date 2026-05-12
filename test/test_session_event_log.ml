@@ -49,6 +49,77 @@ let test_file_mode_is_user_only () =
       0o600
       perm)
 
+(* ---- Diagnostic surfacing for swallowed errors -------------------------- *)
+
+let with_captured_diagnostics f =
+  let events = ref [] in
+  let handler ev = events := ev :: !events in
+  Cabal.Diagnostics.set_handler handler ;
+  Fun.protect
+    ~finally:(fun () -> Cabal.Diagnostics.reset_handler ())
+    (fun () ->
+      f () ;
+      List.rev !events)
+
+let warn_count events =
+  List.fold_left
+    (fun acc ev ->
+      match ev with Cabal.Diagnostics.Log (Warn, _) -> acc + 1 | _ -> acc)
+    0
+    events
+
+let test_write_raw_event_warns_on_malformed_json () =
+  with_tmp_dir (fun dir ->
+    let events =
+      with_captured_diagnostics (fun () ->
+        Eio_main.run (fun env ->
+          let fs = Eio.Stdenv.fs env in
+          Cabal.Session_event_log.write_raw_event
+            ~fs
+            ~session_logs_dir:(Filename.concat dir "sessions")
+            ~session_id:"raw-warn-test"
+            ~backend:"test-backend"
+            ~turn_number:0
+            "{this is not valid json"))
+    in
+    Alcotest.(check int)
+      "write_raw_event emits one Warn for a malformed line"
+      1
+      (warn_count events))
+
+let test_read_events_warns_on_malformed_line () =
+  with_tmp_dir (fun dir ->
+    (* Pre-populate a session log file with one good line, one bad line. *)
+    let sessions = Filename.concat dir "sessions" in
+    Unix.mkdir sessions 0o755 ;
+    let path = Filename.concat sessions "mixed.ndjson" in
+    let oc = open_out path in
+    output_string oc {|{"type":"session_start","session_id":"mixed"}
+|} ;
+    output_string oc "{this is not valid json\n" ;
+    close_out oc ;
+    let events =
+      with_captured_diagnostics (fun () ->
+        Eio_main.run (fun env ->
+          let fs = Eio.Stdenv.fs env in
+          let parsed =
+            Cabal.Session_event_log.read_events
+              ~fs
+              ~session_logs_dir:sessions
+              ~session_id:"mixed"
+              ()
+          in
+          (* Sanity: the good line is parsed *)
+          Alcotest.(check int)
+            "one good line survives"
+            1
+            (List.length parsed)))
+    in
+    Alcotest.(check int)
+      "read_events emits one Warn for the malformed line"
+      1
+      (warn_count events))
+
 let test_dir_not_world_accessible () =
   with_tmp_dir (fun dir ->
     Eio_main.run (fun env ->
@@ -72,4 +143,13 @@ let () =
         ; Alcotest.test_case
             "log dir is not world-accessible"
             `Quick
-            test_dir_not_world_accessible ] ) ]
+            test_dir_not_world_accessible ] )
+    ; ( "diagnostics"
+      , [ Alcotest.test_case
+            "write_raw_event warns on malformed JSON"
+            `Quick
+            test_write_raw_event_warns_on_malformed_json
+        ; Alcotest.test_case
+            "read_events warns on malformed line"
+            `Quick
+            test_read_events_warns_on_malformed_line ] ) ]
