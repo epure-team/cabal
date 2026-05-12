@@ -16,7 +16,9 @@ type cpu_sample = {total : int; idle : int}
 
 type t = {
   config : config;
-  mutable pids : int list;
+  pids : int list Atomic.t;
+      (** Tracked child PIDs. Lock-free updates via CAS so register/unregister
+          are safe across domains and Eio fibres. *)
   mutable current : stats;
   mutable mem_history : float list;
   mutable cpu_history : float list;
@@ -46,7 +48,7 @@ let default_config =
 let create config =
   {
     config;
-    pids = [];
+    pids = Atomic.make [];
     current = {memory_percent = 0.0; cpu_percent = 0.0};
     mem_history = [];
     cpu_history = [];
@@ -55,11 +57,19 @@ let create config =
     proc_available = None;
   }
 
-let register_pid t pid = t.pids <- pid :: t.pids
+(** [update_pids t f] swaps the pid list atomically with [f current].
+    Retries under contention. Pure-functional [f] is mandatory. *)
+let rec update_pids t f =
+  let old = Atomic.get t.pids in
+  let next = f old in
+  if Atomic.compare_and_set t.pids old next then () else update_pids t f
 
-let unregister_pid t pid = t.pids <- List.filter (fun p -> p <> pid) t.pids
+let register_pid t pid = update_pids t (fun xs -> pid :: xs)
 
-let registered_pids t = t.pids
+let unregister_pid t pid =
+  update_pids t (fun xs -> List.filter (fun p -> p <> pid) xs)
+
+let registered_pids t = Atomic.get t.pids
 
 let memory_pressure t =
   t.current.memory_percent >= float_of_int t.config.warn_percent
@@ -166,7 +176,7 @@ let try_kill pid signal =
 
 (** Kill all registered PIDs: SIGTERM first, wait, then SIGKILL survivors. *)
 let kill_registered_pids t ~clock =
-  let pids = t.pids in
+  let pids = Atomic.get t.pids in
   if pids <> [] then begin
     Diagnostics.error
       "Memory threshold exceeded (%.0f%% >= %d%%), killing %d child processes"
