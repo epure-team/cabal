@@ -221,7 +221,10 @@ val cleanup_mcp_config : env:Eio_unix.Stdenv.base -> string -> unit
     {violates}
     (none) *)
 val capture_version_output :
-  env:Eio_unix.Stdenv.base -> string list -> (string, string) result
+  env:Eio_unix.Stdenv.base ->
+  ?timeout_seconds:float ->
+  string list ->
+  (string, string) result
 
 (** [check_available ~env cmd] runs [cmd] (e.g., ["claude"; "--version"])
     and returns [true] if it exits successfully, [false] otherwise.
@@ -238,7 +241,8 @@ val capture_version_output :
 
     {violates}
     (none) *)
-val check_available : env:Eio_unix.Stdenv.base -> string list -> bool
+val check_available :
+  env:Eio_unix.Stdenv.base -> ?timeout_seconds:float -> string list -> bool
 
 (** {1 Task Execution Helper} *)
 

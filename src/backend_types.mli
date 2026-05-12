@@ -119,6 +119,36 @@ val default_managed_namespace : managed_namespace
     (none) *)
 val validate_managed_namespace : managed_namespace -> (unit, string) result
 
+(** Validated wrapper around a {!managed_namespace}.
+
+    [validated_namespace] is a private alias for [managed_namespace] — values
+    can only be produced by {!validate_namespace}, and existing record syntax
+    cannot construct one directly. Coerce back with [(v :> managed_namespace)]
+    for interop with code that still takes the unwrapped form.
+
+    Host applications that want to make namespace validation a type-level
+    obligation (rather than a runtime check at the boundary) should plumb
+    [validated_namespace] through their own artifact-creating code paths. *)
+type validated_namespace = private managed_namespace
+
+(** [validate_namespace ns] returns [Ok v] when [ns] passes
+    {!validate_managed_namespace}, else propagates the same [Error msg].
+
+    {pre}
+    (none)
+
+    {post}
+    The returned [validated_namespace] is observationally equal to [ns];
+    use the [:>] coercion to recover a [managed_namespace] view.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val validate_namespace :
+  managed_namespace -> (validated_namespace, string) result
+
 (** Host-provided association between a file extension and LSP language id. *)
 type lsp_file_association = {
   extension : string;  (** File extension, including the leading dot. *)

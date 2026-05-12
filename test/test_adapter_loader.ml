@@ -163,6 +163,78 @@ let test_malformed_yaml () =
   | Ok _ -> Alcotest.fail "expected Error for malformed YAML"
   | Error _ -> ()
 
+let test_top_level_not_a_mapping () =
+  let yaml = "- just\n- a\n- list\n" in
+  match Adapter_loader.load_string ~source:"test" yaml with
+  | Ok _ -> Alcotest.fail "expected Error when top level is a sequence"
+  | Error _ -> ()
+
+let test_env_field_not_a_mapping () =
+  (* env must be a mapping; supplying a scalar should produce an empty
+     mapping (no env), but the loader should still succeed for other fields. *)
+  let yaml =
+    {|
+name: bad-env
+display_name: Bad Env
+invocation_command: "tool -p -"
+template_set: default
+env: "not a mapping"
+|}
+  in
+  match Adapter_loader.load_string ~source:"test" yaml with
+  | Ok cfg ->
+    Alcotest.(check int)
+      "env scalar gives empty mapping"
+      0
+      (List.length cfg.env_mappings)
+  | Error msg -> Alcotest.failf "loader rejected scalar env: %s" msg
+
+(* ---- diagnostics: non-string env values must surface a warning ---------- *)
+
+let with_captured_diagnostics f =
+  let events = ref [] in
+  let handler ev = events := ev :: !events in
+  Diagnostics.set_handler handler ;
+  Fun.protect
+    ~finally:(fun () -> Diagnostics.reset_handler ())
+    (fun () ->
+      f () ;
+      List.rev !events)
+
+let warn_count =
+  List.fold_left
+    (fun acc ev ->
+      match ev with Diagnostics.Log (Warn, _) -> acc + 1 | _ -> acc)
+    0
+
+let test_non_string_env_values_emit_warning () =
+  let yaml =
+    {|
+name: tricky-env
+display_name: Tricky Env
+invocation_command: "tool -p -"
+template_set: default
+env:
+  GOOD: "ok"
+  BAD: 1234
+  ALSO_BAD: true
+|}
+  in
+  let events =
+    with_captured_diagnostics (fun () ->
+      match Adapter_loader.load_string ~source:"test" yaml with
+      | Ok cfg ->
+        Alcotest.(check int)
+          "only string-valued env mappings survive"
+          1
+          (List.length cfg.env_mappings)
+      | Error e -> Alcotest.failf "loader rejected mixed env: %s" e)
+  in
+  Alcotest.(check int)
+    "two non-string env values produce two warnings"
+    2
+    (warn_count events)
+
 (* --- load_dir tests -------------------------------------------------------- *)
 
 let test_load_dir_empty () =
@@ -218,7 +290,9 @@ template_set: default
 
 let test_project_local_override () =
   with_temp_dir (fun tmpdir ->
-      (* Create a project-local adapter that overrides "gemini" *)
+      (* Create a project-local adapter under id "gemini". The builtin
+         registry exposes "gemini-cli" — this test exercises arbitrary
+         user-named adapters being layered on top of the builtins. *)
       let adapters_dir =
         Filename.concat tmpdir (Filename.concat ".epure" "adapters")
       in
@@ -244,7 +318,9 @@ template_set: custom
 let test_builtin_adapters_registered () =
   Registry.clear () ;
   Adapter_loader.register_all () ;
-  let expected = ["claude-code"; "gemini"; "copilot"; "codex"; "opencode"] in
+  let expected =
+    ["claude-code"; "gemini-cli"; "copilot-cli"; "codex"; "opencode"]
+  in
   List.iter
     (fun name ->
       match Registry.get name with
@@ -310,6 +386,18 @@ let () =
             `Quick
             test_default_display_name;
           Alcotest.test_case "malformed YAML" `Quick test_malformed_yaml;
+          Alcotest.test_case
+            "top level not a mapping"
+            `Quick
+            test_top_level_not_a_mapping;
+          Alcotest.test_case
+            "env field not a mapping"
+            `Quick
+            test_env_field_not_a_mapping;
+          Alcotest.test_case
+            "non-string env values emit warnings"
+            `Quick
+            test_non_string_env_values_emit_warning;
         ] );
       ( "load_dir",
         [

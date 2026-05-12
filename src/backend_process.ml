@@ -32,37 +32,67 @@ let validate_task_namespace (spec : task_spec) =
    returns [Error _] only when the binary is not found or produces no output.
    This is the version-detection primitive: callers should never crash on
    a non-zero exit from a --version command. *)
-let capture_version_output ~env cmd =
+(** Default cap for version / availability probes. Five seconds is long
+    enough for cold-start CLIs (large Node binaries on slow disks) but short
+    enough that a hung backend cannot freeze registry initialisation for
+    the whole host. *)
+let default_probe_timeout_seconds = 5.0
+
+let capture_version_output ~env
+    ?(timeout_seconds = default_probe_timeout_seconds) cmd =
   let proc_mgr = Eio.Stdenv.process_mgr env in
+  let clock = Eio.Stdenv.clock env in
   let stdout_buf = Buffer.create 256 in
   let stderr_buf = Buffer.create 64 in
-  (try
-     Eio.Process.run
-       proc_mgr
-       ~stdout:(Eio.Flow.buffer_sink stdout_buf)
-       ~stderr:(Eio.Flow.buffer_sink stderr_buf)
-       cmd
-   with _ -> ()) ;
-  let out = Buffer.contents stdout_buf in
-  if out <> "" then Ok out
-  else
-    let err = Buffer.contents stderr_buf in
-    if err <> "" then Ok err
-    else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
+  let outcome =
+    Eio.Time.with_timeout clock timeout_seconds (fun () ->
+        (try
+           Eio.Process.run
+             proc_mgr
+             ~stdout:(Eio.Flow.buffer_sink stdout_buf)
+             ~stderr:(Eio.Flow.buffer_sink stderr_buf)
+             cmd
+         with _ -> ()) ;
+        Ok ())
+  in
+  match outcome with
+  | Error `Timeout ->
+    Error
+      (Printf.sprintf
+         "timeout after %.1fs running %s"
+         timeout_seconds
+         (String.concat " " cmd))
+  | Ok () ->
+    let out = Buffer.contents stdout_buf in
+    if out <> "" then Ok out
+    else
+      let err = Buffer.contents stderr_buf in
+      if err <> "" then Ok err
+      else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
 
-(* Check if a command is available by running it *)
-let check_available ~env cmd =
+(* Check if a command is available by running it.
+   Distinguishes three outcomes: clean exit, process error (missing binary
+   or non-zero exit raising Eio.Io), and timeout. *)
+let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
+    =
   let proc_mgr = Eio.Stdenv.process_mgr env in
-  try
-    let stdout_buf = Buffer.create 64 in
-    let stderr_buf = Buffer.create 64 in
-    Eio.Process.run
-      proc_mgr
-      ~stdout:(Eio.Flow.buffer_sink stdout_buf)
-      ~stderr:(Eio.Flow.buffer_sink stderr_buf)
-      cmd ;
-    true
-  with Eio.Io _ -> false
+  let clock = Eio.Stdenv.clock env in
+  let stdout_buf = Buffer.create 64 in
+  let stderr_buf = Buffer.create 64 in
+  let outcome =
+    Eio.Time.with_timeout clock timeout_seconds (fun () ->
+        try
+          Eio.Process.run
+            proc_mgr
+            ~stdout:(Eio.Flow.buffer_sink stdout_buf)
+            ~stderr:(Eio.Flow.buffer_sink stderr_buf)
+            cmd ;
+          Ok true
+        with Eio.Io _ -> Ok false)
+  in
+  match outcome with
+  | Error `Timeout -> false
+  | Ok ok -> ok
 
 (* Write MCP server configuration to a JSON file *)
 let write_mcp_config ~env ~path configs =

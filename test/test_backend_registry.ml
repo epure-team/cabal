@@ -248,6 +248,60 @@ let test_unknown_backend_no_file_reading () =
     false
     (Backend_registry.supports_file_reading "unknown-backend")
 
+(** {1 AC5 — Static-vs-runtime consistency property} *)
+
+(** For every static descriptor in [Backend_registry], the runtime registry
+    populated by [Adapter_loader.register_all] must hold a backend whose
+    [Agentic_backend.id] matches and whose [name] is non-empty. This catches
+    drift between the static facts and the actually-registered modules
+    (e.g., a backend deleted in code but left in the registry table). *)
+let test_runtime_modules_match_descriptors () =
+  Registry.clear () ;
+  Adapter_loader.register_all () ;
+  let descriptors = Backend_registry.all () in
+  Alcotest.(check bool)
+    "at least one descriptor exists"
+    true
+    (descriptors <> []) ;
+  List.iter
+    (fun (d : Backend_registry.descriptor) ->
+      match Registry.get d.id with
+      | None ->
+        Alcotest.failf
+          "registered backend module missing for descriptor id=%s"
+          d.id
+      | Some backend ->
+        let actual_id = Agentic_backend.id backend in
+        let actual_name = Agentic_backend.name backend in
+        Alcotest.(check string)
+          (Printf.sprintf "%s: runtime id matches descriptor" d.id)
+          d.id
+          actual_id ;
+        Alcotest.(check bool)
+          (Printf.sprintf "%s: runtime name is non-empty" d.id)
+          true
+          (String.length (String.trim actual_name) > 0))
+    descriptors ;
+  Registry.clear ()
+
+(** Symmetric check: every backend module the runtime registry knows about
+    must correspond to a static descriptor. Catches a backend registered in
+    code but missing from the static table. *)
+let test_runtime_ids_have_descriptors () =
+  Registry.clear () ;
+  Adapter_loader.register_all () ;
+  let runtime_ids = Registry.list_ids () in
+  List.iter
+    (fun id ->
+      match Backend_registry.find id with
+      | None ->
+        Alcotest.failf
+          "runtime backend id=%s has no static descriptor"
+          id
+      | Some _ -> ())
+    runtime_ids ;
+  Registry.clear ()
+
 (** {1 Suite} *)
 
 let () =
@@ -334,5 +388,16 @@ let () =
             "unknown backend: no file reading"
             `Quick
             test_unknown_backend_no_file_reading;
+        ] );
+      ( "AC5 static/runtime consistency",
+        [
+          Alcotest.test_case
+            "every descriptor has a runtime backend module"
+            `Quick
+            test_runtime_modules_match_descriptors;
+          Alcotest.test_case
+            "every runtime backend has a descriptor"
+            `Quick
+            test_runtime_ids_have_descriptors;
         ] );
     ]

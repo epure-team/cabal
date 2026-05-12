@@ -46,7 +46,7 @@ let append_line ~fs ~session_logs_dir ~session_id line =
   let file_path = Eio.Path.(dir_path / (session_id ^ ".ndjson")) in
   Eio.Path.with_open_out
     ~append:true
-    ~create:(`If_missing 0o640)
+    ~create:(`If_missing 0o600)
     file_path
     (fun flow -> Eio.Flow.copy_string (line ^ "\n") flow)
 
@@ -194,7 +194,14 @@ let write_raw_event ~fs ~session_logs_dir ~session_id ~backend ~turn_number line
         ~session_logs_dir
         ~session_id
         (Yojson.Safe.to_string envelope)
-  | exception _ -> ()
+  | exception exn ->
+      Diagnostics.warn
+        "[session_event_log] dropping unparseable raw event (session=%s \
+         backend=%s turn=%d): %s"
+        session_id
+        backend
+        turn_number
+        (Printexc.to_string exn)
 
 (* -------------------------------------------------------------------------- *)
 (* Read API                                                                    *)
@@ -244,6 +251,12 @@ let read_events ~fs ~session_logs_dir ~session_id () =
           (fun line ->
             match Yojson.Safe.from_string line with
             | json -> Some json
-            | exception _ -> None)
+            | exception exn ->
+              Diagnostics.warn
+                "[session_event_log] dropping unparseable line in session=%s: \
+                 %s"
+                session_id
+                (Printexc.to_string exn) ;
+              None)
           lines
     | exception Eio.Io _ -> []
