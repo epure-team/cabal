@@ -24,20 +24,13 @@ let read_project_file ~env ~project_dir rel_path =
   with e ->
     Error (Printf.sprintf "could not read %s: %s" path (Printexc.to_string e))
 
-type json_string_map = (string * string) list
+(* json_string_map_{to,of}_yojson live in Backend_json_helpers; re-export
+   the type alias so [@@deriving yojson] resolves the field codec by name. *)
+type json_string_map = Backend_json_helpers.json_string_map
 
-let json_string_map_to_yojson fields =
-  `Assoc (List.map (fun (key, value) -> (key, `String value)) fields)
+let json_string_map_to_yojson = Backend_json_helpers.json_string_map_to_yojson
 
-let json_string_map_of_yojson = function
-  | `Assoc fields ->
-      let rec loop acc = function
-        | [] -> Ok (List.rev acc)
-        | (key, `String value) :: rest -> loop ((key, value) :: acc) rest
-        | (key, _) :: _ -> Error (Printf.sprintf "expected string for %s" key)
-      in
-      loop [] fields
-  | _ -> Error "expected JSON object"
+let json_string_map_of_yojson = Backend_json_helpers.json_string_map_of_yojson
 
 type mcp_server_settings = {
   type_ : string; [@key "type"]

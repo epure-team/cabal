@@ -73,20 +73,12 @@ let check_project_config ~sw ~env ~project_dir ~setup_result =
            "OpenCode native config validation could not run: %s"
            (Printexc.to_string e))
 
-type json_string_map = (string * string) list
+(* Shared json_string_map encoding lives in Backend_json_helpers. *)
+type json_string_map = Backend_json_helpers.json_string_map
 
-let json_string_map_to_yojson fields =
-  `Assoc (List.map (fun (key, value) -> (key, `String value)) fields)
+let json_string_map_to_yojson = Backend_json_helpers.json_string_map_to_yojson
 
-let json_string_map_of_yojson = function
-  | `Assoc fields ->
-      let rec loop acc = function
-        | [] -> Ok (List.rev acc)
-        | (key, `String value) :: rest -> loop ((key, value) :: acc) rest
-        | (key, _) :: _ -> Error (Printf.sprintf "expected string for %s" key)
-      in
-      loop [] fields
-  | _ -> Error "expected JSON object"
+let json_string_map_of_yojson = Backend_json_helpers.json_string_map_of_yojson
 
 type local_mcp_server_settings = {
   type_ : string; [@key "type"]
