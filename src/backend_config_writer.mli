@@ -148,7 +148,16 @@ val managed_body_hash :
   string
 
 (** [write_artifact ~project_dir ~force artifact] writes [artifact] using the
-    generic ownership policy. *)
+    generic ownership policy.
+
+    {b Path-traversal contract:} [artifact.project_relative_path] is appended
+    to [project_dir] verbatim. Cabal does not normalise [..] segments. The
+    caller (host application) is responsible for ensuring the path stays
+    within [project_dir]; passing a value containing [..] or an absolute
+    path will silently write outside the project tree. Use
+    {!Backend_types.validate_namespace} for the [managed_namespace] half of
+    the contract — that side is enforced here and returns
+    [Invalid_managed_namespace _]. *)
 val write_artifact :
   project_dir:string -> force:bool -> artifact -> write_result
 

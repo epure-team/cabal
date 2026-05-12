@@ -7,15 +7,26 @@
 
 (** Per-session append-only NDJSON event log for live observability.
 
-    All write functions are best-effort: they swallow exceptions so a log
-    failure never blocks an agentic turn or build pipeline.
+    All write functions are best-effort: they swallow IO exceptions so a
+    log failure never blocks an agentic turn or build pipeline. Parse
+    failures inside {!write_raw_event} and {!read_events} are no longer
+    silent — they emit [Diagnostics.Log (Warn, _)] so observers know
+    events were dropped.
 
-    All I/O uses [Eio.Path] (no blocking stdlib calls).
+    All I/O uses [Eio.Path] (no blocking stdlib calls). New NDJSON files
+    are created with mode [0o600].
 
     [session_id] values are validated before any file access: only
-    [[a-zA-Z0-9_-]] characters are allowed.  Any value failing this check is
-    silently ignored on write and causes an empty result on read, preventing
-    path traversal. *)
+    [[a-zA-Z0-9_-]] characters are allowed.  Any value failing this check
+    is silently ignored on write and causes an empty result on read,
+    preventing path traversal.
+
+    {b Redaction contract for hosts.} Cabal redacts events before writing
+    them. Hosts that capture raw backend stdout/stderr and want to log it
+    via a different sink (custom store, structured logger) must route the
+    bytes through {!Backend_event_redaction.redact_event} first, otherwise
+    they bypass Cabal's secret-stripping. The [0o600] mode is
+    defence-in-depth, not a substitute for redaction. *)
 
 (** [is_safe_session_id s] returns [true] iff [s] is a safe, non-empty
     filename component ([a-zA-Z0-9_-] characters only, no path separators). *)
