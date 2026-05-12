@@ -1,0 +1,5 @@
+name: gemini
+display_name: Gemini CLI
+invocation_command: "gemini --output-format json -y -p -"
+template_set: default
+timeout_seconds: 300.0
