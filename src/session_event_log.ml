@@ -46,7 +46,7 @@ let append_line ~fs ~session_logs_dir ~session_id line =
   let file_path = Eio.Path.(dir_path / (session_id ^ ".ndjson")) in
   Eio.Path.with_open_out
     ~append:true
-    ~create:(`If_missing 0o640)
+    ~create:(`If_missing 0o600)
     file_path
     (fun flow -> Eio.Flow.copy_string (line ^ "\n") flow)
 
