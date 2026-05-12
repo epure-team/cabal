@@ -69,6 +69,11 @@
  (modules test_session_trimmer))
 
 (test
+ (name test_session_event_log)
+ (libraries cabal alcotest eio eio_main unix)
+ (modules test_session_event_log))
+
+(test
  (name test_resource_guardian)
  (libraries cabal alcotest)
  (modules test_resource_guardian))
