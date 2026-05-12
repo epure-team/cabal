@@ -1,0 +1,16 @@
+# Cabal
+
+Cabal is the **Caml Agent Backend Abstraction Library**.
+
+It provides backend-agnostic agent execution primitives, project configuration
+generation, backend registry metadata, and session log utilities for OCaml
+projects that need to drive agentic command-line backends such as Claude Code,
+Codex, Gemini CLI, Copilot CLI, and OpenCode.
+
+This repository treats `libs/cabal` as the monorepo-primary source. It is
+intended to be mirrored or subtree-split to `epure-team/cabal` for standalone
+distribution as the `cabal` opam package and public OCaml library.
+
+The library remains host-agnostic: callers choose the managed namespace used for
+generated files. The default namespace currently preserves historical Epure
+runtime artifact ownership and paths for compatibility.

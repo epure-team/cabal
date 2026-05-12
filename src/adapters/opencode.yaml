@@ -1,0 +1,5 @@
+name: opencode
+display_name: OpenCode
+invocation_command: "opencode run --message -"
+template_set: default
+timeout_seconds: 300.0

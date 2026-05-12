@@ -1,0 +1,5 @@
+name: codex
+display_name: OpenAI Codex
+invocation_command: "codex -q --json -p -"
+template_set: default
+timeout_seconds: 300.0

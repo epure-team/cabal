@@ -1,0 +1,5 @@
+name: copilot
+display_name: GitHub Copilot
+invocation_command: "copilot -p - --yolo -s --no-ask-user"
+template_set: default
+timeout_seconds: 300.0
