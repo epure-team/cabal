@@ -90,6 +90,23 @@ val create : config -> t
     (none) *)
 val register_pid : t -> int -> unit
 
+(** [registered_pids t] returns the currently tracked PIDs in registration
+    order (most recent first). Diagnostic accessor; safe under concurrent
+    register/unregister.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns a snapshot of the tracked PID set.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val registered_pids : t -> int list
+
 (** [unregister_pid t pid] stops tracking a child PID.
 
     {pre}

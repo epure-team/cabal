@@ -59,6 +59,8 @@ let register_pid t pid = t.pids <- pid :: t.pids
 
 let unregister_pid t pid = t.pids <- List.filter (fun p -> p <> pid) t.pids
 
+let registered_pids t = t.pids
+
 let memory_pressure t =
   t.current.memory_percent >= float_of_int t.config.warn_percent
 
