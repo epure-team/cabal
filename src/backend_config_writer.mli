@@ -57,8 +57,56 @@ type setup_result = {
 (** Attribution text used by backend-specific providers in managed headers. *)
 val attribution_text : string
 
+(** [attribution_text_for namespace] returns the namespace-specific generated
+    file attribution line used in managed headers.
+
+    {pre}
+    [namespace.display_name] is non-empty.
+
+    {post}
+    Returns a deterministic attribution line containing [namespace.display_name].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val attribution_text_for : Backend_types.managed_namespace -> string
+
 (** Managed marker used by backend-specific providers in managed headers. *)
 val managed_marker : string
+
+(** [managed_marker_for namespace] returns the namespace-specific managed
+    marker, such as ["epure-managed"] for the default namespace.
+
+    {pre}
+    [namespace.id] has already passed managed namespace validation.
+
+    {post}
+    Returns [namespace.id ^ "-managed"].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val managed_marker_for : Backend_types.managed_namespace -> string
+
+(** [hash_marker_for namespace] returns the namespace-specific managed hash
+    marker, such as ["epure-hash"] for the default namespace.
+
+    {pre}
+    [namespace.id] has already passed managed namespace validation.
+
+    {post}
+    Returns [namespace.id ^ "-hash"].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val hash_marker_for : Backend_types.managed_namespace -> string
 
 (** Supported comment syntaxes for generic managed headers. *)
 type comment_style = Slash | Hash | Html
