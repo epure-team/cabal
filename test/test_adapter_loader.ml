@@ -290,7 +290,9 @@ template_set: default
 
 let test_project_local_override () =
   with_temp_dir (fun tmpdir ->
-      (* Create a project-local adapter that overrides "gemini" *)
+      (* Create a project-local adapter under id "gemini". The builtin
+         registry exposes "gemini-cli" — this test exercises arbitrary
+         user-named adapters being layered on top of the builtins. *)
       let adapters_dir =
         Filename.concat tmpdir (Filename.concat ".epure" "adapters")
       in
@@ -316,7 +318,9 @@ template_set: custom
 let test_builtin_adapters_registered () =
   Registry.clear () ;
   Adapter_loader.register_all () ;
-  let expected = ["claude-code"; "gemini"; "copilot"; "codex"; "opencode"] in
+  let expected =
+    ["claude-code"; "gemini-cli"; "copilot-cli"; "codex"; "opencode"]
+  in
   List.iter
     (fun name ->
       match Registry.get name with
