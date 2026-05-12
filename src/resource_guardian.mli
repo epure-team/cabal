@@ -124,7 +124,7 @@ val unregister_pid : t -> int -> unit
 
     {violates}
     (none) *)
-val run : t -> clock:_ Eio.Time.clock -> unit
+val run : t -> clock:Eio.Time.clock -> unit
 
 (** [memory_pressure t] returns [true] if current memory usage exceeds
     [warn_percent]. Can be checked before spawning new processes.

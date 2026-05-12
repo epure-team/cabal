@@ -11,9 +11,9 @@
   (ocaml (>= 5.3.0))
   (dune (>= 3.13))
   yojson
-  eio
-  eio_posix
-  (eio_main :with-test)
+  (eio (and (>= 0.11) (< 1.0)))
+  (eio_posix (and (>= 0.11) (< 1.0)))
+  (eio_main (and :with-test (>= 0.11) (< 1.0)))
   yaml
   ppx_deriving
   ppx_deriving_yojson
