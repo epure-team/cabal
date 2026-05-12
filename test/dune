@@ -140,5 +140,5 @@
 
 (test
  (name test_demo_517)
- (libraries cabal alcotest eio eio_main eio_posix)
+ (libraries cabal alcotest eio eio_main)
  (modules test_demo_517))
