@@ -25,4 +25,7 @@
  (authors "Epure Team")
  (maintainers "Epure Team")
  (homepage "https://github.com/epure-team/cabal")
- (bug_reports "https://github.com/epure-team/cabal/issues"))
+ (source (github epure-team/cabal))
+ (bug_reports "https://github.com/epure-team/cabal/issues")
+ (tags ("agentic" "backend" "abstraction" "cli" "llm"))
+ (documentation "https://epure-team.github.io/cabal/"))
