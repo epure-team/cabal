@@ -82,6 +82,72 @@ Cabal does not embed their product logic.
   safety utilities.
 - `test/` — Cabal's standalone test suite.
 
+## Using Cabal from a host application
+
+Cabal is intentionally minimal — host applications wire backends into the
+runtime registry, drive `run_task`, and own everything around it (storage,
+prompt policy, retry, UI).
+
+```ocaml
+open Cabal
+
+let () =
+  (* 1. Register every built-in backend adapter (YAML + hand-written). *)
+  Adapter_loader.register_all () ;
+
+  (* 2. Pick a backend by canonical id — the same id used in
+        Backend_registry and Backend_config_gen. *)
+  let backend =
+    match Registry.get "claude-code" with
+    | Some b -> b
+    | None -> failwith "claude-code backend is not registered"
+  in
+
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  (* 3. Construct a task. make_task_spec validates the managed namespace
+        for you; for type-level enforcement, use Backend_types.validate_namespace. *)
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"Summarise the README in one sentence."
+      ~instructions:""
+      ~working_dir:(Sys.getcwd ())
+      ~timeout:60.0
+      ~expected_outputs:[Backend_types.Files_changed]
+      ()
+  in
+
+  (* 4. Run the task. Backends never raise — they always return a
+        task_result with a status (Success / Failed _ / Timeout). *)
+  let result = Agentic_backend.run_task backend ~sw ~env spec in
+  Printf.printf "status=%s files_changed=%d\n"
+    (Backend_types.show_result_status result.status)
+    (List.length result.files_changed)
+```
+
+### Redaction contract for hosts logging backend output
+
+Cabal's `Session_event_log` redacts events **before** writing them. Hosts
+that capture raw stdout/stderr from a backend process and log it directly
+**must** route the bytes through `Backend_event_redaction.redact_event`
+(per-event JSON) or `redact_error_message` (free-form strings) first, or
+they bypass Cabal's secret-stripping. The session NDJSON file is created
+with mode `0o600` to limit blast radius if redaction is bypassed.
+
+### Adapter trust tiers
+
+`Adapter_loader.register_all` loads YAML adapters in three layers, lowest
+priority first:
+
+1. Built-in YAMLs compiled into the library (`src/adapters/*.yaml`).
+2. User-global: `~/.epure/adapters/*.yaml`.
+3. Project-local: `.epure/adapters/*.yaml` (only when `?project_dir` is
+   passed).
+
+Project-local adapters override user-global, which override built-ins by
+id. Hosts that don't want to honour user-supplied adapters should call
+`register_all` without `?project_dir` and validate `$HOME` themselves.
+
 ## Build and test
 
 From the standalone Cabal repository:
