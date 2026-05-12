@@ -13,11 +13,13 @@
   yojson
   eio
   eio_posix
+  (eio_main :with-test)
   yaml
   ppx_deriving
   ppx_deriving_yojson
   ppx_blob
   (alcotest :with-test)
+  (conf-git :with-test)
   (bisect_ppx :with-test))
  (license MIT)
  (authors "Epure Team")
