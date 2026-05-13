@@ -7,10 +7,13 @@
 
 (** Per-session append-only NDJSON event log for live observability.
 
-    Each session gets a file at [.epure/agent-sessions/<session_uuid>.ndjson].
+    The session NDJSON file is created under whichever
+    [session_logs_dir] the host application passes (by convention, hosts
+    locate this under their managed namespace's config directory, e.g.
+    [.cabal/agent-sessions/<session_uuid>.ndjson] under the default namespace).
     All writes are best-effort: failures are swallowed so they never block a
-    build or agentic turn.  The log is independent of the DB-backed replay
-    mechanism ([agentic_turns] / [reconstruct_agentic_context]).
+    build or agentic turn.  The log is independent of any host-side
+    DB-backed replay mechanism.
 
     I/O uses [Eio.Path] throughout (no blocking stdlib calls). *)
 
@@ -51,7 +54,7 @@ let append_line ~fs ~session_logs_dir ~session_id line =
     (fun flow -> Eio.Flow.copy_string (line ^ "\n") flow)
 
 (** Best-effort wrapper: swallows all exceptions so log failures never
-    propagate to the caller.  Logs warnings via epure diagnostics. *)
+    propagate to the caller.  Logs warnings via {!Diagnostics}. *)
 let try_append ~fs ~session_logs_dir ~session_id line =
   if not (is_safe_session_id session_id) then ()
   else

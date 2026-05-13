@@ -183,8 +183,8 @@ let project_config_artifacts ~managed_namespace ~mcp_servers:_ ~lsp_servers =
   ]
 
 (* OpenCode reads MCP config from opencode.json in the project directory,
-   not via CLI flags. This function ensures the epure MCP server entry
-   is present and up-to-date in opencode.json before each run. *)
+   not via CLI flags. This function ensures the host-supplied MCP server
+   entry is present and up-to-date in opencode.json before each run. *)
 let strip_jsonc_comments content =
   let len = String.length content in
   let buf = Buffer.create len in
