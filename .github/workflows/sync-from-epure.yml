@@ -1,0 +1,135 @@
+name: Sync from Épure
+
+on:
+  repository_dispatch:
+    types: [sync-cabal]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-epure-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync libs/cabal from Épure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate Épure source payload
+        id: source
+        env:
+          DISPATCH_SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_SOURCE_REPOSITORY: ${{ github.event.client_payload.source_repository }}
+        run: |
+          set -euo pipefail
+          expected_repository="epure-team/epure"
+          expected_ref="refs/heads/main"
+
+          if [ -z "${DISPATCH_SOURCE_REPOSITORY}" ]; then
+            echo "Missing source_repository in repository_dispatch payload" >&2
+            exit 1
+          fi
+          if [ -z "${DISPATCH_SOURCE_REF}" ]; then
+            echo "Missing source_ref in repository_dispatch payload" >&2
+            exit 1
+          fi
+          if [ -z "${DISPATCH_SOURCE_SHA}" ]; then
+            echo "Missing source_sha in repository_dispatch payload" >&2
+            exit 1
+          fi
+
+          if ! [[ "${DISPATCH_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Invalid source_sha '${DISPATCH_SOURCE_SHA}'. Expected a 40-character hexadecimal commit SHA." >&2
+            exit 1
+          fi
+
+          if [ "${DISPATCH_SOURCE_REPOSITORY}" != "${expected_repository}" ]; then
+            echo "Unexpected source_repository '${DISPATCH_SOURCE_REPOSITORY}', expected '${expected_repository}'" >&2
+            exit 1
+          fi
+          if [ "${DISPATCH_SOURCE_REF}" != "${expected_ref}" ]; then
+            echo "Unexpected source_ref '${DISPATCH_SOURCE_REF}', expected '${expected_ref}'" >&2
+            exit 1
+          fi
+
+          echo "Using Épure source ${DISPATCH_SOURCE_SHA} from ${DISPATCH_SOURCE_REPOSITORY} @ ${DISPATCH_SOURCE_REF}"
+          echo "sha=${DISPATCH_SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Épure read token
+        env:
+          CABAL_EPURE_READ_TOKEN: ${{ secrets.CABAL_EPURE_READ_TOKEN }}
+        run: |
+          if [ -z "${CABAL_EPURE_READ_TOKEN}" ]; then
+            echo "CABAL_EPURE_READ_TOKEN is required to checkout epure-team/epure" >&2
+            exit 1
+          fi
+
+      - name: Checkout Épure source
+        uses: actions/checkout@v4
+        with:
+          repository: epure-team/epure
+          ref: ${{ steps.source.outputs.sha }}
+          path: epure
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.CABAL_EPURE_READ_TOKEN }}
+
+      - name: Verify checked-out Épure revision
+        env:
+          CABAL_EPURE_READ_TOKEN: ${{ secrets.CABAL_EPURE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          source_sha="${{ steps.source.outputs.sha }}"
+
+          if [ -z "${CABAL_EPURE_READ_TOKEN}" ]; then
+            echo "CABAL_EPURE_READ_TOKEN is required to refresh Épure main" >&2
+            exit 1
+          fi
+
+          git -C epure \
+            -c http.https://github.com/.extraheader="AUTHORIZATION: bearer ${CABAL_EPURE_READ_TOKEN}" \
+            fetch origin main
+
+          if resolved_sha=$(git -C epure rev-parse --verify FETCH_HEAD 2>/dev/null); then
+            :
+          elif resolved_sha=$(git -C epure rev-parse --verify origin/main 2>/dev/null); then
+            :
+          else
+            echo "Unable to resolve latest main revision in the checked-out Épure clone" >&2
+            exit 1
+          fi
+
+          if [ "${resolved_sha}" != "${source_sha}" ]; then
+            echo "Épure revision mismatch: payload sha ${source_sha} does not match resolved Épure main SHA ${resolved_sha}" >&2
+            exit 1
+          fi
+
+      - name: Split Cabal subtree
+        id: split
+        working-directory: epure
+        run: |
+          split_sha=$(git subtree split --prefix=libs/cabal HEAD)
+          if [ -z "${split_sha}" ]; then
+            echo "git subtree split produced an empty SHA" >&2
+            exit 1
+          fi
+
+          echo "Split SHA ${split_sha}"
+          echo "sha=${split_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Push split commit to Cabal main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPLIT_SHA: ${{ steps.split.outputs.sha }}
+        run: |
+          if [ -z "${GITHUB_TOKEN}" ]; then
+            echo "GITHUB_TOKEN is required to push epure-team/cabal:main" >&2
+            exit 1
+          fi
+
+          git -C epure push \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/epure-team/cabal.git" \
+            "${SPLIT_SHA}:refs/heads/main"

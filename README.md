@@ -118,8 +118,28 @@ runtime artifact ownership and paths for compatibility.
 ## Sync model
 
 The current source of truth is `libs/cabal` in the Épure monorepo. Épure CI
-subtree-splits that directory and direct-pushes the result to
-`epure-team/cabal:main`, where the standalone Cabal CI runs against the mirror.
+dispatches Cabal's mirror-sync workflow on every push to Épure `main`.
+The Cabal workflow is only triggered by Épure's `repository_dispatch` event and
+uses a payload constrained to `source_repository=epure-team/epure`,
+`source_ref=refs/heads/main`, and the full 40-character `source_sha`. It checks
+out that exact SHA, verifies it still matches `origin/main`, subtree-splits
+`libs/cabal`, and pushes the result to `epure-team/cabal:main` with Cabal's
+repository `GITHUB_TOKEN`, where the standalone Cabal CI runs against the mirror.
+When `libs/cabal` is unchanged, the subtree split/push step is a no-op.
+
+`epure-team/cabal:main` should remain protected with PRs required for humans.
+The branch ruleset is expected to allow only the GitHub Actions app automation
+path to bypass that rule for mirror updates; Épure does not need branch-write
+bypass credentials.
+
+Required secrets:
+
+- Épure repository: `CABAL_MIRROR_DISPATCH_TOKEN`, with permission to dispatch
+  `repository_dispatch` events on `epure-team/cabal`. For a fine-grained token,
+  `contents: write` on the Cabal repo is the common minimum; no branch-protection
+  bypass is required.
+- Cabal repository: `CABAL_EPURE_READ_TOKEN`, with read access to the private
+  `epure-team/epure` repository.
 
 Normal contribution flow for now:
 

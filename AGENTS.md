@@ -22,6 +22,13 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Keep backend adapters data-driven where possible. Prefer extending
   `src/adapters/*.yaml` and shared loader/registry code over duplicating
   per-backend orchestration.
+- Cabal mirror sync is dispatch-based: Épure dispatches the standalone Cabal
+  workflow on every push to `main`, and Cabal's GitHub Actions run performs the
+  protected `main` update
+  from a `libs/cabal` subtree split. Do not reintroduce deploy-key or direct
+  branch-write pushes from Épure.
+- Cabal sync workflows should not expose manual `workflow_dispatch` ref inputs;
+  mirror updates must remain repository-dispatch-driven from Épure `main` only.
 - If editing directly in `epure-team/cabal`, ensure accepted changes are
   backported to `epure/libs/cabal`; the normal source of truth is currently the
   Épure monorepo subtree.
