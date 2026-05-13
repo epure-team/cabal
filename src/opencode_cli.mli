@@ -74,6 +74,23 @@ val project_config_artifacts :
 *)
 val parse_json_events : string -> string * Backend_types.cost option
 
+(** [parse_stdout_text stdout] extracts the agent response text from
+    OpenCode's structured JSON event output, returning the empty string when
+    no response could be extracted.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns the response text reconstructed from OpenCode's JSON events.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val parse_stdout_text : string -> string
+
 (** [build_command ~mcp_config_path spec] constructs the OpenCode CLI command
     and stdin content.  OpenCode 1.14.20 has no native read-only sandbox;
     [spec.read_only] is acknowledged as documented limitation and the baseline

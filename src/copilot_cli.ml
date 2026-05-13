@@ -217,6 +217,29 @@ let project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers =
     };
   ]
 
+(* Extract the agent response text from Copilot's stdout.
+   Copilot does not support a structured (JSON) output mode; its stdout is
+   already the assistant's plain-text reply.  We therefore return the captured
+   stdout verbatim (stripped of trailing whitespace) so hosts get the same
+   shape they get from JSON-emitting backends via [agent_text].
+
+   TODO: revisit if [copilot] gains a structured output mode that requires
+   parsing event envelopes. *)
+let parse_stdout_text stdout =
+  let trim_trailing s =
+    let len = String.length s in
+    let rec last i =
+      if i < 0 then -1
+      else
+        match s.[i] with
+        | ' ' | '\t' | '\n' | '\r' -> last (i - 1)
+        | _ -> i
+    in
+    let stop = last (len - 1) in
+    if stop = len - 1 then s else String.sub s 0 (stop + 1)
+  in
+  trim_trailing stdout
+
 (* Build the copilot command for non-interactive execution.
    Copilot uses -p <prompt> for prompt, --yolo for auto-approval,
    -s for silent (no stats), and --no-ask-user for full autonomy.
@@ -479,4 +502,5 @@ let run_task ~sw ~env ?on_raw_line:_ spec =
             ~env
             ~spec:runtime_spec
             ~build_command
+            ~parse_stdout:parse_stdout_text
             ())

@@ -190,4 +190,8 @@ let run_task ~sw:_ ~env ?on_raw_line:_ (spec : Backend_types.task_spec) =
                 | `Success -> Backend_types.Success
                 | `Failed -> Backend_types.Failed "mock-agent: scripted failure"
               in
-              Backend_types.make_task_result ~status ~stdout:rule.stdout ()))
+              Backend_types.make_task_result
+                ~status
+                ~stdout:rule.stdout
+                ~agent_text:rule.stdout
+                ()))

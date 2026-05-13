@@ -70,6 +70,27 @@ val project_config_artifacts :
 *)
 val parse_jsonl_output : string -> string * Backend_types.cost option
 
+(** [parse_stdout_text stdout] extracts the final [agent_message] text from
+    Codex's JSONL stdout.  Codex emits one JSON event per line; the final
+    assistant reply is the latest [{"type":"item.completed","item":{"type":
+    "agent_message","text":"..."}}] event.  Returns the raw [stdout] when no
+    agent message could be extracted (e.g., malformed output or non-JSON
+    payloads).
+
+    {pre}
+    (none)
+
+    {post}
+    Returns the [text] field of the last [agent_message] item, or the raw
+    [stdout] if no such item is found.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val parse_stdout_text : string -> string
+
 (** [build_command ~mcp_config_path spec] constructs the Codex CLI command and
     stdin content for a task invocation.  When [spec.read_only] is [true],
     passes [-s read-only] (OS-level sandbox); otherwise [--full-auto].

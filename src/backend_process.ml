@@ -430,10 +430,10 @@ let run_task_with ~sw ~env ~spec ~build_command ?parse_cost ?parse_stdout
           let files_changed =
             get_git_diff ~sw ~env ~working_dir:spec.working_dir
           in
-          let stdout =
+          let agent_text =
             match parse_stdout with
-            | Some f -> f result.stdout
-            | None -> result.stdout
+            | Some f -> ( try f result.stdout with _ -> "")
+            | None -> ""
           in
           let session_id =
             match parse_session_id with
@@ -446,7 +446,8 @@ let run_task_with ~sw ~env ~spec ~build_command ?parse_cost ?parse_stdout
             report = None;
             elapsed = result.elapsed;
             cost = result.cost;
-            stdout;
+            stdout = result.stdout;
+            agent_text;
             stderr = result.stderr;
             exit_code = result.exit_code;
             session_id;

@@ -258,7 +258,18 @@ type task_result = {
       (** Structured report if submitted via MCP. *)
   elapsed : duration;  (** Wall-clock time for the invocation. *)
   cost : cost option;  (** Cost information if available. *)
-  stdout : string;  (** Captured stdout from the client. *)
+  stdout : string;
+      (** Raw captured stdout from the client process, byte-for-byte as
+          produced by the underlying CLI (JSON envelope, JSONL stream, plain
+          text, etc.).  Useful for debugging and backend-specific
+          post-processing.  Host applications that just want the agent's
+          response text should prefer {!agent_text}. *)
+  agent_text : string; [@default ""]
+      (** Normalised final agent message text, extracted by the adapter from
+          its CLI's output format.  Empty string when no agent message was
+          produced or extraction failed.  This is the host-neutral surface for
+          the agent's response: hosts read this without having to know which
+          agentic CLI ran or how to parse its stdout. *)
   stderr : string;  (** Captured stderr from the client. *)
   exit_code : int;  (** Exit code from the client process. *)
   session_id : string option; [@default None]
@@ -412,6 +423,7 @@ val make_task_result :
   ?elapsed:duration ->
   ?cost:cost ->
   ?stdout:string ->
+  ?agent_text:string ->
   ?stderr:string ->
   ?exit_code:int ->
   ?session_id:string ->

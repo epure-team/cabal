@@ -96,6 +96,25 @@ val parse_gemini_json_output :
 val parse_gemini_stream_json :
   string -> string * Backend_types.cost option * string option
 
+(** [parse_stdout_text stdout] extracts the agent response text from
+    Gemini's stream-json NDJSON stdout.  It prefers the last [response] or
+    [result] field, falling back to concatenated [text] chunks, and finally
+    to the raw [stdout] when nothing could be extracted.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns the assembled response text, or the raw [stdout] when extraction
+    yields the empty string.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val parse_stdout_text : string -> string
+
 (** [build_command ~mcp_config_path spec] constructs the Gemini CLI command and
     stdin content.  Gemini CLI 0.38.2 has no native read-only sandbox;
     [spec.read_only] is acknowledged as documented limitation and the baseline

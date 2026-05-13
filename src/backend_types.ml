@@ -153,7 +153,13 @@ type task_result = {
   report : structured_report option;
   elapsed : duration;
   cost : cost option;
-  stdout : string;
+  stdout : string;  (** Raw captured stdout from the client (unparsed). *)
+  agent_text : string; [@default ""]
+      (** Normalised final agent message text, extracted by the adapter from
+          its CLI's output format.  Empty string when no agent message was
+          produced or extraction failed.  Hosts should prefer this field over
+          [stdout] when they need the agent's response text; [stdout] remains
+          available for debugging or backend-specific post-processing. *)
   stderr : string;
   exit_code : int;
   session_id : string option; [@default None]
@@ -224,7 +230,8 @@ let empty_cost =
   }
 
 let make_task_result ~status ?(files_changed = []) ?report ?(elapsed = 0.0)
-    ?cost ?(stdout = "") ?(stderr = "") ?(exit_code = 0) ?session_id () =
+    ?cost ?(stdout = "") ?(agent_text = "") ?(stderr = "") ?(exit_code = 0)
+    ?session_id () =
   {
     status;
     files_changed;
@@ -232,6 +239,7 @@ let make_task_result ~status ?(files_changed = []) ?report ?(elapsed = 0.0)
     elapsed;
     cost;
     stdout;
+    agent_text;
     stderr;
     exit_code;
     session_id;

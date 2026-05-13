@@ -577,6 +577,7 @@ let check_opencode_mutation ~env ~config_path ~backup result =
                kind
                restore_msg);
         stdout = "";
+        agent_text = "";
         session_id = None;
       }
 

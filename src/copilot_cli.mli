@@ -90,3 +90,22 @@ val build_command :
   mcp_config_path:string option ->
   Backend_types.task_spec ->
   string list * string
+
+(** [parse_stdout_text stdout] extracts the agent text from Copilot CLI's
+    plain-text stdout.  Copilot does not currently emit a structured (JSON)
+    output mode, so this returns the captured stdout with trailing whitespace
+    trimmed.  Exposed so adapters that wrap Copilot via [task_result.agent_text]
+    can keep a uniform host-facing surface.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns [stdout] with trailing whitespace stripped.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val parse_stdout_text : string -> string
