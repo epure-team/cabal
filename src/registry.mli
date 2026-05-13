@@ -97,6 +97,26 @@ val list : unit -> Agentic_backend.t list
     (none) *)
 val list_ids : unit -> string list
 
+(** [list_models backend_id] returns [Some models] when [backend_id] is
+    registered and declares a model list.  Returns [None] when the backend is
+    not registered.  Returns [Some []] when the backend is registered but does
+    not declare a model list (caller should treat this as "let the adapter
+    default kick in").
+
+    {pre}
+    (none)
+
+    {post}
+    Returns [Some (Agentic_backend.models b)] when [backend_id] is in the
+    registry, or [None] otherwise.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val list_models : string -> string list option
+
 (** {1 Availability} *)
 
 (** [available ~sw ~env] returns all backends that are currently available

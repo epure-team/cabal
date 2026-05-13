@@ -11,6 +11,11 @@ let id = "codex"
 
 let name = "OpenAI Codex"
 
+(* Selectable model ids for `codex exec -m`. The upstream CLI accepts any
+   OpenAI model slug; the values below are the headline reasoning models
+   commonly used in BountyNexus pipelines. *)
+let models = ["gpt-5"; "o3"; "o3-mini"]
+
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["codex"; "--version"]
 

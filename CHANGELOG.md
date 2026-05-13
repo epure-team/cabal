@@ -9,6 +9,18 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Per-backend `models` enumeration** (non-breaking, additive).
+  Every adapter implementing `Agentic_backend.S` now exposes a
+  `models : string list` member listing the model ids it accepts via its
+  CLI's `--model` (or equivalent) flag. The data is surfaced two ways:
+  `Agentic_backend.models : t -> string list` for callers that already
+  hold a backend handle, and `Registry.list_models : string -> string
+  list option` for callers that only know the backend id. `Yaml_adapter`
+  config gains a `models : string list` field populated from a top-level
+  `models:` sequence in the YAML file; missing or malformed sequences
+  fall back to `[]` (the documented "let the adapter pick" sentinel).
+  Existing call sites that pass `~model:None` to
+  `Backend_types.make_task_spec` continue to work unchanged.
 - **`Backend_types.task_result.agent_text`** (non-breaking, additive).
   Adapters now populate a new `agent_text : string` field with the agent's
   final reply, extracted from each CLI's native output format

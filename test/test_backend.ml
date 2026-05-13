@@ -19,6 +19,8 @@ module Mock_backend : Agentic_backend.S = struct
 
   let name = "Mock Backend"
 
+  let models : string list = []
+
   let available ~sw:_ ~env:_ = true
 
   let supports_session_resume = false
@@ -58,6 +60,8 @@ module Unavailable_backend : Agentic_backend.S = struct
   let id = "unavailable"
 
   let name = "Unavailable Backend"
+
+  let models : string list = []
 
   let available ~sw:_ ~env:_ = false
 

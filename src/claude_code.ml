@@ -11,6 +11,12 @@ let id = "claude-code"
 
 let name = "Claude Code"
 
+(* Selectable model ids for `claude --model`. Keep in sync with the model
+   slugs accepted by the upstream Claude Code CLI; passing an unknown id
+   would be rejected by claude itself, not by us. *)
+let models =
+  ["claude-sonnet-4-5"; "claude-opus-4-7"; "claude-haiku-4-5-20251001"]
+
 (* Check if claude CLI is available by running `claude --version` *)
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["claude"; "--version"]

@@ -340,6 +340,7 @@ let test_validate_ok () =
       env_mappings = [];
       timeout_seconds = 300.0;
       source = "test";
+      models = [];
     }
   in
   match Adapter_loader.validate cfg with
@@ -356,6 +357,7 @@ let test_validate_empty_name () =
       env_mappings = [];
       timeout_seconds = 300.0;
       source = "test";
+      models = [];
     }
   in
   match Adapter_loader.validate cfg with

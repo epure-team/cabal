@@ -3,3 +3,6 @@ display_name: GitHub Copilot
 invocation_command: "copilot -p - --yolo -s --no-ask-user"
 template_set: default
 timeout_seconds: 300.0
+models:
+  - claude-sonnet-4-5
+  - gpt-5

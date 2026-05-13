@@ -45,6 +45,11 @@ let list_ids () =
   !registration_order |> List.rev
   |> List.filter (fun id -> Hashtbl.mem backends id)
 
+let list_models id =
+  match Hashtbl.find_opt backends id with
+  | Some backend -> Some (Agentic_backend.models backend)
+  | None -> None
+
 let available ~sw ~env =
   list () |> List.filter (Agentic_backend.available ~sw ~env)
 

@@ -15,6 +15,7 @@ type config = {
   env_mappings : (string * string) list;
   timeout_seconds : float;
   source : string;
+  models : string list;
 }
 
 (* Maps backend id → config for config_of lookup. *)
@@ -25,6 +26,8 @@ let make_backend (cfg : config) : Agentic_backend.t =
     let id = cfg.name
 
     let name = cfg.display_name
+
+    let models = cfg.models
 
     let available ~sw:_ ~env =
       (* Check availability by running the command with --version. *)

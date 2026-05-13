@@ -44,6 +44,12 @@ module type S = sig
   (** Human-readable name for this backend (e.g., "Claude Code"). *)
   val name : string
 
+  (** Model identifiers this backend declares as selectable. The list is
+      advisory: an empty list means "let the adapter pick its default", and
+      callers should treat unrecognised values as opaque pass-through strings
+      forwarded to the CLI. *)
+  val models : string list
+
   (** [available ~sw ~env] checks if this backend is available (installed,
       configured, etc.). This should be a quick check, not a full invocation. *)
   val available : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> bool
@@ -124,6 +130,25 @@ val id : t -> string
     (none)
 *)
 val name : t -> string
+
+(** [models backend] returns the model list declared by [backend], or [] when
+    unset.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns the same list as [S.models] of the underlying module.  An empty
+    list means the backend has not declared a model set and the caller should
+    let the adapter's default model selection apply.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none)
+*)
+val models : t -> string list
 
 (** [available ~sw ~env backend] checks if the backend is available.
 

@@ -147,3 +147,8 @@
  (name test_agent_text_extraction)
  (libraries cabal alcotest yojson)
  (modules test_agent_text_extraction))
+
+(test
+ (name test_model_enumeration)
+ (libraries cabal alcotest unix)
+ (modules test_model_enumeration))

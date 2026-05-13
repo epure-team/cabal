@@ -48,6 +48,9 @@ val id : string
 (** Human-readable name. *)
 val name : string
 
+(** Empty model list — mock-agent has no real model surface. *)
+val models : string list
+
 (** Returns [true] iff [CABAL_MOCK_AGENT_FIXTURES] (or its legacy alias
     [EPURE_MOCK_AGENT_FIXTURES]) names an existing file. *)
 val available : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> bool

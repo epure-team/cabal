@@ -15,6 +15,10 @@ let id = "mock-agent"
 
 let name = "Mock Agent (integration tests only)"
 
+(* mock-agent has no real model selection; expose an empty list so callers
+   default to whatever upstream selector they normally use. *)
+let models : string list = []
+
 let resolve_fixtures_env () =
   match Sys.getenv_opt fixtures_env_var with
   | Some _ as v -> v

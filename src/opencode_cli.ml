@@ -11,6 +11,10 @@ let id = "opencode"
 
 let name = "OpenCode"
 
+(* OpenCode is provider-agnostic; the canonical pair below mirrors the
+   model slugs documented for `opencode run --model`. *)
+let models = ["claude-sonnet-4-5"; "gpt-5"]
+
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["opencode"; "--version"]
 

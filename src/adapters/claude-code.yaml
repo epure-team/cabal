@@ -3,3 +3,7 @@ display_name: Claude Code
 invocation_command: "claude --print --output-format json --dangerously-skip-permissions --allowedTools WebSearch,WebFetch,Read,Glob,Grep,Bash,Edit,Write,Task --setting-sources user -p -"
 template_set: default
 timeout_seconds: 600.0
+models:
+  - claude-sonnet-4-5
+  - claude-opus-4-7
+  - claude-haiku-4-5-20251001

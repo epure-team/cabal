@@ -80,6 +80,37 @@ let env_mappings_field ~source obj key =
       pairs
   | _ -> []
 
+(** [string_list_field ~source obj key] reads an array of strings.  Non-string
+    entries are dropped with a [Diagnostics.warn] so a stray bool/number in
+    [models:] doesn't break adapter registration.  Returns [[]] when [key] is
+    absent or not a sequence. *)
+let string_list_field ~source obj key =
+  match List.assoc_opt key obj with
+  | Some (`A items) ->
+      List.filter_map
+        (fun item ->
+          match item with
+          | `String s -> Some s
+          | other ->
+              let kind =
+                match other with
+                | `Bool _ -> "bool"
+                | `Float _ -> "number"
+                | `O _ -> "mapping"
+                | `A _ -> "sequence"
+                | `Null -> "null"
+                | `String _ -> "string"
+              in
+              Diagnostics.warn
+                "[adapter_loader] %s: ignoring %s entry — expected string, got \
+                 %s"
+                source
+                key
+                kind ;
+              None)
+        items
+  | _ -> []
+
 (* --- Validate ------------------------------------------------------------- *)
 
 let validate (cfg : config) =
@@ -102,6 +133,7 @@ let load_string ~source s =
       let* template_set = string_field obj "template_set" in
       let env_mappings = env_mappings_field ~source obj "env" in
       let timeout_seconds = float_field_opt obj "timeout_seconds" 300.0 in
+      let models = string_list_field ~source obj "models" in
       let cfg =
         {
           name;
@@ -112,6 +144,7 @@ let load_string ~source s =
           env_mappings;
           timeout_seconds;
           source;
+          models;
         }
       in
       match validate cfg with

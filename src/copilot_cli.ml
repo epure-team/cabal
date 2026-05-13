@@ -11,6 +11,10 @@ let id = "copilot-cli"
 
 let name = "GitHub Copilot"
 
+(* GitHub Copilot CLI is a meta-CLI that proxies to several upstream model
+   providers; we expose the canonical pair selectable via its --model flag. *)
+let models = ["claude-sonnet-4-5"; "gpt-5"]
+
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["copilot"; "--version"]
 

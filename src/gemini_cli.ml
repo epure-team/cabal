@@ -11,6 +11,9 @@ let id = "gemini-cli"
 
 let name = "Gemini CLI"
 
+(* Selectable model ids for `gemini --model`. *)
+let models = ["gemini-2.5-pro"; "gemini-2.5-flash"]
+
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["gemini"; "--version"]
 

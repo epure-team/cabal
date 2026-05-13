@@ -3,3 +3,7 @@ display_name: OpenAI Codex
 invocation_command: "codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
 template_set: default
 timeout_seconds: 300.0
+models:
+  - gpt-5
+  - o3
+  - o3-mini

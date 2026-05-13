@@ -3,3 +3,6 @@ display_name: OpenCode
 invocation_command: "opencode run --message -"
 template_set: default
 timeout_seconds: 300.0
+models:
+  - claude-sonnet-4-5
+  - gpt-5
