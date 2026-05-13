@@ -103,11 +103,11 @@ let test_make_task_spec () =
   Alcotest.(check int) "lsp_servers default" 0 (List.length spec.lsp_servers) ;
   Alcotest.(check string)
     "managed namespace default id"
-    "epure"
+    "cabal"
     spec.managed_namespace.id ;
   Alcotest.(check string)
     "managed namespace default config_dir"
-    ".epure/backend-config"
+    ".cabal/backend-config"
     spec.managed_namespace.config_dir
 
 let test_make_task_spec_with_options () =
@@ -259,7 +259,7 @@ let test_task_spec_json_defaults_for_new_fields () =
       Alcotest.(check int) "legacy lsp default" 0 (List.length spec.lsp_servers) ;
       Alcotest.(check string)
         "legacy namespace default"
-        "epure"
+        "cabal"
         spec.managed_namespace.id
 
 let test_validate_managed_namespace_rejects_bad_id () =

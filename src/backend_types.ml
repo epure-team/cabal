@@ -39,7 +39,7 @@ type managed_namespace = {
 [@@deriving show, eq, yojson]
 
 let default_managed_namespace =
-  {id = "epure"; display_name = "Epure"; config_dir = ".epure/backend-config"}
+  {id = "cabal"; display_name = "Cabal"; config_dir = ".cabal/backend-config"}
 
 let is_valid_namespace_id id =
   let len = String.length id in

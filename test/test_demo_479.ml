@@ -65,9 +65,9 @@ let test_project_config_preferred_claude_code () =
           Alcotest.fail "AC #658: expected project_config_path for claude-code"
       | Some path ->
           Alcotest.(check bool)
-            "path lives under .epure/backend-config"
+            "path lives under .cabal/backend-config"
             true
-            (contains_str path ".epure"))
+            (contains_str path ".cabal"))
 
 (* AC #658: the explicit settings path gives claude-code strict project precedence *)
 let test_explicit_path_enforces_precedence () =

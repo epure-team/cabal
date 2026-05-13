@@ -82,7 +82,7 @@ val show_duration : duration -> string
 
 (** MCP server configuration for an agentic invocation. *)
 type mcp_server_config = {
-  name : string;  (** Server name (e.g., "epure") *)
+  name : string;  (** Server name chosen by the host (e.g., "myhost-mcp") *)
   command : string;  (** Command to spawn the server *)
   args : string list;  (** Command arguments *)
   env : (string * string) list;  (** Environment variables *)
@@ -97,7 +97,10 @@ type managed_namespace = {
 }
 [@@deriving show, eq, yojson]
 
-(** Default namespace preserving historical Épure artifact locations. *)
+(** Default host-neutral namespace: id [cabal], display name [Cabal], config
+    directory [.cabal/backend-config]. Host applications may construct their
+    own {!managed_namespace} and pass it through {!make_task_spec} to override
+    these defaults. *)
 val default_managed_namespace : managed_namespace
 
 (** [validate_managed_namespace namespace] validates that namespace-controlled
@@ -180,17 +183,19 @@ type output_spec =
     and executes. It is not a raw LLM prompt. *)
 type task_spec = {
   prompt : string;
-      (** Role-specific prompt authored by Épure. Describes what to do. *)
+      (** Role-specific prompt authored by the host application. Describes
+          what to do. *)
   instructions : string;
       (** Project-specific instructions: conventions, constraints, rules. *)
   mcp_servers : mcp_server_config list;
-      (** MCP servers to connect (epure-mcp-server + project tools). *)
+      (** MCP servers to connect (host-provided MCP servers + project tools). *)
   lsp_servers : lsp_server_config list; [@default []]
       (** Host-provided LSP server definitions for backends that can render
           project LSP config. *)
   working_dir : string;  (** Target project directory. *)
   timeout : duration;  (** Maximum execution time (circuit breaker). *)
-  expected_outputs : output_spec list;  (** What Epure expects back. *)
+  expected_outputs : output_spec list;
+      (** What the host application expects back. *)
   managed_namespace : managed_namespace; [@default default_managed_namespace]
       (** Namespace for managed config markers, sidecars, temp files, and owned
           backend config directories. *)
