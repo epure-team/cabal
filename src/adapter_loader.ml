@@ -175,11 +175,11 @@ let register_all ?project_dir () =
             "[adapter_loader] builtin adapter parse error: %s"
             msg)
     Builtin.all ;
-  (* 2. User-global: ~/.epure/adapters/*.yaml *)
+  (* 2. User-global: ~/.cabal/adapters/*.yaml *)
   let home = try Sys.getenv "HOME" with Not_found -> "" in
   if home <> "" then begin
     let global_dir =
-      Filename.concat home (Filename.concat ".epure" "adapters")
+      Filename.concat home (Filename.concat ".cabal" "adapters")
     in
     List.iter
       (fun (filename, result) ->
@@ -190,11 +190,11 @@ let register_all ?project_dir () =
         | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
       (load_dir global_dir)
   end ;
-  (* 3. Project-local: .epure/adapters/*.yaml — highest priority *)
+  (* 3. Project-local: .cabal/adapters/*.yaml — highest priority *)
   match project_dir with
   | Some pd ->
       let local_dir =
-        Filename.concat pd (Filename.concat ".epure" "adapters")
+        Filename.concat pd (Filename.concat ".cabal" "adapters")
       in
       List.iter
         (fun (filename, result) ->

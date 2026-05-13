@@ -140,8 +140,8 @@ with mode `0o600` to limit blast radius if redaction is bypassed.
 priority first:
 
 1. Built-in YAMLs compiled into the library (`src/adapters/*.yaml`).
-2. User-global: `~/.epure/adapters/*.yaml`.
-3. Project-local: `.epure/adapters/*.yaml` (only when `?project_dir` is
+2. User-global: `~/.cabal/adapters/*.yaml`.
+3. Project-local: `.cabal/adapters/*.yaml` (only when `?project_dir` is
    passed).
 
 Project-local adapters override user-global, which override built-ins by

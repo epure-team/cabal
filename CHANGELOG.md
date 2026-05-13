@@ -8,6 +8,16 @@ by the date a change merged to `main`.
 
 ## Unreleased
 
+### Changed
+- **Adapter override directory renamed from `.epure/` to `.cabal/`** (breaking).
+  `Adapter_loader.register_all` now reads user-global overrides from
+  `~/.cabal/adapters/*.yaml` and project-local overrides from
+  `<project_dir>/.cabal/adapters/*.yaml`. Host applications that previously
+  dropped YAML overrides under `~/.epure/adapters/` or
+  `<project>/.epure/adapters/` must move them to the new locations. Built-in
+  adapters compiled into the library are unaffected. The rename makes the
+  override path host-neutral now that cabal is consumed beyond Épure.
+
 ### Security
 - **Session NDJSON files now created with mode `0o600`** (previously `0o640`,
   group-readable). Post-redaction backend events could leak to any user in the
