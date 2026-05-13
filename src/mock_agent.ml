@@ -7,14 +7,21 @@
 
 (** Mock agent backend for integration tests — deterministic, no LLM calls. *)
 
-let fixtures_env_var = "EPURE_MOCK_AGENT_FIXTURES"
+let fixtures_env_var = "CABAL_MOCK_AGENT_FIXTURES"
+
+let legacy_fixtures_env_var = "EPURE_MOCK_AGENT_FIXTURES"
 
 let id = "mock-agent"
 
 let name = "Mock Agent (integration tests only)"
 
-let available ~sw:_ ~env:_ =
+let resolve_fixtures_env () =
   match Sys.getenv_opt fixtures_env_var with
+  | Some _ as v -> v
+  | None -> Sys.getenv_opt legacy_fixtures_env_var
+
+let available ~sw:_ ~env:_ =
+  match resolve_fixtures_env () with
   | Some path when path <> "" -> Sys.file_exists path
   | _ -> false
 
@@ -39,7 +46,7 @@ type rule = {
 }
 
 (* Rules are cached per fixture-file path so that `used` counters persist
-   across multiple run_task calls within a single epure subprocess.  Each
+   across multiple run_task calls within a single host subprocess.  Each
    fresh subprocess starts with an empty cache. *)
 let rules_cache : (string, (rule list, string) result) Hashtbl.t =
   Hashtbl.create 1
@@ -128,7 +135,7 @@ let prompt_contains_ci ~needle ~haystack =
 (* ── Backend implementation ──────────────────────────────────────────── *)
 
 let run_task ~sw:_ ~env ?on_raw_line:_ (spec : Backend_types.task_spec) =
-  match Sys.getenv_opt fixtures_env_var with
+  match resolve_fixtures_env () with
   | None | Some "" ->
       Backend_types.make_task_result
         ~status:
