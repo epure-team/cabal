@@ -19,9 +19,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         ocaml-compiler: ['5.3.0']
-        include:
-          - os: ubuntu-latest
-            ocaml-compiler: '5.2.0'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
