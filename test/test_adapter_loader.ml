@@ -294,7 +294,7 @@ let test_project_local_override () =
          registry exposes "gemini-cli" — this test exercises arbitrary
          user-named adapters being layered on top of the builtins. *)
       let adapters_dir =
-        Filename.concat tmpdir (Filename.concat ".epure" "adapters")
+        Filename.concat tmpdir (Filename.concat ".cabal" "adapters")
       in
       write_file
         (Filename.concat adapters_dir "gemini.yaml")

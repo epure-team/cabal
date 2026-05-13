@@ -84,8 +84,8 @@ val load_dir : string -> (string * (yaml_adapter_config, string) result) list
 (** [register_all ()] loads and registers backends in priority order:
 
     1. Built-in YAML configs embedded at compile time ([source = "builtin"])
-    2. User-global overrides: [~/.epure/adapters/*.yaml]
-    3. Project-local overrides: [.epure/adapters/*.yaml] (highest priority)
+    2. User-global overrides: [~/.cabal/adapters/*.yaml]
+    3. Project-local overrides: [.cabal/adapters/*.yaml] (highest priority)
 
     Later registrations for the same [name] replace earlier ones in the
     {!Registry}.  Errors from individual files are printed to stderr but do
@@ -93,7 +93,7 @@ val load_dir : string -> (string * (yaml_adapter_config, string) result) list
 
     {pre}
     Should be called once at startup before any backend lookups are performed.
-    [project_dir], if provided, must be a valid Épure project root.
+    [project_dir], if provided, must be a valid host project root.
 
     {post}
     Populates the {!Registry} with all successfully loaded backends. Files

@@ -8,15 +8,18 @@
 (** Generic project-owned backend configuration artifact writer.
 
     This module owns only backend-agnostic concerns: artifact metadata,
-    Épure attribution markers, managed hash checks, strict-JSON sidecar
-    metadata, atomic writes, backups, and setup result aggregation.  Backend
-    modules own the actual backend-native config templates and JSON records. *)
+    namespace-driven attribution markers, managed hash checks, strict-JSON
+    sidecar metadata, atomic writes, backups, and setup result aggregation.
+    Backend modules own the actual backend-native config templates and JSON
+    records. *)
 
 (** Ownership classification of a generated config artifact. *)
 type ownership =
   | Epure_owned
-      (** File lives under [.epure/backend-config/]; passed explicitly to the
-          backend at invocation. *)
+      (** Host-owned artifact (constructor name retained for source
+          compatibility).  File lives under the managed namespace's
+          [config_dir] (default [.cabal/backend-config/]); passed explicitly
+          to the backend at invocation. *)
   | Backend_project
       (** File lives at the backend's required fixed project path and is
           protected against silent overwrites. *)
@@ -77,7 +80,7 @@ val attribution_text_for : Backend_types.managed_namespace -> string
 val managed_marker : string
 
 (** [managed_marker_for namespace] returns the namespace-specific managed
-    marker, such as ["epure-managed"] for the default namespace.
+    marker, such as ["cabal-managed"] for the default namespace.
 
     {pre}
     [namespace.id] has already passed managed namespace validation.
@@ -93,7 +96,7 @@ val managed_marker : string
 val managed_marker_for : Backend_types.managed_namespace -> string
 
 (** [hash_marker_for namespace] returns the namespace-specific managed hash
-    marker, such as ["epure-hash"] for the default namespace.
+    marker, such as ["cabal-hash"] for the default namespace.
 
     {pre}
     [namespace.id] has already passed managed namespace validation.
@@ -112,8 +115,9 @@ val hash_marker_for : Backend_types.managed_namespace -> string
 type comment_style = Slash | Hash | Html
 
 (** [with_epure_header style body] prepends attribution and managed marker
-    comments without a hash.  Use for Épure-owned artifacts that are freely
-    regenerated. *)
+    comments without a hash.  Use for host-owned artifacts that are freely
+    regenerated.  Function name retained for source compatibility; the
+    output uses the active namespace's markers, not literal Épure tags. *)
 val with_epure_header :
   ?managed_namespace:Backend_types.managed_namespace ->
   comment_style ->
@@ -130,16 +134,17 @@ val with_managed_header :
   string ->
   string
 
-(** [is_managed_content content] detects inline Épure managed markers. *)
+(** [is_managed_content content] detects inline managed markers (current
+    namespace plus the legacy [epure-managed] alias for migration). *)
 val is_managed_content :
   ?managed_namespace:Backend_types.managed_namespace -> string -> bool
 
-(** [extract_hash content] extracts an inline Épure managed hash if present. *)
+(** [extract_hash content] extracts an inline managed hash if present. *)
 val extract_hash :
   ?managed_namespace:Backend_types.managed_namespace -> string -> string option
 
 (** [managed_body_hash ~backend_id content] computes the generic managed body
-    hash after removing Épure inline metadata and managed MCP blocks.  The
+    hash after removing inline managed metadata and managed MCP blocks.  The
     [backend_id] label is retained for compatibility. *)
 val managed_body_hash :
   ?managed_namespace:Backend_types.managed_namespace ->

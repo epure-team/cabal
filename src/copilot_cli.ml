@@ -151,33 +151,34 @@ let lsp_json_content lsp_servers =
 
 let copilot_instructions_body =
   "# Copilot CLI Project Configuration\n\n\
-   This file is managed by Epure. Custom instructions live at\n\
-   `.github/copilot-instructions.md`, repository settings live at\n\
-   `.github/copilot/settings.json`, and project MCP config lives at\n\
-   `.github/mcp.json` for Copilot CLI 1.0.34 (stable channel).\n\n\
+   This file is managed by the host application via Cabal. Custom\n\
+   instructions live at `.github/copilot-instructions.md`, repository\n\
+   settings live at `.github/copilot/settings.json`, and project MCP\n\
+   config lives at `.github/mcp.json` for Copilot CLI 1.0.34 (stable\n\
+   channel).\n\n\
    ## Project Context\n\n\
-   Configured by Epure for this project.\n\n\
+   Configured by the host application for this project.\n\n\
    ## LSP Configuration\n\n\
    Copilot CLI uses Language Server Protocol (LSP) for enhanced code\n\
-   analysis. Epure writes project LSP server definitions to\n\
+   analysis. The host writes project LSP server definitions to\n\
    `.github/lsp.json` for detected languages, following GitHub's documented\n\
-   project LSP config shape. Epure also tracks tooling readiness via\n\
-   project_hook_tools (see epure tooling status).\n\n\
+   project LSP config shape. Tooling readiness is tracked by the host's\n\
+   own project hook layer.\n\n\
    ## MCP Servers\n\n\
-   Épure does not activate MCP servers by default. Approved\n\
-   registry-backed entries are written to `.github/mcp.json` as local\n\
-   project MCP server definitions with explicit command, args, env, and\n\
-   tool allow-list fields.\n\
+   MCP servers are not activated by default. Approved registry-backed\n\
+   entries are written to `.github/mcp.json` as local project MCP server\n\
+   definitions with explicit command, args, env, and tool allow-list\n\
+   fields.\n\
    <!-- mcp: disabled by default — no approved entries activated -->\n\n\
    ## Stable Limitations (Copilot CLI 1.0.34)\n\n\
    The following features are not available in the stable channel and\n\
-   are intentionally not configured by Epure for this backend:\n\
+   are intentionally not configured for this backend:\n\
    - streaming_output: not supported in stable 1.0.34\n\
    - structured_output: not supported in stable 1.0.34\n\
    - session_resume: not supported in stable 1.0.34\n\
    - read_only_support: not available via stable CLI flags\n\
    - file_reading: not supported in stable 1.0.34\n\
-   <!-- stable-limitations: documented per Epure parity policy -->\n"
+   <!-- stable-limitations: documented per backend parity policy -->\n"
 
 let project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers =
   [

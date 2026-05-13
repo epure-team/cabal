@@ -62,7 +62,7 @@ let encode_working_dir path =
 
      Examples (verified against ~/.claude/projects/ directory names):
        /home/user/project       -> -home-user-project
-       /home/user/dev/epure  -> -home-user-dev-epure
+       /home/user/dev/myhost    -> -home-user-dev-myhost
        /path/.hidden/sub        -> -path--hidden-sub  (dot -> -)
        /tmp/my-project          -> -tmp-my-project    (existing '-' kept)
   *)

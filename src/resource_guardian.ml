@@ -31,7 +31,12 @@ type t = {
 let max_history = 60
 
 let default_parallel_max_mem =
-  match Sys.getenv_opt "EPURE_VALIDATOR_PARALLEL_MAX_MEM" with
+  let lookup =
+    match Sys.getenv_opt "CABAL_VALIDATOR_PARALLEL_MAX_MEM" with
+    | Some _ as v -> v
+    | None -> Sys.getenv_opt "EPURE_VALIDATOR_PARALLEL_MAX_MEM"
+  in
+  match lookup with
   | Some s -> (
       match int_of_string_opt s with
       | Some n when n > 0 && n <= 100 -> n

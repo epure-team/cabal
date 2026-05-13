@@ -21,7 +21,7 @@ Cabal owns the host-neutral backend layer:
 
 Cabal explicitly does **not** own:
 
-- Épure's SQLite database or any host application's persistent state;
+- any host application's persistent state (SQLite or otherwise);
 - story, epic, build, review, or product orchestration;
 - prompt context policy or knowledge injection rules;
 - user/auth/project membership models;
@@ -35,7 +35,8 @@ run the selected CLI safely and consistently.
 
 ```text
                 host application
-       (Épure, tests, or another OCaml app)
+        (BountyNexus, Épure, tests, or
+         another OCaml app)
                          |
                          v
         +----------------------------------+
@@ -140,8 +141,8 @@ with mode `0o600` to limit blast radius if redaction is bypassed.
 priority first:
 
 1. Built-in YAMLs compiled into the library (`src/adapters/*.yaml`).
-2. User-global: `~/.epure/adapters/*.yaml`.
-3. Project-local: `.epure/adapters/*.yaml` (only when `?project_dir` is
+2. User-global: `~/.cabal/adapters/*.yaml`.
+3. Project-local: `.cabal/adapters/*.yaml` (only when `?project_dir` is
    passed).
 
 Project-local adapters override user-global, which override built-ins by
@@ -159,16 +160,11 @@ opam exec -- dune runtest
 opam lint cabal.opam
 ```
 
-From the Épure monorepo:
-
-```bash
-EPURE_NO_COMMIT_CHECK=1 dune build
-EPURE_NO_COMMIT_CHECK=1 dune runtest libs/cabal
-opam lint libs/cabal/cabal.opam
-```
-
-Épure builds from the monorepo do not require any `opam pin` for Cabal.
-Dune sees `libs/cabal` directly as part of the workspace.
+If you consume Cabal as a vendored subtree inside a host monorepo, dune sees
+the cabal directory directly as part of the workspace — no `opam pin` is
+required. Host-side build/test invocations and any host-specific escape
+hatches (e.g. commit checks) belong in the host's own documentation, not
+here.
 
 For downstream/standalone consumers while Cabal is not yet published, pin it
 explicitly from a local checkout:
@@ -178,8 +174,10 @@ opam pin add cabal <path-to-cabal> -y
 ```
 
 The library remains host-agnostic: callers choose the managed namespace used for
-generated files. The default namespace currently preserves historical Epure
-runtime artifact ownership and paths for compatibility.
+generated files. The default namespace is `cabal` (id `cabal`, display name
+`Cabal`, config directory `.cabal/backend-config`); hosts that need a
+different namespace must construct one explicitly and pass it through
+`Backend_types.make_task_spec` and the `Backend_config_gen.*` setup helpers.
 
 ## Sync model
 
