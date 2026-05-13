@@ -142,3 +142,8 @@
  (name test_demo_517)
  (libraries cabal alcotest eio eio_main)
  (modules test_demo_517))
+
+(test
+ (name test_agent_text_extraction)
+ (libraries cabal alcotest yojson)
+ (modules test_agent_text_extraction))
