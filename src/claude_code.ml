@@ -11,11 +11,57 @@ let id = "claude-code"
 
 let name = "Claude Code"
 
-(* Selectable model ids for `claude --model`. Keep in sync with the model
-   slugs accepted by the upstream Claude Code CLI; passing an unknown id
-   would be rejected by claude itself, not by us. *)
+(* Static fallback — used when the Anthropic Models API is unreachable or
+   ANTHROPIC_API_KEY is absent.  Keep in sync with
+   https://docs.anthropic.com/en/docs/about-claude/models/overview *)
 let models =
-  ["claude-sonnet-4-5"; "claude-opus-4-7"; "claude-haiku-4-5-20251001"]
+  [ "claude-opus-4-7"
+  ; "claude-sonnet-4-6"
+  ; "claude-haiku-4-5-20251001"
+  ; "claude-opus-4-6"
+  ; "claude-sonnet-4-5-20250929" ]
+
+(* Parse the model id strings out of a GET /v1/models JSON response.
+   Shape: {"data": [{"id": "claude-opus-4-7", ...}, ...], ...} *)
+let parse_anthropic_models_json json_str =
+  try
+    match Yojson.Safe.from_string json_str with
+    | `Assoc fields -> (
+        match List.assoc_opt "data" fields with
+        | Some (`List items) ->
+            List.filter_map
+              (function
+                | `Assoc fs -> (
+                    match List.assoc_opt "id" fs with
+                    | Some (`String id) -> Some id
+                    | _ -> None)
+                | _ -> None)
+              items
+        | _ -> [])
+    | _ -> []
+  with _ -> []
+
+(* Live probe via the Anthropic Models REST API.
+   Requires ANTHROPIC_API_KEY in the environment and curl on PATH.
+   Falls back gracefully to [models] when either is missing. *)
+let models_probe =
+  Some
+    (fun ~sw:_ ~env ->
+      match Sys.getenv_opt "ANTHROPIC_API_KEY" with
+      | None -> Error "ANTHROPIC_API_KEY not set"
+      | Some api_key -> (
+          match
+            Backend_process.capture_version_output ~env ~timeout_seconds:10.0
+              [ "curl"; "-sf"
+              ; "-H"; "x-api-key: " ^ api_key
+              ; "-H"; "anthropic-version: 2023-06-01"
+              ; "https://api.anthropic.com/v1/models?limit=100" ]
+          with
+          | Error msg -> Error msg
+          | Ok json_str -> (
+              match parse_anthropic_models_json json_str with
+              | [] -> Error "Anthropic models API returned no parseable model IDs"
+              | ms -> Ok ms)))
 
 (* Check if claude CLI is available by running `claude --version` *)
 let available ~sw:_ ~env =

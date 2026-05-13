@@ -91,6 +91,14 @@ val load_dir : string -> (string * (yaml_adapter_config, string) result) list
     {!Registry}.  Errors from individual files are printed to stderr but do
     not abort registration of other files.
 
+    When [~sw] and [~env] are both supplied, every registered backend that
+    declares a [models_probe] is invoked under exception protection and the
+    result is published into the registry as the resolved model view (see
+    {!Registry.resolved_models}).  Backends whose probe returns [Error _],
+    raises, or returns [Ok []] fall back to their static {!Agentic_backend.models}
+    list.  Without [~sw]/[~env] the probe layer is skipped and every backend
+    surfaces with its static list tagged {!Registry.Static}.
+
     {pre}
     Should be called once at startup before any backend lookups are performed.
     [project_dir], if provided, must be a valid host project root.
@@ -106,4 +114,9 @@ val load_dir : string -> (string * (yaml_adapter_config, string) result) list
     {violates}
     (none)
 *)
-val register_all : ?project_dir:string -> unit -> unit
+val register_all :
+  ?project_dir:string ->
+  ?sw:Eio.Switch.t ->
+  ?env:Eio_unix.Stdenv.base ->
+  unit ->
+  unit

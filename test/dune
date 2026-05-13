@@ -152,3 +152,8 @@
  (name test_model_enumeration)
  (libraries cabal alcotest unix)
  (modules test_model_enumeration))
+
+(test
+ (name test_model_probe)
+ (libraries cabal alcotest eio eio_main)
+ (modules test_model_probe))

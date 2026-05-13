@@ -29,6 +29,10 @@ let make_backend (cfg : config) : Agentic_backend.t =
 
     let models = cfg.models
 
+    (* YAML-loaded adapters declare a static list only — they have no
+       generic way to enumerate models from an arbitrary CLI invocation. *)
+    let models_probe = None
+
     let available ~sw:_ ~env =
       (* Check availability by running the command with --version. *)
       let cmd =

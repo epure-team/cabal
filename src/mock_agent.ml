@@ -19,6 +19,9 @@ let name = "Mock Agent (integration tests only)"
    default to whatever upstream selector they normally use. *)
 let models : string list = []
 
+(* The mock backend has no upstream CLI to enumerate. *)
+let models_probe = None
+
 let resolve_fixtures_env () =
   match Sys.getenv_opt fixtures_env_var with
   | Some _ as v -> v

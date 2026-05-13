@@ -21,12 +21,33 @@ let backends : (string, Agentic_backend.t) Hashtbl.t = Hashtbl.create 8
    Stored in reverse order (most recent first) for O(1) insertion. *)
 let registration_order : string list ref = ref []
 
+type models_source = Probe | Static | Hybrid
+
+(* Resolved (live + static) model view, keyed by backend id.  Populated by
+   {!Adapter_loader.register_all} via {!set_resolved_models}; the registry
+   itself never invokes probes — that responsibility lives one layer up so
+   the eio environment dependency stays out of [Registry]. *)
+let resolved_models_tbl : (string, string list * models_source) Hashtbl.t =
+  Hashtbl.create 8
+
+let set_resolved_models id pair = Hashtbl.replace resolved_models_tbl id pair
+
+let resolved_models id = Hashtbl.find_opt resolved_models_tbl id
+
 let register backend =
   let id = Agentic_backend.id backend in
   if Hashtbl.mem backends id then
     Diagnostics.warn "Replacing existing backend with id '%s'" id
   else registration_order := id :: !registration_order ;
-  Hashtbl.replace backends id backend
+  Hashtbl.replace backends id backend ;
+  (* Seed the resolved view with the static list so callers that query
+     [resolved_models] right after [register] (without going through
+     [Adapter_loader]) still get a sensible answer.  [Adapter_loader] may
+     overwrite this with [Probe]-tagged data after invoking the probe. *)
+  Hashtbl.replace
+    resolved_models_tbl
+    id
+    (Agentic_backend.models backend, Static)
 
 let get id = Hashtbl.find_opt backends id
 
@@ -46,9 +67,7 @@ let list_ids () =
   |> List.filter (fun id -> Hashtbl.mem backends id)
 
 let list_models id =
-  match Hashtbl.find_opt backends id with
-  | Some backend -> Some (Agentic_backend.models backend)
-  | None -> None
+  Option.map fst (resolved_models id)
 
 let available ~sw ~env =
   list () |> List.filter (Agentic_backend.available ~sw ~env)
@@ -58,4 +77,5 @@ let first_available ~sw ~env =
 
 let clear () =
   Hashtbl.clear backends ;
+  Hashtbl.clear resolved_models_tbl ;
   registration_order := []

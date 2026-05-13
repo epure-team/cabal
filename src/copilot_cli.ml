@@ -13,7 +13,14 @@ let name = "GitHub Copilot"
 
 (* GitHub Copilot CLI is a meta-CLI that proxies to several upstream model
    providers; we expose the canonical pair selectable via its --model flag. *)
-let models = ["claude-sonnet-4-5"; "gpt-5"]
+let models =
+  [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+  ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+
+(* `copilot` only accepts `--model <id>` and ships a `providers` subcommand
+   that requires interactive input (no machine-parseable listing).  Stay on
+   the static list until upstream adds a non-interactive enumeration. *)
+let models_probe = None
 
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["copilot"; "--version"]

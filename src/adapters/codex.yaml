@@ -5,5 +5,9 @@ template_set: default
 timeout_seconds: 300.0
 models:
   - gpt-5
+  - gpt-4o
+  - gpt-4o-mini
   - o3
   - o3-mini
+  - o1
+  - o1-mini

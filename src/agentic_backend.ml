@@ -21,6 +21,12 @@ module type S = sig
 
   val models : string list
 
+  val models_probe :
+    (sw:Eio.Switch.t ->
+    env:Eio_unix.Stdenv.base ->
+    (string list, string) result)
+    option
+
   val available : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> bool
 
   val supports_session_resume : bool
@@ -49,6 +55,8 @@ let id (module B : S) = B.id
 let name (module B : S) = B.name
 
 let models (module B : S) = B.models
+
+let models_probe (module B : S) = B.models_probe
 
 let available ~sw ~env (module B : S) = B.available ~sw ~env
 

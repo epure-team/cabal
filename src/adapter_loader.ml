@@ -193,9 +193,56 @@ let load_dir dir =
         (filename, result))
       yaml_files
 
+(* --- Probe runner --------------------------------------------------------- *)
+
+(** [run_probe ~sw ~env backend] invokes the backend's [models_probe] (if any)
+    under exception protection and returns [Some (Probe, models)] when the
+    probe returned a non-empty list.  Any other outcome — [None] probe,
+    [Error _], an exception, or [Ok []] — yields [None] and the caller falls
+    back to the static list. *)
+let run_probe ~sw ~env backend =
+  match Agentic_backend.models_probe backend with
+  | None -> None
+  | Some probe -> (
+    let id = Agentic_backend.id backend in
+    match probe ~sw ~env with
+    | exception e ->
+      Diagnostics.warn
+        "[adapter_loader] %s models_probe raised: %s"
+        id
+        (Printexc.to_string e) ;
+      None
+    | Error msg ->
+      Diagnostics.warn "[adapter_loader] %s models_probe error: %s" id msg ;
+      None
+    | Ok [] ->
+      Diagnostics.warn
+        "[adapter_loader] %s models_probe returned empty list; falling \
+         back to static"
+        id ;
+      None
+    | Ok models -> Some models)
+
+(** [resolve_probes_for_registered ~sw ~env ()] walks every registered
+    backend and, for each one with a [models_probe], publishes the
+    probe-resolved view into the registry side table.  Backends without a
+    probe (or whose probe falls back) keep the [Static] view that
+    [Registry.register] seeded. *)
+let resolve_probes_for_registered ~sw ~env () =
+  List.iter
+    (fun backend ->
+      let id = Agentic_backend.id backend in
+      match run_probe ~sw ~env backend with
+      | Some models -> Registry.set_resolved_models id (models, Registry.Probe)
+      | None ->
+        Registry.set_resolved_models
+          id
+          (Agentic_backend.models backend, Registry.Static))
+    (Registry.list ())
+
 (* --- Register all ---------------------------------------------------------- *)
 
-let register_all ?project_dir () =
+let register_all ?project_dir ?sw ?env () =
   (* 1. Built-in YAML configs — lowest priority *)
   List.iter
     (fun (_name, content) ->
@@ -224,7 +271,7 @@ let register_all ?project_dir () =
       (load_dir global_dir)
   end ;
   (* 3. Project-local: .cabal/adapters/*.yaml — highest priority *)
-  match project_dir with
+  (match project_dir with
   | Some pd ->
       let local_dir =
         Filename.concat pd (Filename.concat ".cabal" "adapters")
@@ -237,4 +284,11 @@ let register_all ?project_dir () =
               Registry.register backend
           | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
         (load_dir local_dir)
-  | None -> ()
+  | None -> ()) ;
+  (* 4. Probe layer — when an Eio environment is available, ask each
+     backend's [models_probe] for the live model list and cache the
+     outcome in the registry.  Without [~sw]/[~env] the static seed from
+     [Registry.register] remains in place. *)
+  match (sw, env) with
+  | Some sw, Some env -> resolve_probes_for_registered ~sw ~env ()
+  | _ -> ()

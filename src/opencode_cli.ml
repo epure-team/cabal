@@ -13,7 +13,34 @@ let name = "OpenCode"
 
 (* OpenCode is provider-agnostic; the canonical pair below mirrors the
    model slugs documented for `opencode run --model`. *)
-let models = ["claude-sonnet-4-5"; "gpt-5"]
+let models =
+  [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+  ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+
+(* `opencode models` lists every provider/model slug the local CLI knows
+   about, one per line, without requiring authentication.  Use it as the
+   live enumeration source, parsing non-empty lines and falling back when
+   the binary is absent, the call times out, or the output is empty. *)
+let parse_models_output stdout =
+  stdout |> String.split_on_char '\n'
+  |> List.filter_map (fun line ->
+         let trimmed = String.trim line in
+         if String.length trimmed = 0 then None else Some trimmed)
+
+let models_probe =
+  Some
+    (fun ~sw:_ ~env ->
+      match
+        Backend_process.capture_version_output
+          ~env
+          ~timeout_seconds:5.0
+          ["opencode"; "models"]
+      with
+      | Error msg -> Error msg
+      | Ok output -> (
+          match parse_models_output output with
+          | [] -> Error "opencode models returned no parseable lines"
+          | models -> Ok models))
 
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["opencode"; "--version"]

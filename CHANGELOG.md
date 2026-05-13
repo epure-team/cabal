@@ -21,6 +21,23 @@ by the date a change merged to `main`.
   fall back to `[]` (the documented "let the adapter pick" sentinel).
   Existing call sites that pass `~model:None` to
   `Backend_types.make_task_spec` continue to work unchanged.
+
+  The same surface now has a dynamic-probe layer on top: `Agentic_backend.S`
+  gained an optional `models_probe : (sw:_ -> env:_ -> (string list,
+  string) result) option`. When `Adapter_loader.register_all` is called
+  with `~sw` and `~env`, each registered backend's probe is invoked once
+  under exception protection; a non-empty `Ok` result replaces the static
+  list for that backend, while any `Error _`, exception, or `Ok []` cleanly
+  falls back to the static declaration. The resolved view is exposed via
+  `Registry.resolved_models : string -> (string list *
+  Registry.models_source) option`, with `models_source = Probe | Static |
+  Hybrid` documenting the origin (`Hybrid` is reserved and not yet
+  emitted). `Registry.list_models` keeps its existing return type and is
+  now `Option.map fst @@ resolved_models`. Among the built-in adapters
+  only `opencode` ships a probe today (parsing `opencode models`);
+  `claude-code`, `codex`, `gemini-cli`, and `copilot-cli` set
+  `models_probe = None` until their upstream CLIs expose a non-interactive
+  listing command.
 - **`Backend_types.task_result.agent_text`** (non-breaking, additive).
   Adapters now populate a new `agent_text : string` field with the agent's
   final reply, extracted from each CLI's native output format
