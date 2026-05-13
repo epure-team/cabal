@@ -8,6 +8,22 @@ by the date a change merged to `main`.
 
 ## Unreleased
 
+### Added
+- **`Backend_types.task_result.agent_text`** (non-breaking, additive).
+  Adapters now populate a new `agent_text : string` field with the agent's
+  final reply, extracted from each CLI's native output format
+  (claude-code JSON envelope, codex JSONL, gemini stream-json, opencode JSON
+  events, copilot plain text). `stdout` continues to carry the raw bytes
+  produced by the CLI so callers that need backend-specific post-processing
+  retain access. Host applications consuming the response text should switch
+  from `Yojson.Safe.from_string result.stdout` (or equivalent CLI-specific
+  parsing) to `result.agent_text` so they stop having to know which CLI ran.
+  `Backend_types.make_task_result` gains a `?agent_text:string` optional
+  argument that defaults to `""`, so existing call sites continue to compile
+  unchanged. `Backend_completer.make` now prefers `agent_text` over `stdout`
+  for the completion text (with a `stdout` fallback for backends that have
+  not yet populated `agent_text`).
+
 ### Changed
 - **Adapter override directory renamed from `.epure/` to `.cabal/`** (breaking).
   `Adapter_loader.register_all` now reads user-global overrides from
