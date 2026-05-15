@@ -118,9 +118,9 @@ runtime artifact ownership and paths for compatibility.
 ## Sync model
 
 The current source of truth is `libs/cabal` in the Épure monorepo. Épure CI
-dispatches Cabal's mirror-sync workflow on every push to Épure `main`.
-The Cabal workflow is only triggered by Épure's `repository_dispatch` event and
-uses a payload constrained to `source_repository=epure-team/epure`,
+dispatches Cabal's mirror-sync workflow on every push to Épure `main`. The Cabal
+workflow is only triggered by Épure's `repository_dispatch` event and uses a
+payload constrained to `source_repository=epure-team/epure`,
 `source_ref=refs/heads/main`, and the full 40-character `source_sha`. It checks
 out that exact SHA with `CABAL_EPURE_READ_TOKEN`, verifies the payload SHA is
 still the latest Épure `main` via the GitHub REST API, subtree-splits
@@ -137,6 +137,41 @@ Add that app installation actor as the only bypass actor for the mirror-update
 branch ruleset or branch-protection rule. Épure only dispatches the sync event;
 it does not hold branch-write or bypass credentials for Cabal.
 
+Direct PRs opened against `epure-team/cabal` are supported as an intake path,
+but the final review path still runs through Épure. Cabal's
+`sync-pr-to-epure.yml` workflow runs on `pull_request_target` for Cabal PR
+open/update/close events, but automatic Épure mirroring is restricted to trusted
+same-repository PRs only: `github.event.pull_request.head.repo.full_name` must
+equal `github.repository` (`epure-team/cabal`), and
+`github.event.pull_request.author_association` must be one of `OWNER`, `MEMBER`,
+or `COLLABORATOR`. For fork PRs or other untrusted associations, the workflow
+exits successfully before creating an Épure app token, checking out PR contents,
+or writing to Épure. Maintainers who want automatic mirroring for those changes
+must move or adopt them onto a trusted branch in `epure-team/cabal`. This avoids
+turning untrusted fork PR contents into same-repository Épure CI runs.
+
+For trusted open PR events, the workflow checks out the Cabal PR head at the
+immutable `github.event.pull_request.head.sha` as data only, checks out
+`epure-team/epure@main` with a short-lived GitHub App token, replaces
+`epure/libs/cabal` with the Cabal PR tree, and opens or updates an Épure PR from
+`cabal-pr-<Cabal PR number>` to `main`. The mirrored Épure PR body records the
+Cabal PR URL, source repository/branch/SHA, and notes that Épure PR CI and
+review are authoritative. If a trusted open/update event produces no
+`libs/cabal` changes relative to Épure `main`, the workflow closes any existing
+matching Épure PR with an explanatory comment and deletes the
+`cabal-pr-<Cabal PR number>` branch; if there is no existing mirror, it no-ops.
+
+The Cabal PR sync workflow deliberately does **not** execute scripts, tests, or
+workflow files from the Cabal PR branch. It only checks out PR contents as data
+and copies them with standard archive mechanics while excluding `.git`. The
+workflow's default `GITHUB_TOKEN` permissions remain read-only in Cabal
+(`contents: read`, `pull-requests: read`); all writes to Épure use a separate
+GitHub App installation token scoped to `epure-team/epure` with Contents write
+and Pull requests write permissions. If a Cabal PR is closed unmerged, the
+matching open Épure PR is closed and its `cabal-pr-<number>` branch is deleted.
+If a Cabal PR is merged, the Épure PR is left open for backport and
+source-of-truth review instead of being closed automatically.
+
 Required secrets:
 
 - Épure repository: `CABAL_MIRROR_DISPATCH_TOKEN`, with permission to dispatch
@@ -144,12 +179,17 @@ Required secrets:
   `contents: write` on the Cabal repo is the common minimum; no branch-protection
   bypass is required.
 - Cabal repository: `CABAL_EPURE_READ_TOKEN`, with read access to the private
-  `epure-team/epure` repository.
+  `epure-team/epure` repository for the Épure-to-Cabal mirror workflow.
 - Cabal repository: `CABAL_MIRROR_APP_ID`, the app ID for the custom Cabal mirror
   GitHub App installed on `epure-team/cabal`.
 - Cabal repository: `CABAL_MIRROR_APP_PRIVATE_KEY`, the private key for that app;
-  the sync workflow exchanges it for a short-lived installation token before
-  pushing `main`.
+  the sync-from-Épure workflow exchanges it for a short-lived installation token
+  before pushing `main`.
+- Cabal repository: `CABAL_TO_EPURE_APP_ID`, the app ID for the GitHub App
+  installed on `epure-team/epure` that mirrors Cabal PRs into Épure PR branches.
+- Cabal repository: `CABAL_TO_EPURE_APP_PRIVATE_KEY`, the private key for that
+  app; the PR sync workflow exchanges it for a short-lived installation token
+  before pushing `cabal-pr-<number>` branches or editing Épure PRs.
 
 Normal contribution flow for now:
 
@@ -157,7 +197,17 @@ Normal contribution flow for now:
 2. merge through Épure's normal review path;
 3. let the mirror-sync workflow update `epure-team/cabal` automatically.
 
-Escape hatch: if a direct PR is accepted in `epure-team/cabal`, backport the
-same change to `libs/cabal` in Épure. If the team later decides the standalone
-repository should become primary, this flow can be reversed by merging in Cabal
-first and backporting to Épure, but that is not the current normal model.
+Direct Cabal PR flow:
+
+1. open or update a trusted same-repository PR in `epure-team/cabal`;
+2. let Cabal's PR sync workflow create or update the matching Épure PR;
+3. treat the Épure PR as the authoritative CI/review gate;
+4. merge through Épure, then let the normal mirror update Cabal `main`.
+
+Fork PRs and PRs from untrusted author associations are not mirrored
+automatically. A maintainer must first adopt the change onto a trusted
+`epure-team/cabal` branch if it should enter the automatic Épure PR path.
+
+Do not merge direct Cabal PRs independently except for an emergency fix that
+cannot wait for the Épure PR path. If that escape hatch is used, backport or
+reconcile the change in `libs/cabal` immediately.

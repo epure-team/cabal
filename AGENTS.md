@@ -28,8 +28,23 @@ standalone OCaml library and as the backend abstraction layer vendored under
   custom Cabal mirror GitHub App token with Contents and Workflows write
   permissions. Épure only dispatches; do not reintroduce deploy keys or direct
   branch-write pushes from Épure.
-- Cabal sync workflows should not expose manual `workflow_dispatch` ref inputs;
-  mirror updates must remain repository-dispatch-driven from Épure `main` only.
-- If editing directly in `epure-team/cabal`, ensure accepted changes are
-  backported to `epure/libs/cabal`; the normal source of truth is currently the
-  Épure monorepo subtree.
+- Cabal main mirror updates should not expose manual `workflow_dispatch` ref
+  inputs; protected `main` updates must remain repository-dispatch-driven from
+  Épure `main` only.
+- Direct PRs in `epure-team/cabal` are mirrored automatically into Épure PRs by
+  the Cabal-side `pull_request_target` workflow only when the PR is trusted and
+  same-repository: `head.repo.full_name == github.repository` and the author
+  association is `OWNER`, `MEMBER`, or `COLLABORATOR`. Fork PRs and other
+  untrusted PRs must exit successfully before creating an Épure app token,
+  checking out PR contents, or writing to Épure; maintainers must move/adopt
+  those changes onto a trusted Cabal branch for automatic mirroring. This avoids
+  turning untrusted fork contents into same-repository Épure CI runs.
+- The Cabal PR sync workflow may copy trusted PR files as data, but must never
+  run scripts/tests from the PR branch; Épure PR CI and review are the
+  authoritative gate. If a trusted PR produces no `libs/cabal` diff relative to
+  Épure `main`, close any stale mirror PR and delete its `cabal-pr-<number>`
+  branch instead of leaving a no-op Épure PR open.
+- If editing directly in `epure-team/cabal`, do not merge independently except
+  for emergency fixes that cannot wait for the Épure PR path. Normal source of
+  truth remains `epure/libs/cabal`; direct Cabal PR changes should land through
+  the mirrored Épure PR and then flow back to Cabal `main` via mirror sync.

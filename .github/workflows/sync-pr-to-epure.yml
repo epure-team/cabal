@@ -1,0 +1,352 @@
+name: Sync Cabal PR to Épure
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review, closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: cabal-pr-to-epure-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Mirror Cabal PR into Épure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate Cabal PR context
+        id: pr
+        env:
+          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "Missing pull request number" >&2
+            exit 1
+          fi
+          if ! [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "Invalid pull request number '${PR_NUMBER}'" >&2
+            exit 1
+          fi
+          if [ "${PR_ACTION}" != "closed" ]; then
+            if [ -z "${PR_HEAD_REPO}" ]; then
+              echo "Missing pull request head repository" >&2
+              exit 1
+            fi
+            if [ -z "${PR_HEAD_REF}" ]; then
+              echo "Missing pull request head ref" >&2
+              exit 1
+            fi
+            if ! [[ "${PR_HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "Invalid pull request head SHA '${PR_HEAD_SHA}'" >&2
+              exit 1
+            fi
+          fi
+
+          trusted=false
+          trusted_reason=""
+          if [ -z "${PR_HEAD_REPO}" ]; then
+            trusted_reason="missing pull request head repository"
+          elif [ "${PR_HEAD_REPO}" != "${BASE_REPOSITORY}" ]; then
+            trusted_reason="head repository ${PR_HEAD_REPO} is not trusted same-repository ${BASE_REPOSITORY}"
+          else
+            case "${AUTHOR_ASSOCIATION}" in
+              OWNER|MEMBER|COLLABORATOR)
+                trusted=true
+                trusted_reason="same-repository PR by trusted ${AUTHOR_ASSOCIATION} author"
+                ;;
+              *)
+                trusted_reason="author association ${AUTHOR_ASSOCIATION:-unknown} is not OWNER, MEMBER, or COLLABORATOR"
+                ;;
+            esac
+          fi
+
+          if [ "${trusted}" = "true" ]; then
+            echo "Automatic Épure mirroring enabled: ${trusted_reason}"
+          else
+            echo "Automatic Épure mirroring skipped: ${trusted_reason}"
+          fi
+
+          branch="cabal-pr-${PR_NUMBER}"
+          {
+            echo "action=${PR_ACTION}"
+            echo "author_association=${AUTHOR_ASSOCIATION}"
+            echo "base_repository=${BASE_REPOSITORY}"
+            echo "branch=${branch}"
+            echo "head_ref=${PR_HEAD_REF}"
+            echo "head_repo=${PR_HEAD_REPO}"
+            echo "head_sha=${PR_HEAD_SHA}"
+            echo "html_url=${PR_HTML_URL}"
+            echo "merged=${PR_MERGED}"
+            echo "number=${PR_NUMBER}"
+            echo "trusted=${trusted}"
+            echo "trusted_reason=${trusted_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Skip untrusted Cabal PR
+        if: steps.pr.outputs.trusted != 'true'
+        env:
+          TRUSTED_REASON: ${{ steps.pr.outputs.trusted_reason }}
+        run: |
+          echo "Skipping automatic Cabal PR mirroring into Épure: ${TRUSTED_REASON}."
+          echo "Maintainers must move or adopt the change onto a trusted branch in epure-team/cabal to get automatic mirroring."
+          echo "This avoids turning untrusted fork PR contents into same-repository Épure CI runs."
+
+      - name: Validate Épure app secrets
+        if: steps.pr.outputs.trusted == 'true' && (github.event.action != 'closed' || github.event.pull_request.merged == false)
+        env:
+          CABAL_TO_EPURE_APP_ID: ${{ secrets.CABAL_TO_EPURE_APP_ID }}
+          CABAL_TO_EPURE_APP_PRIVATE_KEY: ${{ secrets.CABAL_TO_EPURE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          if [ -z "${CABAL_TO_EPURE_APP_ID}" ]; then
+            echo "CABAL_TO_EPURE_APP_ID is required to create the Épure GitHub App token" >&2
+            missing=1
+          fi
+          if [ -z "${CABAL_TO_EPURE_APP_PRIVATE_KEY}" ]; then
+            echo "CABAL_TO_EPURE_APP_PRIVATE_KEY is required to create the Épure GitHub App token" >&2
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Create Épure app token
+        id: epure-app-token
+        if: steps.pr.outputs.trusted == 'true' && (github.event.action != 'closed' || github.event.pull_request.merged == false)
+        # actions/create-github-app-token v2 pinned to an immutable SHA.
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ secrets.CABAL_TO_EPURE_APP_ID }}
+          private-key: ${{ secrets.CABAL_TO_EPURE_APP_PRIVATE_KEY }}
+          owner: epure-team
+          repositories: epure
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout Cabal PR contents as data
+        if: steps.pr.outputs.trusted == 'true' && github.event.action != 'closed'
+        # actions/checkout v4 pinned to an immutable SHA.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: cabal-pr
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout Épure main
+        if: steps.pr.outputs.trusted == 'true' && github.event.action != 'closed'
+        # actions/checkout v4 pinned to an immutable SHA.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: epure-team/epure
+          ref: main
+          path: epure
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.epure-app-token.outputs.token }}
+
+      - name: Mirror Cabal tree and push Épure branch
+        id: push
+        if: steps.pr.outputs.trusted == 'true' && github.event.action != 'closed'
+        env:
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          EPURE_APP_TOKEN: ${{ steps.epure-app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${EPURE_APP_TOKEN}" ]; then
+            echo "Épure GitHub App token is required to push the mirror branch" >&2
+            exit 1
+          fi
+
+          git -C epure config user.name "cabal-to-epure[bot]"
+          git -C epure config user.email "cabal-to-epure[bot]@users.noreply.github.com"
+          git -C epure config http.https://github.com/.extraheader \
+            "AUTHORIZATION: bearer ${EPURE_APP_TOKEN}"
+
+          git -C epure checkout -B "${BRANCH}"
+
+          rm -rf epure/libs/cabal
+          mkdir -p epure/libs/cabal
+          tar -C cabal-pr --exclude='./.git' --exclude='.git' -cf - . \
+            | tar -C epure/libs/cabal -xf -
+
+          if [ -z "$(git -C epure status --porcelain -- libs/cabal)" ]; then
+            echo "No libs/cabal changes to mirror into Épure"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git -C epure add libs/cabal
+          git -C epure commit -m "sync(cabal): mirror Cabal PR #${PR_NUMBER}"
+
+          remote_ref="refs/heads/${BRANCH}"
+          remote_line="$(git -C epure ls-remote --heads origin "${BRANCH}" || true)"
+          remote_sha=""
+          if [ -n "${remote_line}" ]; then
+            remote_sha="${remote_line%%[[:space:]]*}"
+          fi
+
+          if [ -n "${remote_sha}" ]; then
+            echo "Updating existing Épure branch ${BRANCH} with force-with-lease"
+            git -C epure push origin \
+              --force-with-lease="${remote_ref}:${remote_sha}" \
+              "HEAD:${remote_ref}"
+          else
+            echo "Creating Épure branch ${BRANCH}"
+            git -C epure push origin "HEAD:${remote_ref}"
+          fi
+
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+
+      - name: No-change Cabal mirror cleanup
+        if: steps.pr.outputs.trusted == 'true' && github.event.action != 'closed' && steps.push.outputs.changed == 'false'
+        env:
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          CABAL_PR_URL: ${{ steps.pr.outputs.html_url }}
+          GH_TOKEN: ${{ steps.epure-app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          message="Source Cabal PR ${CABAL_PR_URL} currently produces no libs/cabal changes relative to Épure main; closing this stale mirrored Épure PR and deleting ${BRANCH}."
+          found=0
+
+          existing_pr="$(gh pr list \
+            --repo epure-team/epure \
+            --head "epure-team:${BRANCH}" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "${existing_pr}" ]; then
+            found=1
+            gh pr comment "${existing_pr}" \
+              --repo epure-team/epure \
+              --body "${message}"
+            gh pr close "${existing_pr}" --repo epure-team/epure
+          else
+            echo "No open Épure PR found for ${BRANCH}"
+          fi
+
+          if gh api "repos/epure-team/epure/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
+            found=1
+            gh api \
+              --method DELETE \
+              "repos/epure-team/epure/git/refs/heads/${BRANCH}"
+          else
+            echo "No Épure branch found for ${BRANCH}"
+          fi
+
+          if [ "${found}" -eq 0 ]; then
+            echo "No existing Épure PR or branch found for ${BRANCH}; no cleanup needed."
+          fi
+
+      - name: Create or update Épure PR
+        if: steps.pr.outputs.trusted == 'true' && github.event.action != 'closed' && steps.push.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          CABAL_PR_URL: ${{ steps.pr.outputs.html_url }}
+          GH_TOKEN: ${{ steps.epure-app-token.outputs.token }}
+          PR_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          PR_HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        working-directory: epure
+        run: |
+          set -euo pipefail
+
+          body_file="${GITHUB_WORKSPACE}/epure-pr-body.md"
+          title="sync(cabal): mirror Cabal PR #${PR_NUMBER}"
+
+          cat > "${body_file}" <<EOF
+          This PR mirrors Cabal PR #${PR_NUMBER} into \`libs/cabal\`.
+
+          - Cabal PR: ${CABAL_PR_URL}
+          - Source repository: \`${PR_HEAD_REPO}\`
+          - Source branch: \`${PR_HEAD_REF}\`
+          - Source SHA: \`${PR_HEAD_SHA}\`
+
+          Épure PR CI and review are authoritative for changes vendored under
+          \`libs/cabal\`. Do not treat the source Cabal PR checks as the final
+          merge gate for Épure.
+          EOF
+
+          existing_pr="$(gh pr list \
+            --repo epure-team/epure \
+            --head "epure-team:${BRANCH}" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "${existing_pr}" ]; then
+            gh pr edit "${existing_pr}" \
+              --repo epure-team/epure \
+              --title "${title}" \
+              --body-file "${body_file}"
+          else
+            gh pr create \
+              --repo epure-team/epure \
+              --base main \
+              --head "${BRANCH}" \
+              --title "${title}" \
+              --body-file "${body_file}"
+          fi
+
+      - name: Close Épure mirror for unmerged Cabal PR
+        if: steps.pr.outputs.trusted == 'true' && github.event.action == 'closed' && github.event.pull_request.merged == false
+        env:
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          CABAL_PR_URL: ${{ steps.pr.outputs.html_url }}
+          GH_TOKEN: ${{ steps.epure-app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          existing_pr="$(gh pr list \
+            --repo epure-team/epure \
+            --head "epure-team:${BRANCH}" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "${existing_pr}" ]; then
+            gh pr comment "${existing_pr}" \
+              --repo epure-team/epure \
+              --body "Source Cabal PR ${CABAL_PR_URL} was closed unmerged; closing this mirrored Épure PR."
+            gh pr close "${existing_pr}" --repo epure-team/epure
+          else
+            echo "No open Épure PR found for ${BRANCH}"
+          fi
+
+          if gh api "repos/epure-team/epure/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
+            gh api \
+              --method DELETE \
+              "repos/epure-team/epure/git/refs/heads/${BRANCH}"
+          else
+            echo "No Épure branch found for ${BRANCH}"
+          fi
+
+      - name: Leave merged Cabal PR mirror open
+        if: steps.pr.outputs.trusted == 'true' && github.event.action == 'closed' && github.event.pull_request.merged == true
+        run: |
+          echo "Source Cabal PR was merged; leaving any matching Épure PR open for review."
