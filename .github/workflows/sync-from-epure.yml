@@ -5,7 +5,7 @@ on:
     types: [sync-cabal]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sync-from-epure-main
@@ -40,9 +40,8 @@ jobs:
             echo "Missing source_sha in repository_dispatch payload" >&2
             exit 1
           fi
-
-          if ! [[ "${DISPATCH_SOURCE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "Invalid source_sha '${DISPATCH_SOURCE_SHA}'. Expected a 40-character hexadecimal commit SHA." >&2
+          if ! [[ "${DISPATCH_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid source_sha '${DISPATCH_SOURCE_SHA}'. Expected a 40-character lowercase hexadecimal commit SHA." >&2
             exit 1
           fi
 
@@ -67,6 +66,24 @@ jobs:
             exit 1
           fi
 
+      - name: Validate Cabal mirror app secrets
+        env:
+          CABAL_MIRROR_APP_ID: ${{ secrets.CABAL_MIRROR_APP_ID }}
+          CABAL_MIRROR_APP_PRIVATE_KEY: ${{ secrets.CABAL_MIRROR_APP_PRIVATE_KEY }}
+        run: |
+          missing=0
+          if [ -z "${CABAL_MIRROR_APP_ID}" ]; then
+            echo "CABAL_MIRROR_APP_ID is required to create the Cabal mirror GitHub App token" >&2
+            missing=1
+          fi
+          if [ -z "${CABAL_MIRROR_APP_PRIVATE_KEY}" ]; then
+            echo "CABAL_MIRROR_APP_PRIVATE_KEY is required to create the Cabal mirror GitHub App token" >&2
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi
+
       - name: Checkout Épure source
         uses: actions/checkout@v4
         with:
@@ -84,21 +101,22 @@ jobs:
           set -euo pipefail
           source_sha="${{ steps.source.outputs.sha }}"
 
-          if [ -z "${CABAL_EPURE_READ_TOKEN}" ]; then
-            echo "CABAL_EPURE_READ_TOKEN is required to refresh Épure main" >&2
+          checked_out_sha=$(git -C epure rev-parse HEAD)
+
+          if [ "${checked_out_sha}" != "${source_sha}" ]; then
+            echo "Checked-out Épure revision mismatch: expected '${source_sha}', got '${checked_out_sha}'" >&2
             exit 1
           fi
 
-          git -C epure \
-            -c http.https://github.com/.extraheader="AUTHORIZATION: bearer ${CABAL_EPURE_READ_TOKEN}" \
-            fetch origin main
+          response=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${CABAL_EPURE_READ_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/epure-team/epure/commits/main)
+          resolved_sha=$(jq -r '.sha // empty' <<< "${response}")
 
-          if resolved_sha=$(git -C epure rev-parse --verify FETCH_HEAD 2>/dev/null); then
-            :
-          elif resolved_sha=$(git -C epure rev-parse --verify origin/main 2>/dev/null); then
-            :
-          else
-            echo "Unable to resolve latest main revision in the checked-out Épure clone" >&2
+          if ! [[ "${resolved_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Unable to resolve latest Épure main SHA from GitHub API" >&2
             exit 1
           fi
 
@@ -106,6 +124,17 @@ jobs:
             echo "Épure revision mismatch: payload sha ${source_sha} does not match resolved Épure main SHA ${resolved_sha}" >&2
             exit 1
           fi
+
+      - name: Create Cabal mirror app token
+        id: mirror-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CABAL_MIRROR_APP_ID }}
+          private-key: ${{ secrets.CABAL_MIRROR_APP_PRIVATE_KEY }}
+          owner: epure-team
+          repositories: cabal
+          permission-contents: write
+          permission-workflows: write
 
       - name: Split Cabal subtree
         id: split
@@ -122,14 +151,14 @@ jobs:
 
       - name: Push split commit to Cabal main
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CABAL_MIRROR_TOKEN: ${{ steps.mirror-app-token.outputs.token }}
           SPLIT_SHA: ${{ steps.split.outputs.sha }}
         run: |
-          if [ -z "${GITHUB_TOKEN}" ]; then
-            echo "GITHUB_TOKEN is required to push epure-team/cabal:main" >&2
+          if [ -z "${CABAL_MIRROR_TOKEN}" ]; then
+            echo "Cabal mirror GitHub App token is required to push epure-team/cabal:main" >&2
             exit 1
           fi
 
           git -C epure push \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/epure-team/cabal.git" \
+            "https://x-access-token:${CABAL_MIRROR_TOKEN}@github.com/epure-team/cabal.git" \
             "${SPLIT_SHA}:refs/heads/main"

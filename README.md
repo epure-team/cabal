@@ -122,15 +122,20 @@ dispatches Cabal's mirror-sync workflow on every push to Épure `main`.
 The Cabal workflow is only triggered by Épure's `repository_dispatch` event and
 uses a payload constrained to `source_repository=epure-team/epure`,
 `source_ref=refs/heads/main`, and the full 40-character `source_sha`. It checks
-out that exact SHA, verifies it still matches `origin/main`, subtree-splits
-`libs/cabal`, and pushes the result to `epure-team/cabal:main` with Cabal's
-repository `GITHUB_TOKEN`, where the standalone Cabal CI runs against the mirror.
-When `libs/cabal` is unchanged, the subtree split/push step is a no-op.
+out that exact SHA with `CABAL_EPURE_READ_TOKEN`, verifies the payload SHA is
+still the latest Épure `main` via the GitHub REST API, subtree-splits
+`libs/cabal`, creates an installation token for the Cabal mirror GitHub App, and
+pushes the result to `epure-team/cabal:main` with that app token. The standalone
+Cabal CI then runs against the mirror. When `libs/cabal` is unchanged, the
+subtree split/push step is a no-op.
 
 `epure-team/cabal:main` should remain protected with PRs required for humans.
-The branch ruleset is expected to allow only the GitHub Actions app automation
-path to bypass that rule for mirror updates; Épure does not need branch-write
-bypass credentials.
+Install the custom Cabal mirror GitHub App on `epure-team/cabal` with repository
+Contents write and Workflows write permissions. Workflows write is required
+because the mirrored subtree can update `.github/workflows/*` files in Cabal.
+Add that app installation actor as the only bypass actor for the mirror-update
+branch ruleset or branch-protection rule. Épure only dispatches the sync event;
+it does not hold branch-write or bypass credentials for Cabal.
 
 Required secrets:
 
@@ -140,6 +145,11 @@ Required secrets:
   bypass is required.
 - Cabal repository: `CABAL_EPURE_READ_TOKEN`, with read access to the private
   `epure-team/epure` repository.
+- Cabal repository: `CABAL_MIRROR_APP_ID`, the app ID for the custom Cabal mirror
+  GitHub App installed on `epure-team/cabal`.
+- Cabal repository: `CABAL_MIRROR_APP_PRIVATE_KEY`, the private key for that app;
+  the sync workflow exchanges it for a short-lived installation token before
+  pushing `main`.
 
 Normal contribution flow for now:
 
