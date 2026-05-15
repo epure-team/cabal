@@ -2,6 +2,8 @@
 
 Cabal is the **Caml Agent Backend Abstraction Library**.
 
+<!-- cabal-pr-to-epure-smoke: temporary workflow test; do not merge. -->
+
 It provides backend-agnostic agent execution primitives, project configuration
 generation, backend registry metadata, process invocation helpers, adapter
 loading, and session log utilities for OCaml projects that need to drive
