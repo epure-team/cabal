@@ -23,7 +23,9 @@ jobs:
         env:
           AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
           BASE_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
           PR_ACTION: ${{ github.event.action }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -69,7 +71,30 @@ jobs:
                 trusted_reason="same-repository PR by trusted ${AUTHOR_ASSOCIATION} author"
                 ;;
               *)
-                trusted_reason="author association ${AUTHOR_ASSOCIATION:-unknown} is not OWNER, MEMBER, or COLLABORATOR"
+                if [ -z "${PR_AUTHOR}" ]; then
+                  trusted_reason="missing pull request author"
+                elif ! [[ "${PR_AUTHOR}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
+                  trusted_reason="pull request author is not a valid GitHub username"
+                else
+                  permission=""
+                  if permission="$(gh api \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    "repos/${BASE_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" \
+                    --jq '.permission' 2>/dev/null)"; then
+                    case "${permission}" in
+                      admin|maintain|write)
+                        trusted=true
+                        trusted_reason="same-repository PR by ${PR_AUTHOR} with ${permission} repository permission"
+                        ;;
+                      *)
+                        trusted_reason="author association ${AUTHOR_ASSOCIATION:-unknown} is not trusted and repository permission ${permission:-unknown} is not admin, maintain, or write"
+                        ;;
+                    esac
+                  else
+                    trusted_reason="author association ${AUTHOR_ASSOCIATION:-unknown} is not trusted and repository permission lookup failed"
+                  fi
+                fi
                 ;;
             esac
           fi

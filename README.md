@@ -142,13 +142,19 @@ but the final review path still runs through Épure. Cabal's
 `sync-pr-to-epure.yml` workflow runs on `pull_request_target` for Cabal PR
 open/update/close events, but automatic Épure mirroring is restricted to trusted
 same-repository PRs only: `github.event.pull_request.head.repo.full_name` must
-equal `github.repository` (`epure-team/cabal`), and
-`github.event.pull_request.author_association` must be one of `OWNER`, `MEMBER`,
-or `COLLABORATOR`. For fork PRs or other untrusted associations, the workflow
-exits successfully before creating an Épure app token, checking out PR contents,
-or writing to Épure. Maintainers who want automatic mirroring for those changes
-must move or adopt them onto a trusted branch in `epure-team/cabal`. This avoids
-turning untrusted fork PR contents into same-repository Épure CI runs.
+equal `github.repository` (`epure-team/cabal`), and the author must either have
+`github.event.pull_request.author_association` of `OWNER`, `MEMBER`, or
+`COLLABORATOR`, or pass a same-repo permission fallback. The fallback uses the
+read-only Cabal `GITHUB_TOKEN` during the initial validation step to query
+`GET /repos/{owner}/{repo}/collaborators/{username}/permission` and trusts only
+`admin`, `maintain`, or `write`. This handles maintainers whose private org
+membership makes GitHub report `author_association=NONE`. Fork PRs,
+cross-repository PRs, permission values such as `triage`, `read`, or `none`, and
+permission lookup failures exit successfully before creating an Épure app token,
+checking out PR contents, or writing to Épure. Maintainers who want automatic
+mirroring for untrusted changes must move or adopt them onto a trusted branch in
+`epure-team/cabal`. This avoids turning untrusted fork PR contents into
+same-repository Épure CI runs.
 
 For trusted open PR events, the workflow checks out the Cabal PR head at the
 immutable `github.event.pull_request.head.sha` as data only, checks out
@@ -204,7 +210,8 @@ Direct Cabal PR flow:
 3. treat the Épure PR as the authoritative CI/review gate;
 4. merge through Épure, then let the normal mirror update Cabal `main`.
 
-Fork PRs and PRs from untrusted author associations are not mirrored
+Fork PRs, cross-repository PRs, and PRs from authors without trusted association
+or `write`/`maintain`/`admin` repository permission are not mirrored
 automatically. A maintainer must first adopt the change onto a trusted
 `epure-team/cabal` branch if it should enter the automatic Épure PR path.
 

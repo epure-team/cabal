@@ -34,11 +34,15 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Direct PRs in `epure-team/cabal` are mirrored automatically into Épure PRs by
   the Cabal-side `pull_request_target` workflow only when the PR is trusted and
   same-repository: `head.repo.full_name == github.repository` and the author
-  association is `OWNER`, `MEMBER`, or `COLLABORATOR`. Fork PRs and other
-  untrusted PRs must exit successfully before creating an Épure app token,
-  checking out PR contents, or writing to Épure; maintainers must move/adopt
-  those changes onto a trusted Cabal branch for automatic mirroring. This avoids
-  turning untrusted fork contents into same-repository Épure CI runs.
+  association is `OWNER`, `MEMBER`, or `COLLABORATOR`, or the initial validation
+  step confirms the author has `write`, `maintain`, or `admin` repository
+  permission with the read-only Cabal `GITHUB_TOKEN`. This fallback handles
+  private org membership that can report `author_association=NONE`. Fork PRs,
+  cross-repository PRs, lower permissions, lookup failures, and other untrusted
+  PRs must exit successfully before creating an Épure app token, checking out PR
+  contents, or writing to Épure; maintainers must move/adopt those changes onto a
+  trusted Cabal branch for automatic mirroring. This avoids turning untrusted
+  fork contents into same-repository Épure CI runs.
 - The Cabal PR sync workflow may copy trusted PR files as data, but must never
   run scripts/tests from the PR branch; Épure PR CI and review are the
   authoritative gate. If a trusted PR produces no `libs/cabal` diff relative to
