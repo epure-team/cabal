@@ -204,8 +204,10 @@ jobs:
 
           git -C epure config user.name "cabal-to-epure[bot]"
           git -C epure config user.email "cabal-to-epure[bot]@users.noreply.github.com"
+          auth_header="$(printf 'x-access-token:%s' "${EPURE_APP_TOKEN}" | base64 -w 0)"
           git -C epure config http.https://github.com/.extraheader \
-            "AUTHORIZATION: bearer ${EPURE_APP_TOKEN}"
+            "AUTHORIZATION: Basic ${auth_header}"
+          unset auth_header
 
           git -C epure checkout -B "${BRANCH}"
 
