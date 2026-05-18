@@ -69,6 +69,26 @@
  (modules test_session_trimmer))
 
 (test
+ (name test_session_event_log)
+ (libraries cabal alcotest eio eio_main unix)
+ (modules test_session_event_log))
+
+(test
+ (name test_backend_event_redaction)
+ (libraries cabal alcotest yojson fmt)
+ (modules test_backend_event_redaction))
+
+(test
+ (name test_validated_namespace)
+ (libraries cabal alcotest)
+ (modules test_validated_namespace))
+
+(test
+ (name test_backend_config_writer)
+ (libraries cabal alcotest unix str)
+ (modules test_backend_config_writer))
+
+(test
  (name test_resource_guardian)
  (libraries cabal alcotest)
  (modules test_resource_guardian))
@@ -120,5 +140,20 @@
 
 (test
  (name test_demo_517)
- (libraries cabal alcotest eio eio_main eio_posix)
+ (libraries cabal alcotest eio eio_main)
  (modules test_demo_517))
+
+(test
+ (name test_agent_text_extraction)
+ (libraries cabal alcotest yojson)
+ (modules test_agent_text_extraction))
+
+(test
+ (name test_model_enumeration)
+ (libraries cabal alcotest unix)
+ (modules test_model_enumeration))
+
+(test
+ (name test_model_probe)
+ (libraries cabal alcotest eio eio_main)
+ (modules test_model_probe))

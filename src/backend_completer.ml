@@ -51,7 +51,13 @@ let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
   in
   match result.status with
   | Backend_types.Success ->
-      Ok {text = result.stdout; backend_session_id = result.session_id}
+      (* Prefer the adapter-normalised agent text; fall back to raw stdout for
+         backends or paths that have not yet populated [agent_text]. *)
+      let text =
+        if String.length result.agent_text > 0 then result.agent_text
+        else result.stdout
+      in
+      Ok {text; backend_session_id = result.session_id}
   | Backend_types.Failed msg -> Error (with_stderr msg)
   | Backend_types.Timeout -> Error "Backend timeout"
   | Backend_types.Cancelled -> Error "Backend cancelled"

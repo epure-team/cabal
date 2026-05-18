@@ -19,6 +19,10 @@ module Mock_backend : Agentic_backend.S = struct
 
   let name = "Mock Backend"
 
+  let models : string list = []
+
+  let models_probe = None
+
   let available ~sw:_ ~env:_ = true
 
   let supports_session_resume = false
@@ -46,6 +50,7 @@ module Mock_backend : Agentic_backend.S = struct
       elapsed = 1.0;
       cost = None;
       stdout = "Mock executed: " ^ spec.prompt;
+      agent_text = "Mock executed: " ^ spec.prompt;
       stderr = "";
       exit_code = 0;
       session_id = None;
@@ -57,6 +62,10 @@ module Unavailable_backend : Agentic_backend.S = struct
   let id = "unavailable"
 
   let name = "Unavailable Backend"
+
+  let models : string list = []
+
+  let models_probe = None
 
   let available ~sw:_ ~env:_ = false
 
@@ -76,6 +85,7 @@ module Unavailable_backend : Agentic_backend.S = struct
       elapsed = 0.0;
       cost = None;
       stdout = "";
+      agent_text = "";
       stderr = "Backend not available";
       exit_code = 1;
       session_id = None;
@@ -103,11 +113,11 @@ let test_make_task_spec () =
   Alcotest.(check int) "lsp_servers default" 0 (List.length spec.lsp_servers) ;
   Alcotest.(check string)
     "managed namespace default id"
-    "epure"
+    "cabal"
     spec.managed_namespace.id ;
   Alcotest.(check string)
     "managed namespace default config_dir"
-    ".epure/backend-config"
+    ".cabal/backend-config"
     spec.managed_namespace.config_dir
 
 let test_make_task_spec_with_options () =
@@ -259,7 +269,7 @@ let test_task_spec_json_defaults_for_new_fields () =
       Alcotest.(check int) "legacy lsp default" 0 (List.length spec.lsp_servers) ;
       Alcotest.(check string)
         "legacy namespace default"
-        "epure"
+        "cabal"
         spec.managed_namespace.id
 
 let test_validate_managed_namespace_rejects_bad_id () =
@@ -369,6 +379,7 @@ let test_task_result_json_roundtrip () =
       elapsed = 45.5;
       cost = Some cost;
       stdout = "Build succeeded\nAll tests pass";
+      agent_text = "Build succeeded\nAll tests pass";
       stderr = "Warning: unused variable";
       exit_code = 0;
       session_id = None;
@@ -392,6 +403,7 @@ let test_task_result_failed_json_roundtrip () =
       elapsed = 12.3;
       cost = None;
       stdout = "";
+      agent_text = "";
       stderr = "Error: unbound module";
       exit_code = 1;
       session_id = None;
@@ -415,6 +427,7 @@ let test_task_result_timeout_json_roundtrip () =
       elapsed = 300.0;
       cost = None;
       stdout = "";
+      agent_text = "";
       stderr = "";
       exit_code = 124;
       session_id = None;

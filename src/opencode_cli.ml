@@ -11,6 +11,37 @@ let id = "opencode"
 
 let name = "OpenCode"
 
+(* OpenCode is provider-agnostic; the canonical pair below mirrors the
+   model slugs documented for `opencode run --model`. *)
+let models =
+  [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+  ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+
+(* `opencode models` lists every provider/model slug the local CLI knows
+   about, one per line, without requiring authentication.  Use it as the
+   live enumeration source, parsing non-empty lines and falling back when
+   the binary is absent, the call times out, or the output is empty. *)
+let parse_models_output stdout =
+  stdout |> String.split_on_char '\n'
+  |> List.filter_map (fun line ->
+         let trimmed = String.trim line in
+         if String.length trimmed = 0 then None else Some trimmed)
+
+let models_probe =
+  Some
+    (fun ~sw:_ ~env ->
+      match
+        Backend_process.capture_version_output
+          ~env
+          ~timeout_seconds:5.0
+          ["opencode"; "models"]
+      with
+      | Error msg -> Error msg
+      | Ok output -> (
+          match parse_models_output output with
+          | [] -> Error "opencode models returned no parseable lines"
+          | models -> Ok models))
+
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["opencode"; "--version"]
 
@@ -73,20 +104,12 @@ let check_project_config ~sw ~env ~project_dir ~setup_result =
            "OpenCode native config validation could not run: %s"
            (Printexc.to_string e))
 
-type json_string_map = (string * string) list
+(* Shared json_string_map encoding lives in Backend_json_helpers. *)
+type json_string_map = Backend_json_helpers.json_string_map
 
-let json_string_map_to_yojson fields =
-  `Assoc (List.map (fun (key, value) -> (key, `String value)) fields)
+let json_string_map_to_yojson = Backend_json_helpers.json_string_map_to_yojson
 
-let json_string_map_of_yojson = function
-  | `Assoc fields ->
-      let rec loop acc = function
-        | [] -> Ok (List.rev acc)
-        | (key, `String value) :: rest -> loop ((key, value) :: acc) rest
-        | (key, _) :: _ -> Error (Printf.sprintf "expected string for %s" key)
-      in
-      loop [] fields
-  | _ -> Error "expected JSON object"
+let json_string_map_of_yojson = Backend_json_helpers.json_string_map_of_yojson
 
 type local_mcp_server_settings = {
   type_ : string; [@key "type"]
@@ -191,8 +214,8 @@ let project_config_artifacts ~managed_namespace ~mcp_servers:_ ~lsp_servers =
   ]
 
 (* OpenCode reads MCP config from opencode.json in the project directory,
-   not via CLI flags. This function ensures the epure MCP server entry
-   is present and up-to-date in opencode.json before each run. *)
+   not via CLI flags. This function ensures the host-supplied MCP server
+   entry is present and up-to-date in opencode.json before each run. *)
 let strip_jsonc_comments content =
   let len = String.length content in
   let buf = Buffer.create len in
@@ -585,6 +608,7 @@ let check_opencode_mutation ~env ~config_path ~backup result =
                kind
                restore_msg);
         stdout = "";
+        agent_text = "";
         session_id = None;
       }
 

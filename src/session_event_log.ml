@@ -7,10 +7,13 @@
 
 (** Per-session append-only NDJSON event log for live observability.
 
-    Each session gets a file at [.epure/agent-sessions/<session_uuid>.ndjson].
+    The session NDJSON file is created under whichever
+    [session_logs_dir] the host application passes (by convention, hosts
+    locate this under their managed namespace's config directory, e.g.
+    [.cabal/agent-sessions/<session_uuid>.ndjson] under the default namespace).
     All writes are best-effort: failures are swallowed so they never block a
-    build or agentic turn.  The log is independent of the DB-backed replay
-    mechanism ([agentic_turns] / [reconstruct_agentic_context]).
+    build or agentic turn.  The log is independent of any host-side
+    DB-backed replay mechanism.
 
     I/O uses [Eio.Path] throughout (no blocking stdlib calls). *)
 
@@ -46,12 +49,12 @@ let append_line ~fs ~session_logs_dir ~session_id line =
   let file_path = Eio.Path.(dir_path / (session_id ^ ".ndjson")) in
   Eio.Path.with_open_out
     ~append:true
-    ~create:(`If_missing 0o640)
+    ~create:(`If_missing 0o600)
     file_path
     (fun flow -> Eio.Flow.copy_string (line ^ "\n") flow)
 
 (** Best-effort wrapper: swallows all exceptions so log failures never
-    propagate to the caller.  Logs warnings via epure diagnostics. *)
+    propagate to the caller.  Logs warnings via {!Diagnostics}. *)
 let try_append ~fs ~session_logs_dir ~session_id line =
   if not (is_safe_session_id session_id) then ()
   else
@@ -194,7 +197,14 @@ let write_raw_event ~fs ~session_logs_dir ~session_id ~backend ~turn_number line
         ~session_logs_dir
         ~session_id
         (Yojson.Safe.to_string envelope)
-  | exception _ -> ()
+  | exception exn ->
+      Diagnostics.warn
+        "[session_event_log] dropping unparseable raw event (session=%s \
+         backend=%s turn=%d): %s"
+        session_id
+        backend
+        turn_number
+        (Printexc.to_string exn)
 
 (* -------------------------------------------------------------------------- *)
 (* Read API                                                                    *)
@@ -244,6 +254,12 @@ let read_events ~fs ~session_logs_dir ~session_id () =
           (fun line ->
             match Yojson.Safe.from_string line with
             | json -> Some json
-            | exception _ -> None)
+            | exception exn ->
+              Diagnostics.warn
+                "[session_event_log] dropping unparseable line in session=%s: \
+                 %s"
+                session_id
+                (Printexc.to_string exn) ;
+              None)
           lines
     | exception Eio.Io _ -> []

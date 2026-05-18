@@ -48,15 +48,67 @@ let float_field_opt obj key default =
   | Some (`String s) -> ( try float_of_string s with _ -> default)
   | _ -> default
 
-let env_mappings_field obj key =
+(** [env_mappings_field ~source obj key] reads an "env"-style sub-mapping.
+    Non-string values are dropped (env vars must be strings on a process
+    boundary) but each drop emits a [Diagnostics.warn] tagged with the
+    YAML [source] and the offending field, so misconfigured adapters
+    don't fail mysteriously at backend invocation time. *)
+let env_mappings_field ~source obj key =
   match List.assoc_opt key obj with
   | Some (`O pairs) ->
-      let mappings =
-        List.filter_map
-          (fun (k, v) -> match v with `String s -> Some (k, s) | _ -> None)
-          pairs
-      in
-      mappings
+    List.filter_map
+      (fun (k, v) ->
+        match v with
+        | `String s -> Some (k, s)
+        | other ->
+          let kind =
+            match other with
+            | `Bool _ -> "bool"
+            | `Float _ -> "number"
+            | `O _ -> "mapping"
+            | `A _ -> "sequence"
+            | `Null -> "null"
+            | `String _ -> "string"
+          in
+          Diagnostics.warn
+            "[adapter_loader] %s: ignoring env mapping %S — expected \
+             string, got %s"
+            source
+            k
+            kind ;
+          None)
+      pairs
+  | _ -> []
+
+(** [string_list_field ~source obj key] reads an array of strings.  Non-string
+    entries are dropped with a [Diagnostics.warn] so a stray bool/number in
+    [models:] doesn't break adapter registration.  Returns [[]] when [key] is
+    absent or not a sequence. *)
+let string_list_field ~source obj key =
+  match List.assoc_opt key obj with
+  | Some (`A items) ->
+      List.filter_map
+        (fun item ->
+          match item with
+          | `String s -> Some s
+          | other ->
+              let kind =
+                match other with
+                | `Bool _ -> "bool"
+                | `Float _ -> "number"
+                | `O _ -> "mapping"
+                | `A _ -> "sequence"
+                | `Null -> "null"
+                | `String _ -> "string"
+              in
+              Diagnostics.warn
+                "[adapter_loader] %s: ignoring %s entry — expected string, got \
+                 %s"
+                source
+                key
+                kind ;
+              None)
+        items
   | _ -> []
 
 (* --- Validate ------------------------------------------------------------- *)
@@ -79,8 +131,9 @@ let load_string ~source s =
       let* display_name = string_field obj "display_name" in
       let* invocation_command = string_field obj "invocation_command" in
       let* template_set = string_field obj "template_set" in
-      let env_mappings = env_mappings_field obj "env" in
+      let env_mappings = env_mappings_field ~source obj "env" in
       let timeout_seconds = float_field_opt obj "timeout_seconds" 300.0 in
+      let models = string_list_field ~source obj "models" in
       let cfg =
         {
           name;
@@ -91,6 +144,7 @@ let load_string ~source s =
           env_mappings;
           timeout_seconds;
           source;
+          models;
         }
       in
       match validate cfg with
@@ -139,9 +193,56 @@ let load_dir dir =
         (filename, result))
       yaml_files
 
+(* --- Probe runner --------------------------------------------------------- *)
+
+(** [run_probe ~sw ~env backend] invokes the backend's [models_probe] (if any)
+    under exception protection and returns [Some (Probe, models)] when the
+    probe returned a non-empty list.  Any other outcome — [None] probe,
+    [Error _], an exception, or [Ok []] — yields [None] and the caller falls
+    back to the static list. *)
+let run_probe ~sw ~env backend =
+  match Agentic_backend.models_probe backend with
+  | None -> None
+  | Some probe -> (
+    let id = Agentic_backend.id backend in
+    match probe ~sw ~env with
+    | exception e ->
+      Diagnostics.warn
+        "[adapter_loader] %s models_probe raised: %s"
+        id
+        (Printexc.to_string e) ;
+      None
+    | Error msg ->
+      Diagnostics.warn "[adapter_loader] %s models_probe error: %s" id msg ;
+      None
+    | Ok [] ->
+      Diagnostics.warn
+        "[adapter_loader] %s models_probe returned empty list; falling \
+         back to static"
+        id ;
+      None
+    | Ok models -> Some models)
+
+(** [resolve_probes_for_registered ~sw ~env ()] walks every registered
+    backend and, for each one with a [models_probe], publishes the
+    probe-resolved view into the registry side table.  Backends without a
+    probe (or whose probe falls back) keep the [Static] view that
+    [Registry.register] seeded. *)
+let resolve_probes_for_registered ~sw ~env () =
+  List.iter
+    (fun backend ->
+      let id = Agentic_backend.id backend in
+      match run_probe ~sw ~env backend with
+      | Some models -> Registry.set_resolved_models id (models, Registry.Probe)
+      | None ->
+        Registry.set_resolved_models
+          id
+          (Agentic_backend.models backend, Registry.Static))
+    (Registry.list ())
+
 (* --- Register all ---------------------------------------------------------- *)
 
-let register_all ?project_dir () =
+let register_all ?project_dir ?sw ?env () =
   (* 1. Built-in YAML configs — lowest priority *)
   List.iter
     (fun (_name, content) ->
@@ -154,11 +255,11 @@ let register_all ?project_dir () =
             "[adapter_loader] builtin adapter parse error: %s"
             msg)
     Builtin.all ;
-  (* 2. User-global: ~/.epure/adapters/*.yaml *)
+  (* 2. User-global: ~/.cabal/adapters/*.yaml *)
   let home = try Sys.getenv "HOME" with Not_found -> "" in
   if home <> "" then begin
     let global_dir =
-      Filename.concat home (Filename.concat ".epure" "adapters")
+      Filename.concat home (Filename.concat ".cabal" "adapters")
     in
     List.iter
       (fun (filename, result) ->
@@ -169,11 +270,11 @@ let register_all ?project_dir () =
         | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
       (load_dir global_dir)
   end ;
-  (* 3. Project-local: .epure/adapters/*.yaml — highest priority *)
-  match project_dir with
+  (* 3. Project-local: .cabal/adapters/*.yaml — highest priority *)
+  (match project_dir with
   | Some pd ->
       let local_dir =
-        Filename.concat pd (Filename.concat ".epure" "adapters")
+        Filename.concat pd (Filename.concat ".cabal" "adapters")
       in
       List.iter
         (fun (filename, result) ->
@@ -183,4 +284,11 @@ let register_all ?project_dir () =
               Registry.register backend
           | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
         (load_dir local_dir)
-  | None -> ()
+  | None -> ()) ;
+  (* 4. Probe layer — when an Eio environment is available, ask each
+     backend's [models_probe] for the live model list and cache the
+     outcome in the registry.  Without [~sw]/[~env] the static seed from
+     [Registry.register] remains in place. *)
+  match (sw, env) with
+  | Some sw, Some env -> resolve_probes_for_registered ~sw ~env ()
+  | _ -> ()

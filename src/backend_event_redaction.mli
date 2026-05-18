@@ -10,16 +10,25 @@
     Pure module (no I/O, no Eio).  Redacts sensitive fields from raw backend
     JSON events before they are persisted to NDJSON logs or the DB.
 
-    Sensitive field names whose string values are always removed:
-    [prompt], [instructions], [diff], [patch], [log], [logs], [stdout],
-    [stderr], [content], [body], [file_content], [file_contents], [text],
-    [message], [messages], [response], [result], [authorization], [auth], [auth_header],
-    [token], [access_token], [refresh_token], [bearer_token], [id_token],
-    [api_key], [password], [credential], [credentials], [secret],
-    [private_key].
+    Sensitive field names whose string values are always removed include
+    the obvious credential carriers ([prompt], [instructions], [diff],
+    [patch], [content], [stdout], [stderr], [authorization], [token],
+    [access_token], [refresh_token], [bearer_token], [bearer],
+    [oauth_token], [oauth], [jwt], [api_key], [api_keys], [password],
+    [client_secret], [private_key], [ssh_key], [signature],
+    [aws_secret_access_key], [aws_access_key_id], [gcp_service_account]),
+    transport-level credential carriers ([cookie], [set_cookie], [session],
+    [session_token], [connection_string], [dsn]), and process-environment
+    carriers ([environment], [env], [env_vars], [environ]). The complete
+    list is in [Backend_event_redaction.sensitive_fields].
 
-    String values longer than 256 characters are also redacted regardless of
-    field name (precautionary payload truncation).
+    Two value-level patterns are also redacted in any field:
+    - URLs containing embedded credentials ([scheme://user:pass@host]).
+    - JWT-shaped tokens (three URL-safe base64 segments where header and
+      payload both begin with [eyJ]).
+
+    String values longer than 256 characters are also redacted regardless
+    of field name (precautionary payload truncation).
 
     Numbers, booleans, and null are always preserved.  Objects and arrays are
     recursed into; individual string fields inside them are checked by the

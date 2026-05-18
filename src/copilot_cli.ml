@@ -11,6 +11,17 @@ let id = "copilot-cli"
 
 let name = "GitHub Copilot"
 
+(* GitHub Copilot CLI is a meta-CLI that proxies to several upstream model
+   providers; we expose the canonical pair selectable via its --model flag. *)
+let models =
+  [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+  ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+
+(* `copilot` only accepts `--model <id>` and ships a `providers` subcommand
+   that requires interactive input (no machine-parseable listing).  Stay on
+   the static list until upstream adds a non-interactive enumeration. *)
+let models_probe = None
+
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["copilot"; "--version"]
 
@@ -24,20 +35,13 @@ let read_project_file ~env ~project_dir rel_path =
   with e ->
     Error (Printf.sprintf "could not read %s: %s" path (Printexc.to_string e))
 
-type json_string_map = (string * string) list
+(* json_string_map_{to,of}_yojson live in Backend_json_helpers; re-export
+   the type alias so [@@deriving yojson] resolves the field codec by name. *)
+type json_string_map = Backend_json_helpers.json_string_map
 
-let json_string_map_to_yojson fields =
-  `Assoc (List.map (fun (key, value) -> (key, `String value)) fields)
+let json_string_map_to_yojson = Backend_json_helpers.json_string_map_to_yojson
 
-let json_string_map_of_yojson = function
-  | `Assoc fields ->
-      let rec loop acc = function
-        | [] -> Ok (List.rev acc)
-        | (key, `String value) :: rest -> loop ((key, value) :: acc) rest
-        | (key, _) :: _ -> Error (Printf.sprintf "expected string for %s" key)
-      in
-      loop [] fields
-  | _ -> Error "expected JSON object"
+let json_string_map_of_yojson = Backend_json_helpers.json_string_map_of_yojson
 
 type mcp_server_settings = {
   type_ : string; [@key "type"]
@@ -158,33 +162,34 @@ let lsp_json_content lsp_servers =
 
 let copilot_instructions_body =
   "# Copilot CLI Project Configuration\n\n\
-   This file is managed by Epure. Custom instructions live at\n\
-   `.github/copilot-instructions.md`, repository settings live at\n\
-   `.github/copilot/settings.json`, and project MCP config lives at\n\
-   `.github/mcp.json` for Copilot CLI 1.0.34 (stable channel).\n\n\
+   This file is managed by the host application via Cabal. Custom\n\
+   instructions live at `.github/copilot-instructions.md`, repository\n\
+   settings live at `.github/copilot/settings.json`, and project MCP\n\
+   config lives at `.github/mcp.json` for Copilot CLI 1.0.34 (stable\n\
+   channel).\n\n\
    ## Project Context\n\n\
-   Configured by Epure for this project.\n\n\
+   Configured by the host application for this project.\n\n\
    ## LSP Configuration\n\n\
    Copilot CLI uses Language Server Protocol (LSP) for enhanced code\n\
-   analysis. Epure writes project LSP server definitions to\n\
+   analysis. The host writes project LSP server definitions to\n\
    `.github/lsp.json` for detected languages, following GitHub's documented\n\
-   project LSP config shape. Epure also tracks tooling readiness via\n\
-   project_hook_tools (see epure tooling status).\n\n\
+   project LSP config shape. Tooling readiness is tracked by the host's\n\
+   own project hook layer.\n\n\
    ## MCP Servers\n\n\
-   Épure does not activate MCP servers by default. Approved\n\
-   registry-backed entries are written to `.github/mcp.json` as local\n\
-   project MCP server definitions with explicit command, args, env, and\n\
-   tool allow-list fields.\n\
+   MCP servers are not activated by default. Approved registry-backed\n\
+   entries are written to `.github/mcp.json` as local project MCP server\n\
+   definitions with explicit command, args, env, and tool allow-list\n\
+   fields.\n\
    <!-- mcp: disabled by default — no approved entries activated -->\n\n\
    ## Stable Limitations (Copilot CLI 1.0.34)\n\n\
    The following features are not available in the stable channel and\n\
-   are intentionally not configured by Epure for this backend:\n\
+   are intentionally not configured for this backend:\n\
    - streaming_output: not supported in stable 1.0.34\n\
    - structured_output: not supported in stable 1.0.34\n\
    - session_resume: not supported in stable 1.0.34\n\
    - read_only_support: not available via stable CLI flags\n\
    - file_reading: not supported in stable 1.0.34\n\
-   <!-- stable-limitations: documented per Epure parity policy -->\n"
+   <!-- stable-limitations: documented per backend parity policy -->\n"
 
 let project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers =
   [
@@ -222,6 +227,29 @@ let project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers =
       content = mcp_json_content mcp_servers;
     };
   ]
+
+(* Extract the agent response text from Copilot's stdout.
+   Copilot does not support a structured (JSON) output mode; its stdout is
+   already the assistant's plain-text reply.  We therefore return the captured
+   stdout verbatim (stripped of trailing whitespace) so hosts get the same
+   shape they get from JSON-emitting backends via [agent_text].
+
+   TODO: revisit if [copilot] gains a structured output mode that requires
+   parsing event envelopes. *)
+let parse_stdout_text stdout =
+  let trim_trailing s =
+    let len = String.length s in
+    let rec last i =
+      if i < 0 then -1
+      else
+        match s.[i] with
+        | ' ' | '\t' | '\n' | '\r' -> last (i - 1)
+        | _ -> i
+    in
+    let stop = last (len - 1) in
+    if stop = len - 1 then s else String.sub s 0 (stop + 1)
+  in
+  trim_trailing stdout
 
 (* Build the copilot command for non-interactive execution.
    Copilot uses -p <prompt> for prompt, --yolo for auto-approval,
@@ -485,4 +513,5 @@ let run_task ~sw ~env ?on_raw_line:_ spec =
             ~env
             ~spec:runtime_spec
             ~build_command
+            ~parse_stdout:parse_stdout_text
             ())

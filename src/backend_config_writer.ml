@@ -67,10 +67,21 @@ let contains_substr s needle =
 
 let md5_hex s = Digest.to_hex (Digest.string s)
 
+(* Hardcoded legacy namespace used when migrating files written under the
+   pre-rename default (id = "epure").  This keeps existing on-disk artifacts
+   recognised as managed even after the default was switched to "cabal". *)
+let legacy_namespace : Backend_types.managed_namespace =
+  {id = "epure"; display_name = "Epure"; config_dir = ".epure/backend-config"}
+
 let marker_candidates namespace marker_for =
   let current = marker_for namespace in
-  if current = marker_for default_namespace then [current]
-  else [current; marker_for default_namespace]
+  let dedup xs =
+    List.fold_left
+      (fun acc x -> if List.mem x acc then acc else acc @ [x])
+      []
+      xs
+  in
+  dedup [current; marker_for default_namespace; marker_for legacy_namespace]
 
 let is_managed_content ?(managed_namespace = default_namespace) content =
   List.exists
@@ -122,14 +133,20 @@ let is_epure_header_line ?(managed_namespace = default_namespace) line =
   let trimmed = String.trim line in
   let markers = marker_candidates managed_namespace managed_marker_for in
   let hash_markers = marker_candidates managed_namespace hash_marker_for in
+  let attributions =
+    [
+      attribution_text;
+      attribution_text_for managed_namespace;
+      attribution_text_for legacy_namespace;
+    ]
+  in
   let is_comment_header =
     (String.starts_with ~prefix:"#" trimmed
     || String.starts_with ~prefix:"//" trimmed
     || String.starts_with ~prefix:"<!--" trimmed)
     && List.exists
          (contains_substr trimmed)
-         ((attribution_text :: attribution_text_for managed_namespace :: markers)
-         @ hash_markers)
+         (attributions @ markers @ hash_markers)
   in
   let is_exact_legacy_json_field =
     List.exists
@@ -143,89 +160,14 @@ let strip_epure_header_lines ?(managed_namespace = default_namespace) content =
   |> List.filter (fun l -> not (is_epure_header_line ~managed_namespace l))
   |> String.concat "\n"
 
-let remove_trailing_comma_before_closer line =
-  let len = String.length line in
-  let rec last_non_ws i =
-    if i < 0 then None
-    else
-      match line.[i] with
-      | ' ' | '\t' | '\r' -> last_non_ws (i - 1)
-      | _ -> Some i
-  in
-  match last_non_ws (len - 1) with
-  | Some i when line.[i] = ',' ->
-      String.sub line 0 i ^ String.sub line (i + 1) (len - i - 1)
-  | _ -> line
-
-let next_non_blank_starts_with_closer = function
-  | None -> false
-  | Some line -> (
-      match String.trim line with
-      | s when String.length s > 0 -> s.[0] = '}' || s.[0] = ']'
-      | _ -> false)
-
-let remove_dangling_commas_before_closers lines =
-  let rec first_non_blank = function
-    | [] -> None
-    | line :: rest ->
-        if String.trim line = "" then first_non_blank rest else Some line
-  in
-  let rec loop acc = function
-    | [] -> List.rev acc
-    | line :: rest ->
-        let line =
-          if next_non_blank_starts_with_closer (first_non_blank rest) then
-            remove_trailing_comma_before_closer line
-          else line
-        in
-        loop (line :: acc) rest
-  in
-  loop [] lines
-
-let strip_managed_mcp_block content =
-  let lines = String.split_on_char '\n' content in
-  let in_mcp = ref false in
-  let depth = ref 0 in
-  let filtered =
-    List.filter
-      (fun line ->
-        let trimmed = String.trim line in
-        if !in_mcp then begin
-          String.iter
-            (fun c ->
-              if c = '{' || c = '[' then incr depth
-              else if c = '}' || c = ']' then decr depth)
-            line ;
-          if !depth <= 0 then begin
-            in_mcp := false ;
-            depth := 0
-          end ;
-          false
-        end
-        else if contains_substr trimmed "\"mcp\"" && contains_substr trimmed ":"
-        then begin
-          in_mcp := true ;
-          String.iter
-            (fun c ->
-              if c = '{' || c = '[' then incr depth
-              else if c = '}' || c = ']' then decr depth)
-            line ;
-          if !depth <= 0 then begin
-            in_mcp := false ;
-            depth := 0
-          end ;
-          false
-        end
-        else true)
-      lines
-  in
-  filtered |> remove_dangling_commas_before_closers |> String.concat "\n"
+(* JSON-with-comments cleanup helpers live in Backend_config_cleanup. *)
 
 let body_for_hash ?(managed_namespace = default_namespace) content =
   let body =
     content
     |> strip_epure_header_lines ~managed_namespace
-    |> strip_managed_mcp_block |> String.split_on_char '\n'
+    |> Backend_config_cleanup.strip_managed_mcp_block
+    |> String.split_on_char '\n'
     |> List.filter (fun l -> String.trim l <> "")
     |> String.concat "\n"
   in
@@ -269,19 +211,12 @@ let has_legacy_metadata_keys content =
     legacy_metadata_keys
 
 let migrate_legacy_managed_json_content content =
-  let string_field name fields =
-    match List.assoc_opt name fields with
-    | Some (`String s) -> Some s
-    | _ -> None
-  in
   try
     match Yojson.Safe.from_string content with
     | `Assoc fields ->
-        let attribution =
-          match string_field "_epure_attribution" fields with
-          | Some s -> s
-          | None -> attribution_text
-        in
+        (* Always rewrite under the current default attribution so migrated
+           files don't keep the legacy "Generated by Epure" line. *)
+        let attribution = attribution_text in
         let kept_fields =
           List.filter
             (fun (name, _) -> not (is_legacy_metadata_field name))
@@ -297,7 +232,9 @@ let migrate_legacy_managed_json_content content =
         Some
           (comment_line Slash attribution
           ^ comment_line Slash managed_marker
-          ^ comment_line Slash ("epure-hash: " ^ hash)
+          ^ comment_line
+              Slash
+              (hash_marker_for default_namespace ^ ": " ^ hash)
           ^ body)
     | _ -> None
   with _ -> None
@@ -313,11 +250,13 @@ let rec ensure_parent_dir path =
 let read_file_opt path =
   try
     let ic = open_in_bin path in
-    let n = in_channel_length ic in
-    let buf = Bytes.create n in
-    really_input ic buf 0 n ;
-    close_in ic ;
-    Some (Bytes.to_string buf)
+    Fun.protect
+      ~finally:(fun () -> try close_in ic with _ -> ())
+      (fun () ->
+        let n = in_channel_length ic in
+        let buf = Bytes.create n in
+        really_input ic buf 0 n ;
+        Some (Bytes.to_string buf))
   with _ -> None
 
 type sidecar_metadata = {

@@ -27,6 +27,10 @@ type config = {
   timeout_seconds : float;  (** Maximum wall-clock seconds before SIGTERM. *)
   source : string;
       (** Origin: ["builtin"], user-global path, or project-local path. *)
+  models : string list;
+      (** Model identifiers declared selectable by this adapter.  An empty list
+          means "let the adapter pick its default"; populated lists feed UI
+          dropdowns that need to enumerate models per backend. *)
 }
 
 (** [make_backend config] creates an {!Agentic_backend.t} from a YAML config.

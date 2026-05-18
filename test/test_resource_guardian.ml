@@ -33,6 +33,40 @@ let test_register_unregister_pid () =
   (* Basic sanity: the guardian is still usable *)
   Alcotest.(check bool) "still works after pid ops" false (G.memory_pressure g)
 
+(** Spawn [n] domains, each registering its index as a PID. After all join,
+    the registered list must contain exactly [n] distinct pids.
+
+    Without synchronisation, two domains can both read the same old list
+    head and one of their inserts gets lost. *)
+let test_concurrent_register_does_not_lose_pids () =
+  let g = G.create G.default_config in
+  let n = 200 in
+  let doms =
+    Array.init n (fun i -> Domain.spawn (fun () -> G.register_pid g i))
+  in
+  Array.iter Domain.join doms ;
+  let pids = G.registered_pids g in
+  let len = List.length pids in
+  Alcotest.(check int) "all concurrent registrations survived" n len ;
+  let sorted = List.sort compare pids in
+  let expected = List.init n (fun i -> i) in
+  Alcotest.(check (list int)) "every pid is present exactly once" expected sorted
+
+let test_concurrent_unregister_does_not_leave_phantoms () =
+  let g = G.create G.default_config in
+  let n = 200 in
+  for i = 0 to n - 1 do
+    G.register_pid g i
+  done ;
+  let doms =
+    Array.init n (fun i -> Domain.spawn (fun () -> G.unregister_pid g i))
+  in
+  Array.iter Domain.join doms ;
+  Alcotest.(check int)
+    "no phantoms after concurrent unregister"
+    0
+    (List.length (G.registered_pids g))
+
 let () =
   Alcotest.run
     "Resource_guardian"
@@ -44,5 +78,14 @@ let () =
             `Quick,
             test_memory_pressure_below_threshold );
           ("register/unregister PIDs", `Quick, test_register_unregister_pid);
+        ] );
+      ( "concurrency",
+        [
+          ( "concurrent register does not lose pids",
+            `Quick,
+            test_concurrent_register_does_not_lose_pids );
+          ( "concurrent unregister leaves no phantoms",
+            `Quick,
+            test_concurrent_unregister_does_not_leave_phantoms );
         ] );
     ]

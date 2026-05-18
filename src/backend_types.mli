@@ -82,7 +82,7 @@ val show_duration : duration -> string
 
 (** MCP server configuration for an agentic invocation. *)
 type mcp_server_config = {
-  name : string;  (** Server name (e.g., "epure") *)
+  name : string;  (** Server name chosen by the host (e.g., "myhost-mcp") *)
   command : string;  (** Command to spawn the server *)
   args : string list;  (** Command arguments *)
   env : (string * string) list;  (** Environment variables *)
@@ -97,7 +97,10 @@ type managed_namespace = {
 }
 [@@deriving show, eq, yojson]
 
-(** Default namespace preserving historical Épure artifact locations. *)
+(** Default host-neutral namespace: id [cabal], display name [Cabal], config
+    directory [.cabal/backend-config]. Host applications may construct their
+    own {!managed_namespace} and pass it through {!make_task_spec} to override
+    these defaults. *)
 val default_managed_namespace : managed_namespace
 
 (** [validate_managed_namespace namespace] validates that namespace-controlled
@@ -118,6 +121,36 @@ val default_managed_namespace : managed_namespace
     {violates}
     (none) *)
 val validate_managed_namespace : managed_namespace -> (unit, string) result
+
+(** Validated wrapper around a {!managed_namespace}.
+
+    [validated_namespace] is a private alias for [managed_namespace] — values
+    can only be produced by {!validate_namespace}, and existing record syntax
+    cannot construct one directly. Coerce back with [(v :> managed_namespace)]
+    for interop with code that still takes the unwrapped form.
+
+    Host applications that want to make namespace validation a type-level
+    obligation (rather than a runtime check at the boundary) should plumb
+    [validated_namespace] through their own artifact-creating code paths. *)
+type validated_namespace = private managed_namespace
+
+(** [validate_namespace ns] returns [Ok v] when [ns] passes
+    {!validate_managed_namespace}, else propagates the same [Error msg].
+
+    {pre}
+    (none)
+
+    {post}
+    The returned [validated_namespace] is observationally equal to [ns];
+    use the [:>] coercion to recover a [managed_namespace] view.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val validate_namespace :
+  managed_namespace -> (validated_namespace, string) result
 
 (** Host-provided association between a file extension and LSP language id. *)
 type lsp_file_association = {
@@ -150,17 +183,19 @@ type output_spec =
     and executes. It is not a raw LLM prompt. *)
 type task_spec = {
   prompt : string;
-      (** Role-specific prompt authored by Épure. Describes what to do. *)
+      (** Role-specific prompt authored by the host application. Describes
+          what to do. *)
   instructions : string;
       (** Project-specific instructions: conventions, constraints, rules. *)
   mcp_servers : mcp_server_config list;
-      (** MCP servers to connect (epure-mcp-server + project tools). *)
+      (** MCP servers to connect (host-provided MCP servers + project tools). *)
   lsp_servers : lsp_server_config list; [@default []]
       (** Host-provided LSP server definitions for backends that can render
           project LSP config. *)
   working_dir : string;  (** Target project directory. *)
   timeout : duration;  (** Maximum execution time (circuit breaker). *)
-  expected_outputs : output_spec list;  (** What Epure expects back. *)
+  expected_outputs : output_spec list;
+      (** What the host application expects back. *)
   managed_namespace : managed_namespace; [@default default_managed_namespace]
       (** Namespace for managed config markers, sidecars, temp files, and owned
           backend config directories. *)
@@ -223,7 +258,18 @@ type task_result = {
       (** Structured report if submitted via MCP. *)
   elapsed : duration;  (** Wall-clock time for the invocation. *)
   cost : cost option;  (** Cost information if available. *)
-  stdout : string;  (** Captured stdout from the client. *)
+  stdout : string;
+      (** Raw captured stdout from the client process, byte-for-byte as
+          produced by the underlying CLI (JSON envelope, JSONL stream, plain
+          text, etc.).  Useful for debugging and backend-specific
+          post-processing.  Host applications that just want the agent's
+          response text should prefer {!agent_text}. *)
+  agent_text : string; [@default ""]
+      (** Normalised final agent message text, extracted by the adapter from
+          its CLI's output format.  Empty string when no agent message was
+          produced or extraction failed.  This is the host-neutral surface for
+          the agent's response: hosts read this without having to know which
+          agentic CLI ran or how to parse its stdout. *)
   stderr : string;  (** Captured stderr from the client. *)
   exit_code : int;  (** Exit code from the client process. *)
   session_id : string option; [@default None]
@@ -377,6 +423,7 @@ val make_task_result :
   ?elapsed:duration ->
   ?cost:cost ->
   ?stdout:string ->
+  ?agent_text:string ->
   ?stderr:string ->
   ?exit_code:int ->
   ?session_id:string ->

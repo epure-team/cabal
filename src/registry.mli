@@ -97,6 +97,81 @@ val list : unit -> Agentic_backend.t list
     (none) *)
 val list_ids : unit -> string list
 
+(** Origin of a backend's resolved model list. *)
+type models_source =
+  | Probe
+      (** The backend's runtime probe returned a non-empty list and that list
+          is now the source of truth. *)
+  | Static
+      (** The probe was absent, errored, raised, or returned an empty list, so
+          the backend's declared static list is in use. *)
+  | Hybrid
+      (** Reserved for a future merge of static + live entries.  The current
+          implementation never emits this tag; it exists so external code can
+          pattern-match the contract without breaking on a future addition. *)
+
+(** [resolved_models backend_id] returns [Some (models, source)] for any
+    registered backend, where [source] documents whether the list comes from a
+    successful probe ({!Probe}) or from the static declaration ({!Static}).
+
+    {pre}
+    (none)
+
+    {post}
+    Returns [Some (models, src)] when [backend_id] is registered, or [None]
+    otherwise. The [models] list is identical to [Agentic_backend.models b]
+    when [src = Static] and contains the probe output otherwise.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val resolved_models : string -> (string list * models_source) option
+
+(** [list_models backend_id] returns [Some models] when [backend_id] is
+    registered.  Returns [None] when the backend is not registered.  Returns
+    [Some []] when the backend is registered but declares no models and any
+    probe also returned no models.
+
+    The list is the {i resolved} view: if {!Adapter_loader.register_all} ran
+    a probe successfully, that output is what surfaces here; otherwise the
+    static declaration is returned.  Equivalent to
+    [Option.map fst (resolved_models backend_id)].
+
+    {pre}
+    (none)
+
+    {post}
+    Returns [Some models] when [backend_id] is in the registry, or [None]
+    otherwise.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val list_models : string -> string list option
+
+(** [set_resolved_models id pair] records the resolved view for [id].
+
+    Intended for the adapter-loader to publish probe outcomes.  Hosts should
+    treat this as adapter-loader internal and prefer {!resolved_models} or
+    {!list_models} as the query API.
+
+    {pre}
+    A backend with [id] should already be registered.
+
+    {post}
+    Subsequent calls to {!resolved_models}[ id] return [Some pair].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val set_resolved_models : string -> string list * models_source -> unit
+
 (** {1 Availability} *)
 
 (** [available ~sw ~env] returns all backends that are currently available

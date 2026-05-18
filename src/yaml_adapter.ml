@@ -15,6 +15,7 @@ type config = {
   env_mappings : (string * string) list;
   timeout_seconds : float;
   source : string;
+  models : string list;
 }
 
 (* Maps backend id → config for config_of lookup. *)
@@ -25,6 +26,12 @@ let make_backend (cfg : config) : Agentic_backend.t =
     let id = cfg.name
 
     let name = cfg.display_name
+
+    let models = cfg.models
+
+    (* YAML-loaded adapters declare a static list only — they have no
+       generic way to enumerate models from an arbitrary CLI invocation. *)
+    let models_probe = None
 
     let available ~sw:_ ~env =
       (* Check availability by running the command with --version. *)
@@ -51,6 +58,19 @@ let make_backend (cfg : config) : Agentic_backend.t =
            cfg.name
            cfg.source)
 
+    (* Dispatch agent_text extraction to the matching hand-written adapter so
+       YAML-loaded backends populate task_result.agent_text instead of leaving
+       it empty. Without this, every host using a YAML-registered adapter sees
+       agent_text = "" and has to re-parse raw stdout itself. *)
+    let parse_stdout_for_id =
+      match cfg.name with
+      | "claude-code" -> Some Claude_code.parse_stdout_text
+      | "codex" -> Some Codex_cli.parse_stdout_text
+      | "gemini-cli" -> Some Gemini_cli.parse_stdout_text
+      | "copilot-cli" -> Some Copilot_cli.parse_stdout_text
+      | "opencode" -> Some Opencode_cli.parse_stdout_text
+      | _ -> None
+
     let run_task ~sw ~env ?on_raw_line:_ (spec : task_spec) =
       let args =
         List.filter
@@ -68,6 +88,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
         ~env
         ~spec:{spec with timeout = cfg.timeout_seconds}
         ~build_command
+        ?parse_stdout:parse_stdout_for_id
         ()
   end in
   Hashtbl.replace config_table cfg.name cfg ;

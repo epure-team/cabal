@@ -191,6 +191,24 @@ val build_command :
     (none) *)
 val parse_session_id_from_stdout : string -> string option
 
+(** [parse_stdout_text stdout] extracts the agent reply from Claude Code's
+    JSON envelope, by reading the top-level [result] field.  Returns the raw
+    [stdout] when it is not valid JSON or has no [result] field.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns the [result] field of the JSON envelope, or the raw [stdout] on
+    parse failure / unexpected shape.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val parse_stdout_text : string -> string
+
 (** [parse_stream_event line] parses a stream-json event line and extracts
     displayable content. Returns [Some text] if there is content to display,
     [None] otherwise.

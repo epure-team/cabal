@@ -9,7 +9,9 @@
 
     Returns scripted, deterministic responses from a fixture file without
     making any real LLM calls.  The fixture file path is read from the
-    [EPURE_MOCK_AGENT_FIXTURES] environment variable.
+    [CABAL_MOCK_AGENT_FIXTURES] environment variable (with
+    [EPURE_MOCK_AGENT_FIXTURES] honoured as a legacy fallback when the new
+    variable is unset).
 
     This backend is registered through the normal {!Registry} path so that
     backend-selection bugs remain detectable in tests.  It is only
@@ -46,7 +48,18 @@ val id : string
 (** Human-readable name. *)
 val name : string
 
-(** Returns [true] iff [EPURE_MOCK_AGENT_FIXTURES] names an existing file. *)
+(** Empty model list — mock-agent has no real model surface. *)
+val models : string list
+
+(** Always [None] — the mock backend has no upstream CLI to enumerate. *)
+val models_probe :
+  (sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  (string list, string) result)
+  option
+
+(** Returns [true] iff [CABAL_MOCK_AGENT_FIXTURES] (or its legacy alias
+    [EPURE_MOCK_AGENT_FIXTURES]) names an existing file. *)
 val available : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> bool
 
 (** Query whether the backend supports resumed sessions.

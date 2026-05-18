@@ -45,17 +45,49 @@ let sensitive_fields =
     "access_token";
     "refresh_token";
     "bearer_token";
+    "bearer";
     "id_token";
+    "oauth_token";
+    "oauth";
+    "jwt";
     "api_key";
+    "api_keys";
+    "client_secret";
+    "client_id_secret";
     "password";
+    "passwd";
+    "pwd";
     "credential";
     "credentials";
     "secret";
+    "secrets";
     "private_key";
+    "ssh_key";
+    "signature";
+    "signing_key";
+    "aws_secret_access_key";
+    "aws_access_key_id";
+    "aws_session_token";
+    "gcp_service_account";
+    "cookie";
+    "set_cookie";
+    "session";
+    "session_token";
+    "connection_string";
+    "dsn";
+    "environment";
+    "env";
+    "env_vars";
+    "environ";
   ]
 
 (** Field names whose string values are always preserved as-is (identifiers,
-    event type tags, status codes, model names, etc.). *)
+    event type tags, status codes, model names, etc.).
+
+    NOTE: [url] and [error] were intentionally removed; both can legitimately
+    contain credentials (a [postgres://user:pw@host] URL leaking through
+    [url], or an error message echoing such a URL). They are now subject to
+    the default policy plus the pattern-based fallback below. *)
 let safe_string_fields =
   [
     "type";
@@ -81,10 +113,8 @@ let safe_string_fields =
     "schema_version";
     "version";
     "language";
-    "error";
     "error_code";
     "tool_id";
-    "url";
     "path";
   ]
 
@@ -97,6 +127,89 @@ let is_sensitive_field name =
 
 let is_safe_string_field name =
   List.mem (String.lowercase_ascii name) safe_string_fields
+
+(* -------------------------------------------------------------------------- *)
+(* Value-pattern fallbacks                                                     *)
+(* -------------------------------------------------------------------------- *)
+
+(** [contains_url_credentials s] is true when [s] has a substring of the form
+    [scheme://user:password@host], the classic in-URL credential leak. *)
+let contains_url_credentials s =
+  let needle = "://" in
+  let nlen = String.length needle in
+  let slen = String.length s in
+  let rec scan i =
+    if i > slen - nlen
+    then false
+    else if String.sub s i nlen = needle
+    then begin
+      let start = i + nlen in
+      let stop =
+        let rec find_slash j =
+          if j >= slen then slen
+          else if s.[j] = '/' || s.[j] = '?' || s.[j] = '#' then j
+          else find_slash (j + 1)
+        in
+        find_slash start
+      in
+      let segment = String.sub s start (stop - start) in
+      let has_at = String.contains segment '@' in
+      let has_colon = String.contains segment ':' in
+      let colon_before_at =
+        match
+          String.index_opt segment ':', String.index_opt segment '@'
+        with
+        | Some c, Some a -> c < a
+        | _ -> false
+      in
+      if has_at && has_colon && colon_before_at then true else scan (i + 1)
+    end
+    else scan (i + 1)
+  in
+  scan 0
+
+(** [is_base64_url_segment s] — characters are URL-safe base64
+    ([A-Za-z0-9_-]) and length is non-trivial.  No padding (JWT segments
+    are unpadded). *)
+let is_base64_url_segment s =
+  let len = String.length s in
+  if len < 4 then false
+  else
+    let ok = ref true in
+    String.iter
+      (fun c ->
+        if not
+             ((c >= 'A' && c <= 'Z')
+              || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9')
+              || c = '_' || c = '-')
+        then ok := false)
+      s ;
+    !ok
+
+(** [is_jwt_like s] — three dot-separated URL-safe base64 segments where
+    header and payload both start with [eyJ] (the base64 prefix every JWT
+    inherits from the leading open-brace + quote of its JSON header and
+    payload).  Conservative: requires the conventional JWT shape. *)
+let is_jwt_like s =
+  if String.length s < 30 then false
+  else
+    match String.split_on_char '.' s with
+    | [ h; p; sig_ ]
+      when String.length h >= 4
+           && String.length p >= 4
+           && String.length sig_ >= 4
+           && is_base64_url_segment h
+           && is_base64_url_segment p
+           && is_base64_url_segment sig_
+           && String.length h >= 3
+           && String.sub h 0 3 = "eyJ"
+           && String.sub p 0 3 = "eyJ" ->
+      true
+    | _ -> false
+
+let value_pattern_redactable s =
+  contains_url_credentials s || is_jwt_like s
 
 (* -------------------------------------------------------------------------- *)
 (* Shape hash                                                                  *)
@@ -138,13 +251,20 @@ let rec redact_json ~parent_field (count : int ref) (json : Yojson.Safe.t) :
       (* Scalar non-string values are always safe. *)
       json
   | `String s ->
-      if is_safe_string_field parent_field then
-        (* Whitelisted field: keep regardless of value. *)
-        json
-      else if is_sensitive_field parent_field then begin
+      if is_sensitive_field parent_field then begin
         incr count ;
         `String (Printf.sprintf "[redacted:%d chars]" (String.length s))
       end
+      else if value_pattern_redactable s then begin
+        (* Even if the field is in the safe list, a value matching a known
+           credential pattern (URL with embedded user:password, JWT shape)
+           must not be echoed. *)
+        incr count ;
+        `String (Printf.sprintf "[redacted:%d chars]" (String.length s))
+      end
+      else if is_safe_string_field parent_field then
+        (* Whitelisted field with a clean value: keep as-is for observability. *)
+        json
       else if String.length s > max_safe_str_len then begin
         incr count ;
         `String (Printf.sprintf "[redacted:%d chars]" (String.length s))

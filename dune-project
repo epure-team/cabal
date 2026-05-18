@@ -11,9 +11,9 @@
   (ocaml (>= 5.3.0))
   (dune (>= 3.13))
   yojson
-  eio
-  eio_posix
-  (eio_main :with-test)
+  (eio (>= 1.0))
+  (eio_posix (>= 1.0))
+  (eio_main (and :with-test (>= 1.0)))
   yaml
   ppx_deriving
   ppx_deriving_yojson
@@ -25,4 +25,7 @@
  (authors "Epure Team")
  (maintainers "Epure Team")
  (homepage "https://github.com/epure-team/cabal")
- (bug_reports "https://github.com/epure-team/cabal/issues"))
+ (source (github epure-team/cabal))
+ (bug_reports "https://github.com/epure-team/cabal/issues")
+ (tags ("agentic" "backend" "abstraction" "cli" "llm"))
+ (documentation "https://epure-team.github.io/cabal/"))

@@ -21,7 +21,7 @@ Cabal owns the host-neutral backend layer:
 
 Cabal explicitly does **not** own:
 
-- Épure's SQLite database or any host application's persistent state;
+- any host application's persistent state (SQLite or otherwise);
 - story, epic, build, review, or product orchestration;
 - prompt context policy or knowledge injection rules;
 - user/auth/project membership models;
@@ -35,7 +35,8 @@ run the selected CLI safely and consistently.
 
 ```text
                 host application
-       (Épure, tests, or another OCaml app)
+        (BountyNexus, Épure, tests, or
+         another OCaml app)
                          |
                          v
         +----------------------------------+
@@ -82,6 +83,72 @@ Cabal does not embed their product logic.
   safety utilities.
 - `test/` — Cabal's standalone test suite.
 
+## Using Cabal from a host application
+
+Cabal is intentionally minimal — host applications wire backends into the
+runtime registry, drive `run_task`, and own everything around it (storage,
+prompt policy, retry, UI).
+
+```ocaml
+open Cabal
+
+let () =
+  (* 1. Register every built-in backend adapter (YAML + hand-written). *)
+  Adapter_loader.register_all () ;
+
+  (* 2. Pick a backend by canonical id — the same id used in
+        Backend_registry and Backend_config_gen. *)
+  let backend =
+    match Registry.get "claude-code" with
+    | Some b -> b
+    | None -> failwith "claude-code backend is not registered"
+  in
+
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  (* 3. Construct a task. make_task_spec validates the managed namespace
+        for you; for type-level enforcement, use Backend_types.validate_namespace. *)
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"Summarise the README in one sentence."
+      ~instructions:""
+      ~working_dir:(Sys.getcwd ())
+      ~timeout:60.0
+      ~expected_outputs:[Backend_types.Files_changed]
+      ()
+  in
+
+  (* 4. Run the task. Backends never raise — they always return a
+        task_result with a status (Success / Failed _ / Timeout). *)
+  let result = Agentic_backend.run_task backend ~sw ~env spec in
+  Printf.printf "status=%s files_changed=%d\n"
+    (Backend_types.show_result_status result.status)
+    (List.length result.files_changed)
+```
+
+### Redaction contract for hosts logging backend output
+
+Cabal's `Session_event_log` redacts events **before** writing them. Hosts
+that capture raw stdout/stderr from a backend process and log it directly
+**must** route the bytes through `Backend_event_redaction.redact_event`
+(per-event JSON) or `redact_error_message` (free-form strings) first, or
+they bypass Cabal's secret-stripping. The session NDJSON file is created
+with mode `0o600` to limit blast radius if redaction is bypassed.
+
+### Adapter trust tiers
+
+`Adapter_loader.register_all` loads YAML adapters in three layers, lowest
+priority first:
+
+1. Built-in YAMLs compiled into the library (`src/adapters/*.yaml`).
+2. User-global: `~/.cabal/adapters/*.yaml`.
+3. Project-local: `.cabal/adapters/*.yaml` (only when `?project_dir` is
+   passed).
+
+Project-local adapters override user-global, which override built-ins by
+id. Hosts that don't want to honour user-supplied adapters should call
+`register_all` without `?project_dir` and validate `$HOME` themselves.
+
 ## Build and test
 
 From the standalone Cabal repository:
@@ -93,16 +160,11 @@ opam exec -- dune runtest
 opam lint cabal.opam
 ```
 
-From the Épure monorepo:
-
-```bash
-EPURE_NO_COMMIT_CHECK=1 dune build
-EPURE_NO_COMMIT_CHECK=1 dune runtest libs/cabal
-opam lint libs/cabal/cabal.opam
-```
-
-Épure builds from the monorepo do not require any `opam pin` for Cabal.
-Dune sees `libs/cabal` directly as part of the workspace.
+If you consume Cabal as a vendored subtree inside a host monorepo, dune sees
+the cabal directory directly as part of the workspace — no `opam pin` is
+required. Host-side build/test invocations and any host-specific escape
+hatches (e.g. commit checks) belong in the host's own documentation, not
+here.
 
 For downstream/standalone consumers while Cabal is not yet published, pin it
 explicitly from a local checkout:
@@ -112,8 +174,10 @@ opam pin add cabal <path-to-cabal> -y
 ```
 
 The library remains host-agnostic: callers choose the managed namespace used for
-generated files. The default namespace currently preserves historical Epure
-runtime artifact ownership and paths for compatibility.
+generated files. The default namespace is `cabal` (id `cabal`, display name
+`Cabal`, config directory `.cabal/backend-config`); hosts that need a
+different namespace must construct one explicitly and pass it through
+`Backend_types.make_task_spec` and the `Backend_config_gen.*` setup helpers.
 
 ## Sync model
 

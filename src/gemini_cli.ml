@@ -11,25 +11,72 @@ let id = "gemini-cli"
 
 let name = "Gemini CLI"
 
+(* Static fallback — used when GOOGLE_API_KEY / GEMINI_API_KEY is absent. *)
+let models = ["gemini-2.5-pro"; "gemini-2.5-flash"; "gemini-2.0-flash"]
+
+(* Strip the "models/" prefix that the REST API returns but the CLI does not use. *)
+let strip_models_prefix s =
+  let prefix = "models/" in
+  let plen = String.length prefix in
+  if String.length s >= plen && String.sub s 0 plen = prefix then
+    String.sub s plen (String.length s - plen)
+  else s
+
+let parse_google_models_json json_str =
+  try
+    match Yojson.Safe.from_string json_str with
+    | `Assoc fields -> (
+        match List.assoc_opt "models" fields with
+        | Some (`List items) ->
+            List.filter_map
+              (function
+                | `Assoc fs -> (
+                    match List.assoc_opt "name" fs with
+                    | Some (`String raw_id) ->
+                        let id = strip_models_prefix raw_id in
+                        if String.length id > 0 then Some id else None
+                    | _ -> None)
+                | _ -> None)
+              items
+        | _ -> [])
+    | _ -> []
+  with _ -> []
+
+(* Live probe via Google AI Models REST API (v1beta).
+   Checks GOOGLE_API_KEY first, then GEMINI_API_KEY. *)
+let models_probe =
+  Some
+    (fun ~sw:_ ~env ->
+      let api_key =
+        match Sys.getenv_opt "GOOGLE_API_KEY" with
+        | Some k -> Some k
+        | None -> Sys.getenv_opt "GEMINI_API_KEY"
+      in
+      match api_key with
+      | None -> Error "Neither GOOGLE_API_KEY nor GEMINI_API_KEY is set"
+      | Some key -> (
+          match
+            Backend_process.capture_version_output ~env ~timeout_seconds:10.0
+              [ "curl"; "-sf"
+              ; "https://generativelanguage.googleapis.com/v1beta/models?key=" ^ key ]
+          with
+          | Error msg -> Error msg
+          | Ok json_str -> (
+              match parse_google_models_json json_str with
+              | [] -> Error "Google models API returned no parseable model IDs"
+              | ms -> Ok ms)))
+
 let available ~sw:_ ~env =
   Backend_process.check_available ~env ["gemini"; "--version"]
 
 let supports_session_resume = true
 
-type json_string_map = (string * string) list
+(* Shared json_string_map encoding lives in Backend_json_helpers. *)
+type json_string_map = Backend_json_helpers.json_string_map
 
-let json_string_map_to_yojson fields =
-  `Assoc (List.map (fun (key, value) -> (key, `String value)) fields)
+let json_string_map_to_yojson = Backend_json_helpers.json_string_map_to_yojson
 
-let json_string_map_of_yojson = function
-  | `Assoc fields ->
-      let rec loop acc = function
-        | [] -> Ok (List.rev acc)
-        | (key, `String value) :: rest -> loop ((key, value) :: acc) rest
-        | (key, _) :: _ -> Error (Printf.sprintf "expected string for %s" key)
-      in
-      loop [] fields
-  | _ -> Error "expected JSON object"
+let json_string_map_of_yojson = Backend_json_helpers.json_string_map_of_yojson
 
 type mcp_server_settings = {
   command : string;

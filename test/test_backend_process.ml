@@ -298,10 +298,63 @@ let test_check_available_false () =
   in
   Alcotest.(check bool) "nonexistent not available" false result
 
+(** A hanging binary on the PATH (or [sleep 30]) must not freeze the
+    availability check: [check_available] should honour [~timeout_seconds]
+    and return [false] rather than blocking the host. *)
+let test_check_available_times_out_on_hang () =
+  if not (Sys.file_exists "/bin/sleep" || Sys.file_exists "/usr/bin/sleep")
+  then Alcotest.skip ()
+  else
+    Eio_posix.run @@ fun env ->
+    let started = Unix.gettimeofday () in
+    let result =
+      Backend_process.check_available
+        ~env
+        ~timeout_seconds:0.5
+        ["sleep"; "30"]
+    in
+    let elapsed = Unix.gettimeofday () -. started in
+    Alcotest.(check bool)
+      "hanging binary reported unavailable on timeout"
+      false
+      result ;
+    Alcotest.(check bool)
+      "check returned within ~1s, not 30s"
+      true
+      (elapsed < 2.0)
+
+let test_capture_version_output_times_out_on_hang () =
+  if not (Sys.file_exists "/bin/sleep" || Sys.file_exists "/usr/bin/sleep")
+  then Alcotest.skip ()
+  else
+    Eio_posix.run @@ fun env ->
+    let started = Unix.gettimeofday () in
+    let result =
+      Backend_process.capture_version_output
+        ~env
+        ~timeout_seconds:0.5
+        ["sleep"; "30"]
+    in
+    let elapsed = Unix.gettimeofday () -. started in
+    Alcotest.(check bool)
+      "hanging --version probe returns Error on timeout"
+      true
+      (Result.is_error result) ;
+    Alcotest.(check bool)
+      "probe returned within ~1s, not 30s"
+      true
+      (elapsed < 2.0)
+
 let availability_tests =
   [
     ("check_available with true", `Quick, test_check_available_true);
     ("check_available with nonexistent", `Quick, test_check_available_false);
+    ( "check_available timeout on hang",
+      `Quick,
+      test_check_available_times_out_on_hang );
+    ( "capture_version_output timeout on hang",
+      `Quick,
+      test_capture_version_output_times_out_on_hang );
   ]
 
 (** {1 Test Runner} *)

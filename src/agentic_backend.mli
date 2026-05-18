@@ -44,6 +44,32 @@ module type S = sig
   (** Human-readable name for this backend (e.g., "Claude Code"). *)
   val name : string
 
+  (** Model identifiers this backend declares as selectable. The list is
+      advisory: an empty list means "let the adapter pick its default", and
+      callers should treat unrecognised values as opaque pass-through strings
+      forwarded to the CLI. *)
+  val models : string list
+
+  (** Optional dynamic enumeration probe.
+
+      When [Some probe], {!Cabal.Adapter_loader.register_all} invokes
+      [probe ~sw ~env] once at startup and, if the result is
+      [Ok non_empty_list], uses that list as the live model set for the
+      backend.  Any [Error _], an [Ok []], or an exception falls back to the
+      static {!models} list.
+
+      The probe must be safe: short timeout, no network beyond the CLI's own
+      local handshake, no authentication requirement.  If the upstream CLI is
+      absent from PATH the probe should return [Error _] cleanly rather than
+      raising.  Backends without a stable native enumeration command leave
+      this [None]; the static {!models} list remains the load-bearing
+      surface. *)
+  val models_probe :
+    (sw:Eio.Switch.t ->
+    env:Eio_unix.Stdenv.base ->
+    (string list, string) result)
+    option
+
   (** [available ~sw ~env] checks if this backend is available (installed,
       configured, etc.). This should be a quick check, not a full invocation. *)
   val available : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> bool
@@ -124,6 +150,48 @@ val id : t -> string
     (none)
 *)
 val name : t -> string
+
+(** [models backend] returns the model list declared by [backend], or [] when
+    unset.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns the same list as [S.models] of the underlying module.  An empty
+    list means the backend has not declared a model set and the caller should
+    let the adapter's default model selection apply.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none)
+*)
+val models : t -> string list
+
+(** [models_probe backend] returns the optional dynamic enumeration probe
+    declared by [backend].
+
+    {pre}
+    (none)
+
+    {post}
+    Returns [Some probe] when the backend defines a runtime model probe, or
+    [None] when only the static {!models} list applies.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none)
+*)
+val models_probe :
+  t ->
+  (sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  (string list, string) result)
+  option
 
 (** [available ~sw ~env backend] checks if the backend is available.
 
