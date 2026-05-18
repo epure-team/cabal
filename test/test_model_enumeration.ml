@@ -39,11 +39,17 @@ open Cabal
 let expected_models =
   [
     ( "claude-code",
-      ["claude-sonnet-4-5"; "claude-opus-4-7"; "claude-haiku-4-5-20251001"] );
-    ("codex", ["gpt-5"; "o3"; "o3-mini"]);
-    ("gemini-cli", ["gemini-2.5-pro"; "gemini-2.5-flash"]);
-    ("copilot-cli", ["claude-sonnet-4-5"; "gpt-5"]);
-    ("opencode", ["claude-sonnet-4-5"; "gpt-5"]);
+      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+      ; "claude-opus-4-6"; "claude-sonnet-4-5-20250929" ] );
+    ( "codex",
+      ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"] );
+    ("gemini-cli", ["gemini-2.5-pro"; "gemini-2.5-flash"; "gemini-2.0-flash"]);
+    ( "copilot-cli",
+      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ] );
+    ( "opencode",
+      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ] );
   ]
 
 let all_backend_ids = List.map fst expected_models
@@ -105,16 +111,31 @@ let contains ~needle haystack =
     in
     loop 0
 
-(* Locate a source-tree file from the test process cwd. Dune places the
-   test binary in _build/default/test/ so the repo root sits three levels
-   up. We also try the bare path as a fallback in case the test is run
-   from the project root. *)
+(* Locate a source-tree file from the test process cwd.  Walks up the
+   directory tree until it finds a dune-project, then tries both the raw
+   relpath (standalone repo: src/adapters/…) and the vendored path
+   (monorepo: libs/cabal/src/adapters/…).  Falls back to the raw relpath
+   relative to cwd if no dune-project anchor is found. *)
 let locate_repo_file relpath =
-  let candidates = [Filename.concat "../../.." relpath; relpath] in
+  let rec find_root dir =
+    if Sys.file_exists (Filename.concat dir "dune-project") then Some dir
+    else
+      let parent = Filename.dirname dir in
+      if parent = dir then None else find_root parent
+  in
+  let cwd = Sys.getcwd () in
+  let candidates =
+    match find_root cwd with
+    | Some root ->
+        [ Filename.concat root relpath
+        ; Filename.concat root (Filename.concat "libs/cabal" relpath)
+        ; relpath
+        ]
+    | None -> [ Filename.concat "../../.." relpath; relpath ]
+  in
   match List.find_opt Sys.file_exists candidates with
   | Some p -> p
-  | None ->
-      Alcotest.failf "could not locate %s from %s" relpath (Sys.getcwd ())
+  | None -> Alcotest.failf "could not locate %s from %s" relpath cwd
 
 let yaml_path id =
   let basename =
@@ -151,21 +172,32 @@ let test_claude_code_models () =
   check_models
     ~id:"claude-code"
     ~expected:
-      ["claude-sonnet-4-5"; "claude-opus-4-7"; "claude-haiku-4-5-20251001"]
+      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+      ; "claude-opus-4-6"; "claude-sonnet-4-5-20250929" ]
 
 let test_codex_models () =
-  check_models ~id:"codex" ~expected:["gpt-5"; "o3"; "o3-mini"]
+  check_models
+    ~id:"codex"
+    ~expected:["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]
 
 let test_gemini_cli_models () =
   check_models
     ~id:"gemini-cli"
-    ~expected:["gemini-2.5-pro"; "gemini-2.5-flash"]
+    ~expected:["gemini-2.5-pro"; "gemini-2.5-flash"; "gemini-2.0-flash"]
 
 let test_copilot_cli_models () =
-  check_models ~id:"copilot-cli" ~expected:["claude-sonnet-4-5"; "gpt-5"]
+  check_models
+    ~id:"copilot-cli"
+    ~expected:
+      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
 
 let test_opencode_models () =
-  check_models ~id:"opencode" ~expected:["claude-sonnet-4-5"; "gpt-5"]
+  check_models
+    ~id:"opencode"
+    ~expected:
+      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
 
 (* --- Registry.list_models negative cases --------------------------------- *)
 
@@ -326,31 +358,34 @@ models:
 let test_claude_code_module_models () =
   Alcotest.(check string_list)
     "Claude_code.models"
-    ["claude-sonnet-4-5"; "claude-opus-4-7"; "claude-haiku-4-5-20251001"]
+    [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+    ; "claude-opus-4-6"; "claude-sonnet-4-5-20250929" ]
     Claude_code.models
 
 let test_codex_module_models () =
   Alcotest.(check string_list)
     "Codex_cli.models"
-    ["gpt-5"; "o3"; "o3-mini"]
+    ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]
     Codex_cli.models
 
 let test_gemini_module_models () =
   Alcotest.(check string_list)
     "Gemini_cli.models"
-    ["gemini-2.5-pro"; "gemini-2.5-flash"]
+    ["gemini-2.5-pro"; "gemini-2.5-flash"; "gemini-2.0-flash"]
     Gemini_cli.models
 
 let test_copilot_module_models () =
   Alcotest.(check string_list)
     "Copilot_cli.models"
-    ["claude-sonnet-4-5"; "gpt-5"]
+    [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+    ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
     Copilot_cli.models
 
 let test_opencode_module_models () =
   Alcotest.(check string_list)
     "Opencode_cli.models"
-    ["claude-sonnet-4-5"; "gpt-5"]
+    [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
+    ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
     Opencode_cli.models
 
 let test_mock_agent_module_models () =
