@@ -259,28 +259,25 @@ let test_runtime_modules_match_descriptors () =
   Registry.clear () ;
   Adapter_loader.register_all () ;
   let descriptors = Backend_registry.all () in
-  Alcotest.(check bool)
-    "at least one descriptor exists"
-    true
-    (descriptors <> []) ;
+  Alcotest.(check bool) "at least one descriptor exists" true (descriptors <> []) ;
   List.iter
     (fun (d : Backend_registry.descriptor) ->
       match Registry.get d.id with
       | None ->
-        Alcotest.failf
-          "registered backend module missing for descriptor id=%s"
-          d.id
+          Alcotest.failf
+            "registered backend module missing for descriptor id=%s"
+            d.id
       | Some backend ->
-        let actual_id = Agentic_backend.id backend in
-        let actual_name = Agentic_backend.name backend in
-        Alcotest.(check string)
-          (Printf.sprintf "%s: runtime id matches descriptor" d.id)
-          d.id
-          actual_id ;
-        Alcotest.(check bool)
-          (Printf.sprintf "%s: runtime name is non-empty" d.id)
-          true
-          (String.length (String.trim actual_name) > 0))
+          let actual_id = Agentic_backend.id backend in
+          let actual_name = Agentic_backend.name backend in
+          Alcotest.(check string)
+            (Printf.sprintf "%s: runtime id matches descriptor" d.id)
+            d.id
+            actual_id ;
+          Alcotest.(check bool)
+            (Printf.sprintf "%s: runtime name is non-empty" d.id)
+            true
+            (String.length (String.trim actual_name) > 0))
     descriptors ;
   Registry.clear ()
 
@@ -295,9 +292,7 @@ let test_runtime_ids_have_descriptors () =
     (fun id ->
       match Backend_registry.find id with
       | None ->
-        Alcotest.failf
-          "runtime backend id=%s has no static descriptor"
-          id
+          Alcotest.failf "runtime backend id=%s has no static descriptor" id
       | Some _ -> ())
     runtime_ids ;
   Registry.clear ()

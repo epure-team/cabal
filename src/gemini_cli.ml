@@ -56,9 +56,15 @@ let models_probe =
       | None -> Error "Neither GOOGLE_API_KEY nor GEMINI_API_KEY is set"
       | Some key -> (
           match
-            Backend_process.capture_version_output ~env ~timeout_seconds:10.0
-              [ "curl"; "-sf"
-              ; "https://generativelanguage.googleapis.com/v1beta/models?key=" ^ key ]
+            Backend_process.capture_version_output
+              ~env
+              ~timeout_seconds:10.0
+              [
+                "curl";
+                "-sf";
+                "https://generativelanguage.googleapis.com/v1beta/models?key="
+                ^ key;
+              ]
           with
           | Error msg -> Error msg
           | Ok json_str -> (

@@ -14,8 +14,14 @@ let name = "OpenCode"
 (* OpenCode is provider-agnostic; the canonical pair below mirrors the
    model slugs documented for `opencode run --model`. *)
 let models =
-  [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-  ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+  [
+    "claude-opus-4-7";
+    "claude-sonnet-4-6";
+    "claude-haiku-4-5-20251001";
+    "gpt-4o";
+    "gpt-4o-mini";
+    "gpt-5";
+  ]
 
 (* `opencode models` lists every provider/model slug the local CLI knows
    about, one per line, without requiring authentication.  Use it as the
@@ -24,8 +30,8 @@ let models =
 let parse_models_output stdout =
   stdout |> String.split_on_char '\n'
   |> List.filter_map (fun line ->
-         let trimmed = String.trim line in
-         if String.length trimmed = 0 then None else Some trimmed)
+      let trimmed = String.trim line in
+      if String.length trimmed = 0 then None else Some trimmed)
 
 let models_probe =
   Some

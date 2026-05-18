@@ -232,9 +232,7 @@ let migrate_legacy_managed_json_content content =
         Some
           (comment_line Slash attribution
           ^ comment_line Slash managed_marker
-          ^ comment_line
-              Slash
-              (hash_marker_for default_namespace ^ ": " ^ hash)
+          ^ comment_line Slash (hash_marker_for default_namespace ^ ": " ^ hash)
           ^ body)
     | _ -> None
   with _ -> None

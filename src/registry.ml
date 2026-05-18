@@ -44,10 +44,7 @@ let register backend =
      [resolved_models] right after [register] (without going through
      [Adapter_loader]) still get a sensible answer.  [Adapter_loader] may
      overwrite this with [Probe]-tagged data after invoking the probe. *)
-  Hashtbl.replace
-    resolved_models_tbl
-    id
-    (Agentic_backend.models backend, Static)
+  Hashtbl.replace resolved_models_tbl id (Agentic_backend.models backend, Static)
 
 let get id = Hashtbl.find_opt backends id
 
@@ -66,8 +63,7 @@ let list_ids () =
   !registration_order |> List.rev
   |> List.filter (fun id -> Hashtbl.mem backends id)
 
-let list_models id =
-  Option.map fst (resolved_models id)
+let list_models id = Option.map fst (resolved_models id)
 
 let available ~sw ~env =
   list () |> List.filter (Agentic_backend.available ~sw ~env)

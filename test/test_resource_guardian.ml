@@ -50,7 +50,10 @@ let test_concurrent_register_does_not_lose_pids () =
   Alcotest.(check int) "all concurrent registrations survived" n len ;
   let sorted = List.sort compare pids in
   let expected = List.init n (fun i -> i) in
-  Alcotest.(check (list int)) "every pid is present exactly once" expected sorted
+  Alcotest.(check (list int))
+    "every pid is present exactly once"
+    expected
+    sorted
 
 let test_concurrent_unregister_does_not_leave_phantoms () =
   let g = G.create G.default_config in

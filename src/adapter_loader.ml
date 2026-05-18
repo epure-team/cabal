@@ -56,28 +56,28 @@ let float_field_opt obj key default =
 let env_mappings_field ~source obj key =
   match List.assoc_opt key obj with
   | Some (`O pairs) ->
-    List.filter_map
-      (fun (k, v) ->
-        match v with
-        | `String s -> Some (k, s)
-        | other ->
-          let kind =
-            match other with
-            | `Bool _ -> "bool"
-            | `Float _ -> "number"
-            | `O _ -> "mapping"
-            | `A _ -> "sequence"
-            | `Null -> "null"
-            | `String _ -> "string"
-          in
-          Diagnostics.warn
-            "[adapter_loader] %s: ignoring env mapping %S — expected \
-             string, got %s"
-            source
-            k
-            kind ;
-          None)
-      pairs
+      List.filter_map
+        (fun (k, v) ->
+          match v with
+          | `String s -> Some (k, s)
+          | other ->
+              let kind =
+                match other with
+                | `Bool _ -> "bool"
+                | `Float _ -> "number"
+                | `O _ -> "mapping"
+                | `A _ -> "sequence"
+                | `Null -> "null"
+                | `String _ -> "string"
+              in
+              Diagnostics.warn
+                "[adapter_loader] %s: ignoring env mapping %S — expected \
+                 string, got %s"
+                source
+                k
+                kind ;
+              None)
+        pairs
   | _ -> []
 
 (** [string_list_field ~source obj key] reads an array of strings.  Non-string
@@ -204,24 +204,24 @@ let run_probe ~sw ~env backend =
   match Agentic_backend.models_probe backend with
   | None -> None
   | Some probe -> (
-    let id = Agentic_backend.id backend in
-    match probe ~sw ~env with
-    | exception e ->
-      Diagnostics.warn
-        "[adapter_loader] %s models_probe raised: %s"
-        id
-        (Printexc.to_string e) ;
-      None
-    | Error msg ->
-      Diagnostics.warn "[adapter_loader] %s models_probe error: %s" id msg ;
-      None
-    | Ok [] ->
-      Diagnostics.warn
-        "[adapter_loader] %s models_probe returned empty list; falling \
-         back to static"
-        id ;
-      None
-    | Ok models -> Some models)
+      let id = Agentic_backend.id backend in
+      match probe ~sw ~env with
+      | exception e ->
+          Diagnostics.warn
+            "[adapter_loader] %s models_probe raised: %s"
+            id
+            (Printexc.to_string e) ;
+          None
+      | Error msg ->
+          Diagnostics.warn "[adapter_loader] %s models_probe error: %s" id msg ;
+          None
+      | Ok [] ->
+          Diagnostics.warn
+            "[adapter_loader] %s models_probe returned empty list; falling \
+             back to static"
+            id ;
+          None
+      | Ok models -> Some models)
 
 (** [resolve_probes_for_registered ~sw ~env ()] walks every registered
     backend and, for each one with a [models_probe], publishes the
@@ -235,9 +235,9 @@ let resolve_probes_for_registered ~sw ~env () =
       match run_probe ~sw ~env backend with
       | Some models -> Registry.set_resolved_models id (models, Registry.Probe)
       | None ->
-        Registry.set_resolved_models
-          id
-          (Agentic_backend.models backend, Registry.Static))
+          Registry.set_resolved_models
+            id
+            (Agentic_backend.models backend, Registry.Static))
     (Registry.list ())
 
 (* --- Register all ---------------------------------------------------------- *)

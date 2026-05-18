@@ -15,11 +15,13 @@ let name = "Claude Code"
    ANTHROPIC_API_KEY is absent.  Keep in sync with
    https://docs.anthropic.com/en/docs/about-claude/models/overview *)
 let models =
-  [ "claude-opus-4-7"
-  ; "claude-sonnet-4-6"
-  ; "claude-haiku-4-5-20251001"
-  ; "claude-opus-4-6"
-  ; "claude-sonnet-4-5-20250929" ]
+  [
+    "claude-opus-4-7";
+    "claude-sonnet-4-6";
+    "claude-haiku-4-5-20251001";
+    "claude-opus-4-6";
+    "claude-sonnet-4-5-20250929";
+  ]
 
 (* Parse the model id strings out of a GET /v1/models JSON response.
    Shape: {"data": [{"id": "claude-opus-4-7", ...}, ...], ...} *)
@@ -51,16 +53,24 @@ let models_probe =
       | None -> Error "ANTHROPIC_API_KEY not set"
       | Some api_key -> (
           match
-            Backend_process.capture_version_output ~env ~timeout_seconds:10.0
-              [ "curl"; "-sf"
-              ; "-H"; "x-api-key: " ^ api_key
-              ; "-H"; "anthropic-version: 2023-06-01"
-              ; "https://api.anthropic.com/v1/models?limit=100" ]
+            Backend_process.capture_version_output
+              ~env
+              ~timeout_seconds:10.0
+              [
+                "curl";
+                "-sf";
+                "-H";
+                "x-api-key: " ^ api_key;
+                "-H";
+                "anthropic-version: 2023-06-01";
+                "https://api.anthropic.com/v1/models?limit=100";
+              ]
           with
           | Error msg -> Error msg
           | Ok json_str -> (
               match parse_anthropic_models_json json_str with
-              | [] -> Error "Anthropic models API returned no parseable model IDs"
+              | [] ->
+                  Error "Anthropic models API returned no parseable model IDs"
               | ms -> Ok ms)))
 
 (* Check if claude CLI is available by running `claude --version` *)

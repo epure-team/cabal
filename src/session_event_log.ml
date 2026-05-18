@@ -255,11 +255,11 @@ let read_events ~fs ~session_logs_dir ~session_id () =
             match Yojson.Safe.from_string line with
             | json -> Some json
             | exception exn ->
-              Diagnostics.warn
-                "[session_event_log] dropping unparseable line in session=%s: \
-                 %s"
-                session_id
-                (Printexc.to_string exn) ;
-              None)
+                Diagnostics.warn
+                  "[session_event_log] dropping unparseable line in \
+                   session=%s: %s"
+                  session_id
+                  (Printexc.to_string exn) ;
+                None)
           lines
     | exception Eio.Io _ -> []

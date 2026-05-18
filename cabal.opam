@@ -12,7 +12,7 @@ doc: "https://epure-team.github.io/cabal/"
 bug-reports: "https://github.com/epure-team/cabal/issues"
 depends: [
   "ocaml" {>= "5.3.0"}
-  "dune" {>= "3.13"}
+  "dune" {>= "3.13" & >= "3.13"}
   "yojson"
   "eio" {>= "1.0"}
   "eio_posix" {>= "1.0"}

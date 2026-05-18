@@ -139,10 +139,8 @@ let contains_url_credentials s =
   let nlen = String.length needle in
   let slen = String.length s in
   let rec scan i =
-    if i > slen - nlen
-    then false
-    else if String.sub s i nlen = needle
-    then begin
+    if i > slen - nlen then false
+    else if String.sub s i nlen = needle then begin
       let start = i + nlen in
       let stop =
         let rec find_slash j =
@@ -156,9 +154,7 @@ let contains_url_credentials s =
       let has_at = String.contains segment '@' in
       let has_colon = String.contains segment ':' in
       let colon_before_at =
-        match
-          String.index_opt segment ':', String.index_opt segment '@'
-        with
+        match (String.index_opt segment ':', String.index_opt segment '@') with
         | Some c, Some a -> c < a
         | _ -> false
       in
@@ -178,11 +174,12 @@ let is_base64_url_segment s =
     let ok = ref true in
     String.iter
       (fun c ->
-        if not
-             ((c >= 'A' && c <= 'Z')
-              || (c >= 'a' && c <= 'z')
-              || (c >= '0' && c <= '9')
-              || c = '_' || c = '-')
+        if
+          not
+            ((c >= 'A' && c <= 'Z')
+            || (c >= 'a' && c <= 'z')
+            || (c >= '0' && c <= '9')
+            || c = '_' || c = '-')
         then ok := false)
       s ;
     !ok
@@ -195,21 +192,19 @@ let is_jwt_like s =
   if String.length s < 30 then false
   else
     match String.split_on_char '.' s with
-    | [ h; p; sig_ ]
+    | [h; p; sig_]
       when String.length h >= 4
            && String.length p >= 4
            && String.length sig_ >= 4
-           && is_base64_url_segment h
-           && is_base64_url_segment p
+           && is_base64_url_segment h && is_base64_url_segment p
            && is_base64_url_segment sig_
            && String.length h >= 3
            && String.sub h 0 3 = "eyJ"
            && String.sub p 0 3 = "eyJ" ->
-      true
+        true
     | _ -> false
 
-let value_pattern_redactable s =
-  contains_url_credentials s || is_jwt_like s
+let value_pattern_redactable s = contains_url_credentials s || is_jwt_like s
 
 (* -------------------------------------------------------------------------- *)
 (* Shape hash                                                                  *)

@@ -39,17 +39,34 @@ open Cabal
 let expected_models =
   [
     ( "claude-code",
-      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-      ; "claude-opus-4-6"; "claude-sonnet-4-5-20250929" ] );
+      [
+        "claude-opus-4-7";
+        "claude-sonnet-4-6";
+        "claude-haiku-4-5-20251001";
+        "claude-opus-4-6";
+        "claude-sonnet-4-5-20250929";
+      ] );
     ( "codex",
       ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"] );
     ("gemini-cli", ["gemini-2.5-pro"; "gemini-2.5-flash"; "gemini-2.0-flash"]);
     ( "copilot-cli",
-      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ] );
+      [
+        "claude-opus-4-7";
+        "claude-sonnet-4-6";
+        "claude-haiku-4-5-20251001";
+        "gpt-4o";
+        "gpt-4o-mini";
+        "gpt-5";
+      ] );
     ( "opencode",
-      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ] );
+      [
+        "claude-opus-4-7";
+        "claude-sonnet-4-6";
+        "claude-haiku-4-5-20251001";
+        "gpt-4o";
+        "gpt-4o-mini";
+        "gpt-5";
+      ] );
   ]
 
 let all_backend_ids = List.map fst expected_models
@@ -127,11 +144,12 @@ let locate_repo_file relpath =
   let candidates =
     match find_root cwd with
     | Some root ->
-        [ Filename.concat root relpath
-        ; Filename.concat root (Filename.concat "libs/cabal" relpath)
-        ; relpath
+        [
+          Filename.concat root relpath;
+          Filename.concat root (Filename.concat "libs/cabal" relpath);
+          relpath;
         ]
-    | None -> [ Filename.concat "../../.." relpath; relpath ]
+    | None -> [Filename.concat "../../.." relpath; relpath]
   in
   match List.find_opt Sys.file_exists candidates with
   | Some p -> p
@@ -172,13 +190,19 @@ let test_claude_code_models () =
   check_models
     ~id:"claude-code"
     ~expected:
-      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-      ; "claude-opus-4-6"; "claude-sonnet-4-5-20250929" ]
+      [
+        "claude-opus-4-7";
+        "claude-sonnet-4-6";
+        "claude-haiku-4-5-20251001";
+        "claude-opus-4-6";
+        "claude-sonnet-4-5-20250929";
+      ]
 
 let test_codex_models () =
   check_models
     ~id:"codex"
-    ~expected:["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]
+    ~expected:
+      ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]
 
 let test_gemini_cli_models () =
   check_models
@@ -189,15 +213,27 @@ let test_copilot_cli_models () =
   check_models
     ~id:"copilot-cli"
     ~expected:
-      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+      [
+        "claude-opus-4-7";
+        "claude-sonnet-4-6";
+        "claude-haiku-4-5-20251001";
+        "gpt-4o";
+        "gpt-4o-mini";
+        "gpt-5";
+      ]
 
 let test_opencode_models () =
   check_models
     ~id:"opencode"
     ~expected:
-      [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-      ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+      [
+        "claude-opus-4-7";
+        "claude-sonnet-4-6";
+        "claude-haiku-4-5-20251001";
+        "gpt-4o";
+        "gpt-4o-mini";
+        "gpt-5";
+      ]
 
 (* --- Registry.list_models negative cases --------------------------------- *)
 
@@ -211,9 +247,7 @@ let test_empty_string_returns_none () =
   with_registry (fun () ->
       match Registry.list_models "" with
       | None -> ()
-      | Some _ ->
-          Alcotest.fail
-            "expected None for the empty string backend id")
+      | Some _ -> Alcotest.fail "expected None for the empty string backend id")
 
 (* --- list invariants (parametrised over all built-in backends) ----------- *)
 
@@ -358,8 +392,13 @@ models:
 let test_claude_code_module_models () =
   Alcotest.(check string_list)
     "Claude_code.models"
-    [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-    ; "claude-opus-4-6"; "claude-sonnet-4-5-20250929" ]
+    [
+      "claude-opus-4-7";
+      "claude-sonnet-4-6";
+      "claude-haiku-4-5-20251001";
+      "claude-opus-4-6";
+      "claude-sonnet-4-5-20250929";
+    ]
     Claude_code.models
 
 let test_codex_module_models () =
@@ -377,15 +416,27 @@ let test_gemini_module_models () =
 let test_copilot_module_models () =
   Alcotest.(check string_list)
     "Copilot_cli.models"
-    [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-    ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+    [
+      "claude-opus-4-7";
+      "claude-sonnet-4-6";
+      "claude-haiku-4-5-20251001";
+      "gpt-4o";
+      "gpt-4o-mini";
+      "gpt-5";
+    ]
     Copilot_cli.models
 
 let test_opencode_module_models () =
   Alcotest.(check string_list)
     "Opencode_cli.models"
-    [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-    ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+    [
+      "claude-opus-4-7";
+      "claude-sonnet-4-6";
+      "claude-haiku-4-5-20251001";
+      "gpt-4o";
+      "gpt-4o-mini";
+      "gpt-5";
+    ]
     Opencode_cli.models
 
 let test_mock_agent_module_models () =
@@ -546,9 +597,7 @@ let test_registry_mli_has_list_models_doc () =
 (* --- Suite --------------------------------------------------------------- *)
 
 let per_backend f =
-  List.map
-    (fun id -> Alcotest.test_case id `Quick (f id))
-    all_backend_ids
+  List.map (fun id -> Alcotest.test_case id `Quick (f id)) all_backend_ids
 
 let per_backend_with_expected f =
   List.map
@@ -579,7 +628,8 @@ let () =
             test_empty_string_returns_none;
         ] );
       ( "List invariants",
-        per_backend test_no_duplicates @ per_backend test_well_formed
+        per_backend test_no_duplicates
+        @ per_backend test_well_formed
         @ per_backend test_stable_order );
       ( "YAML adapter coverage",
         per_backend_with_expected test_yaml_declares_expected_models

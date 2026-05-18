@@ -53,9 +53,7 @@ val models : string list
 
 (** Always [None] — the mock backend has no upstream CLI to enumerate. *)
 val models_probe :
-  (sw:Eio.Switch.t ->
-  env:Eio_unix.Stdenv.base ->
-  (string list, string) result)
+  (sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> (string list, string) result)
   option
 
 (** Returns [true] iff [CABAL_MOCK_AGENT_FIXTURES] (or its legacy alias

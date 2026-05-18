@@ -182,7 +182,9 @@ let () =
         ] );
       ( "gemini",
         [
-          ("extracts response field", `Quick, test_gemini_extracts_response_field);
+          ( "extracts response field",
+            `Quick,
+            test_gemini_extracts_response_field );
           ( "falls back to raw on non-JSON",
             `Quick,
             test_gemini_falls_back_to_raw_on_non_json );

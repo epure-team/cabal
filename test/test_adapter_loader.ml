@@ -183,10 +183,10 @@ env: "not a mapping"
   in
   match Adapter_loader.load_string ~source:"test" yaml with
   | Ok cfg ->
-    Alcotest.(check int)
-      "env scalar gives empty mapping"
-      0
-      (List.length cfg.env_mappings)
+      Alcotest.(check int)
+        "env scalar gives empty mapping"
+        0
+        (List.length cfg.env_mappings)
   | Error msg -> Alcotest.failf "loader rejected scalar env: %s" msg
 
 (* ---- diagnostics: non-string env values must surface a warning ---------- *)
@@ -222,13 +222,13 @@ env:
   in
   let events =
     with_captured_diagnostics (fun () ->
-      match Adapter_loader.load_string ~source:"test" yaml with
-      | Ok cfg ->
-        Alcotest.(check int)
-          "only string-valued env mappings survive"
-          1
-          (List.length cfg.env_mappings)
-      | Error e -> Alcotest.failf "loader rejected mixed env: %s" e)
+        match Adapter_loader.load_string ~source:"test" yaml with
+        | Ok cfg ->
+            Alcotest.(check int)
+              "only string-valued env mappings survive"
+              1
+              (List.length cfg.env_mappings)
+        | Error e -> Alcotest.failf "loader rejected mixed env: %s" e)
   in
   Alcotest.(check int)
     "two non-string env values produce two warnings"

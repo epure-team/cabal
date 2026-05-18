@@ -302,16 +302,13 @@ let test_check_available_false () =
     availability check: [check_available] should honour [~timeout_seconds]
     and return [false] rather than blocking the host. *)
 let test_check_available_times_out_on_hang () =
-  if not (Sys.file_exists "/bin/sleep" || Sys.file_exists "/usr/bin/sleep")
-  then Alcotest.skip ()
+  if not (Sys.file_exists "/bin/sleep" || Sys.file_exists "/usr/bin/sleep") then
+    Alcotest.skip ()
   else
     Eio_posix.run @@ fun env ->
     let started = Unix.gettimeofday () in
     let result =
-      Backend_process.check_available
-        ~env
-        ~timeout_seconds:0.5
-        ["sleep"; "30"]
+      Backend_process.check_available ~env ~timeout_seconds:0.5 ["sleep"; "30"]
     in
     let elapsed = Unix.gettimeofday () -. started in
     Alcotest.(check bool)
@@ -324,8 +321,8 @@ let test_check_available_times_out_on_hang () =
       (elapsed < 2.0)
 
 let test_capture_version_output_times_out_on_hang () =
-  if not (Sys.file_exists "/bin/sleep" || Sys.file_exists "/usr/bin/sleep")
-  then Alcotest.skip ()
+  if not (Sys.file_exists "/bin/sleep" || Sys.file_exists "/usr/bin/sleep") then
+    Alcotest.skip ()
   else
     Eio_posix.run @@ fun env ->
     let started = Unix.gettimeofday () in

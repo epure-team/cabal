@@ -188,9 +188,7 @@ val models : t -> string list
 *)
 val models_probe :
   t ->
-  (sw:Eio.Switch.t ->
-  env:Eio_unix.Stdenv.base ->
-  (string list, string) result)
+  (sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> (string list, string) result)
   option
 
 (** [available ~sw ~env backend] checks if the backend is available.

@@ -32,6 +32,7 @@ let validate_task_namespace (spec : task_spec) =
    returns [Error _] only when the binary is not found or produces no output.
    This is the version-detection primitive: callers should never crash on
    a non-zero exit from a --version command. *)
+
 (** Default cap for version / availability probes. Five seconds is long
     enough for cold-start CLIs (large Node binaries on slow disks) but short
     enough that a hung backend cannot freeze registry initialisation for
@@ -57,18 +58,18 @@ let capture_version_output ~env
   in
   match outcome with
   | Error `Timeout ->
-    Error
-      (Printf.sprintf
-         "timeout after %.1fs running %s"
-         timeout_seconds
-         (String.concat " " cmd))
+      Error
+        (Printf.sprintf
+           "timeout after %.1fs running %s"
+           timeout_seconds
+           (String.concat " " cmd))
   | Ok () ->
-    let out = Buffer.contents stdout_buf in
-    if out <> "" then Ok out
-    else
-      let err = Buffer.contents stderr_buf in
-      if err <> "" then Ok err
-      else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
+      let out = Buffer.contents stdout_buf in
+      if out <> "" then Ok out
+      else
+        let err = Buffer.contents stderr_buf in
+        if err <> "" then Ok err
+        else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
 
 (* Check if a command is available by running it.
    Distinguishes three outcomes: clean exit, process error (missing binary
@@ -90,9 +91,7 @@ let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
           Ok true
         with Eio.Io _ -> Ok false)
   in
-  match outcome with
-  | Error `Timeout -> false
-  | Ok ok -> ok
+  match outcome with Error `Timeout -> false | Ok ok -> ok
 
 (* Write MCP server configuration to a JSON file *)
 let write_mcp_config ~env ~path configs =

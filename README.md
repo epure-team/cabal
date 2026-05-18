@@ -149,6 +149,17 @@ Project-local adapters override user-global, which override built-ins by
 id. Hosts that don't want to honour user-supplied adapters should call
 `register_all` without `?project_dir` and validate `$HOME` themselves.
 
+### Known limitations
+
+1. Some built-in adapter flows can execute through the generic YAML-backed adapter path rather than a native backend implementation, so hosts that need strict backend-specific behavior (read-only semantics, resume, config validation, MCP handling, or safety checks) should validate which backend path is active before execution.
+2. Provider model-discovery probes may pass credentials in subprocess argv or URL arguments. Avoid running probe-enabled providers with live API keys in shared or untrusted environments until this path is hardened.
+3. Config artifact paths are treated as trusted project-relative paths. Hosts should sanitize and validate user-supplied paths before passing artifacts into Cabal.
+4. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
+5. Timeout coverage is still incomplete for all subprocess phases, including spawn and stdin-write edge cases.
+6. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.
+
+Tracking for ongoing work is available in issue #5.
+
 ## Build and test
 
 From the standalone Cabal repository:

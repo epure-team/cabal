@@ -14,8 +14,14 @@ let name = "GitHub Copilot"
 (* GitHub Copilot CLI is a meta-CLI that proxies to several upstream model
    providers; we expose the canonical pair selectable via its --model flag. *)
 let models =
-  [ "claude-opus-4-7"; "claude-sonnet-4-6"; "claude-haiku-4-5-20251001"
-  ; "gpt-4o"; "gpt-4o-mini"; "gpt-5" ]
+  [
+    "claude-opus-4-7";
+    "claude-sonnet-4-6";
+    "claude-haiku-4-5-20251001";
+    "gpt-4o";
+    "gpt-4o-mini";
+    "gpt-5";
+  ]
 
 (* `copilot` only accepts `--model <id>` and ships a `providers` subcommand
    that requires interactive input (no machine-parseable listing).  Stay on
@@ -241,10 +247,7 @@ let parse_stdout_text stdout =
     let len = String.length s in
     let rec last i =
       if i < 0 then -1
-      else
-        match s.[i] with
-        | ' ' | '\t' | '\n' | '\r' -> last (i - 1)
-        | _ -> i
+      else match s.[i] with ' ' | '\t' | '\n' | '\r' -> last (i - 1) | _ -> i
     in
     let stop = last (len - 1) in
     if stop = len - 1 then s else String.sub s 0 (stop + 1)

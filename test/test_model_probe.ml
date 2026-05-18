@@ -79,8 +79,7 @@ let resolved_pair = Alcotest.(pair string_list models_source)
 
 (** Run [f] under a fresh Eio switch + env.  Probe-firing tests use this so
     [register_all] can dispatch real probes. *)
-let with_eio f =
-  Eio_main.run (fun env -> Eio.Switch.run (fun sw -> f ~sw ~env))
+let with_eio f = Eio_main.run (fun env -> Eio.Switch.run (fun sw -> f ~sw ~env))
 
 (* --- tests --------------------------------------------------------------- *)
 
@@ -89,46 +88,48 @@ let teardown () = Registry.clear ()
 let test_no_probe_yields_static_source () =
   Registry.clear () ;
   Fun.protect ~finally:teardown (fun () ->
-      let backend = make_mock ~id:"mp-none" ~models:["a"; "b"] ~models_probe:None in
+      let backend =
+        make_mock ~id:"mp-none" ~models:["a"; "b"] ~models_probe:None
+      in
       Registry.register backend ;
       (* Even without an Eio env, the [register]-time seed publishes the
          static view tagged Static. *)
       match Registry.resolved_models "mp-none" with
       | None -> Alcotest.fail "expected resolved_models to return Some"
       | Some pair ->
-          Alcotest.check resolved_pair "static seed" (["a"; "b"], Registry.Static) pair)
+          Alcotest.check
+            resolved_pair
+            "static seed"
+            (["a"; "b"], Registry.Static)
+            pair)
 
 let test_probe_success_publishes_probe_tag () =
   Registry.clear () ;
   Fun.protect ~finally:teardown (fun () ->
       let probe ~sw:_ ~env:_ = Ok ["x"; "y"] in
       let backend =
-        make_mock
-          ~id:"mp-ok"
-          ~models:["fallback"]
-          ~models_probe:(Some probe)
+        make_mock ~id:"mp-ok" ~models:["fallback"] ~models_probe:(Some probe)
       in
       Registry.register backend ;
-      with_eio (fun ~sw ~env ->
-          Adapter_loader.register_all ~sw ~env ()) ;
+      with_eio (fun ~sw ~env -> Adapter_loader.register_all ~sw ~env ()) ;
       match Registry.resolved_models "mp-ok" with
       | None -> Alcotest.fail "expected mp-ok to be resolved"
       | Some pair ->
-          Alcotest.check resolved_pair "probe wins" (["x"; "y"], Registry.Probe) pair)
+          Alcotest.check
+            resolved_pair
+            "probe wins"
+            (["x"; "y"], Registry.Probe)
+            pair)
 
 let test_probe_error_falls_back_to_static () =
   Registry.clear () ;
   Fun.protect ~finally:teardown (fun () ->
       let probe ~sw:_ ~env:_ = Error "boom" in
       let backend =
-        make_mock
-          ~id:"mp-err"
-          ~models:["s1"; "s2"]
-          ~models_probe:(Some probe)
+        make_mock ~id:"mp-err" ~models:["s1"; "s2"] ~models_probe:(Some probe)
       in
       Registry.register backend ;
-      with_eio (fun ~sw ~env ->
-          Adapter_loader.register_all ~sw ~env ()) ;
+      with_eio (fun ~sw ~env -> Adapter_loader.register_all ~sw ~env ()) ;
       match Registry.resolved_models "mp-err" with
       | None -> Alcotest.fail "expected mp-err to be resolved"
       | Some pair ->
@@ -143,14 +144,10 @@ let test_probe_exception_falls_back_to_static () =
   Fun.protect ~finally:teardown (fun () ->
       let probe ~sw:_ ~env:_ = failwith "probe raised" in
       let backend =
-        make_mock
-          ~id:"mp-raise"
-          ~models:["s1"]
-          ~models_probe:(Some probe)
+        make_mock ~id:"mp-raise" ~models:["s1"] ~models_probe:(Some probe)
       in
       Registry.register backend ;
-      with_eio (fun ~sw ~env ->
-          Adapter_loader.register_all ~sw ~env ()) ;
+      with_eio (fun ~sw ~env -> Adapter_loader.register_all ~sw ~env ()) ;
       match Registry.resolved_models "mp-raise" with
       | None -> Alcotest.fail "expected mp-raise to be resolved"
       | Some pair ->
@@ -165,14 +162,10 @@ let test_probe_empty_list_falls_back_to_static () =
   Fun.protect ~finally:teardown (fun () ->
       let probe ~sw:_ ~env:_ = Ok [] in
       let backend =
-        make_mock
-          ~id:"mp-empty"
-          ~models:["s1"; "s2"]
-          ~models_probe:(Some probe)
+        make_mock ~id:"mp-empty" ~models:["s1"; "s2"] ~models_probe:(Some probe)
       in
       Registry.register backend ;
-      with_eio (fun ~sw ~env ->
-          Adapter_loader.register_all ~sw ~env ()) ;
+      with_eio (fun ~sw ~env -> Adapter_loader.register_all ~sw ~env ()) ;
       match Registry.resolved_models "mp-empty" with
       | None -> Alcotest.fail "expected mp-empty to be resolved"
       | Some pair ->
@@ -194,8 +187,7 @@ let test_probe_invoked_exactly_once () =
         make_mock ~id:"mp-once" ~models:["s"] ~models_probe:(Some probe)
       in
       Registry.register backend ;
-      with_eio (fun ~sw ~env ->
-          Adapter_loader.register_all ~sw ~env ()) ;
+      with_eio (fun ~sw ~env -> Adapter_loader.register_all ~sw ~env ()) ;
       (* Multiple subsequent queries must not re-fire the probe. *)
       let _ = Registry.resolved_models "mp-once" in
       let _ = Registry.resolved_models "mp-once" in
@@ -212,14 +204,10 @@ let test_list_models_is_resolved_models_first () =
   Fun.protect ~finally:teardown (fun () ->
       let probe ~sw:_ ~env:_ = Ok ["live"; "live2"] in
       let backend =
-        make_mock
-          ~id:"mp-live"
-          ~models:["stale"]
-          ~models_probe:(Some probe)
+        make_mock ~id:"mp-live" ~models:["stale"] ~models_probe:(Some probe)
       in
       Registry.register backend ;
-      with_eio (fun ~sw ~env ->
-          Adapter_loader.register_all ~sw ~env ()) ;
+      with_eio (fun ~sw ~env -> Adapter_loader.register_all ~sw ~env ()) ;
       Alcotest.(check (option string_list))
         "list_models returns the live list"
         (Some ["live"; "live2"])
@@ -240,10 +228,7 @@ let test_register_all_no_eio_keeps_static_seed () =
          probe surface as Static (their probe never fires). *)
       let probe ~sw:_ ~env:_ = Ok ["would-be-live"] in
       let backend =
-        make_mock
-          ~id:"mp-no-eio"
-          ~models:["seeded"]
-          ~models_probe:(Some probe)
+        make_mock ~id:"mp-no-eio" ~models:["seeded"] ~models_probe:(Some probe)
       in
       Registry.register backend ;
       Adapter_loader.register_all () ;
@@ -280,8 +265,7 @@ let test_built_in_ids_resolve_after_register_all () =
 let test_built_in_resolution_with_eio_keeps_non_none () =
   Registry.clear () ;
   Fun.protect ~finally:teardown (fun () ->
-      with_eio (fun ~sw ~env ->
-          Adapter_loader.register_all ~sw ~env ()) ;
+      with_eio (fun ~sw ~env -> Adapter_loader.register_all ~sw ~env ()) ;
       let built_in_ids =
         ["claude-code"; "codex"; "gemini-cli"; "copilot-cli"; "opencode"]
       in
@@ -305,9 +289,7 @@ let test_built_in_resolution_with_eio_keeps_non_none () =
 
 let test_clear_drops_resolved_models () =
   Registry.clear () ;
-  let backend =
-    make_mock ~id:"mp-clear" ~models:["x"] ~models_probe:None
-  in
+  let backend = make_mock ~id:"mp-clear" ~models:["x"] ~models_probe:None in
   Registry.register backend ;
   (match Registry.resolved_models "mp-clear" with
   | Some _ -> ()

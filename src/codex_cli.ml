@@ -12,7 +12,8 @@ let id = "codex"
 let name = "OpenAI Codex"
 
 (* Static fallback — used when OPENAI_API_KEY is absent or the probe fails. *)
-let models = ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]
+let models =
+  ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]
 
 (* Keep only chat / reasoning models from the OpenAI /v1/models response;
    skip embeddings, tts, whisper, dall-e, etc. *)
@@ -21,8 +22,8 @@ let is_chat_model id =
     String.length s >= String.length prefix
     && String.sub s 0 (String.length prefix) = prefix
   in
-  starts id "gpt-" || starts id "o1" || starts id "o2"
-  || starts id "o3" || starts id "o4" || starts id "o5"
+  starts id "gpt-" || starts id "o1" || starts id "o2" || starts id "o3"
+  || starts id "o4" || starts id "o5"
 
 let parse_openai_models_json json_str =
   try
@@ -51,15 +52,22 @@ let models_probe =
       | None -> Error "OPENAI_API_KEY not set"
       | Some api_key -> (
           match
-            Backend_process.capture_version_output ~env ~timeout_seconds:10.0
-              [ "curl"; "-sf"
-              ; "-H"; "Authorization: Bearer " ^ api_key
-              ; "https://api.openai.com/v1/models" ]
+            Backend_process.capture_version_output
+              ~env
+              ~timeout_seconds:10.0
+              [
+                "curl";
+                "-sf";
+                "-H";
+                "Authorization: Bearer " ^ api_key;
+                "https://api.openai.com/v1/models";
+              ]
           with
           | Error msg -> Error msg
           | Ok json_str -> (
               match parse_openai_models_json json_str with
-              | [] -> Error "OpenAI models API returned no parseable chat model IDs"
+              | [] ->
+                  Error "OpenAI models API returned no parseable chat model IDs"
               | ms -> Ok ms)))
 
 let available ~sw:_ ~env =

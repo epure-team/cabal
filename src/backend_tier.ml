@@ -65,9 +65,7 @@ let smart_tier = ref default_smart
 (** Initialize tiers from environment or command-line args.
     Call this once at startup. *)
 let init ?fast ?smart () =
-  let getenv_first names =
-    List.find_map (fun n -> Sys.getenv_opt n) names
-  in
+  let getenv_first names = List.find_map (fun n -> Sys.getenv_opt n) names in
   (match fast with
   | Some s -> fast_tier := parse_tier_spec s
   | None -> (
