@@ -57,7 +57,11 @@ standalone OCaml library and as the backend abstraction layer vendored under
 
 - `capabilities.native_json_schema_output = true` MUST be accompanied by
   `native_json_schema_output_evidence = Some _`; setting it to `true` with
-  `None` evidence is a CI-enforced contract violation.
+  `None` evidence is a CI-enforced contract violation.  The structural
+  invariant is enforced by
+  `libs/cabal/test/test_demo_622.ml:test_native_json_schema_evidence_required_when_true`,
+  which iterates `Backend_registry.all ()` — not a hardcoded list — so every
+  backend added in the future is automatically checked.
 - All initially shipped backends set `native_json_schema_output = false` with
   `native_json_schema_output_evidence = None`.
 - The `capability_evidence` type is defined in `backend_types.mli` (not
