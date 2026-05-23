@@ -150,9 +150,12 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - **Adding a new `native_json_schema_output = true` backend**: you must also add
   `native_json_schema_output : bool` to the `Agentic_backend.S` module type
   (already done), set it `true` in the backend's `.ml`, wire the schema into the
-  CLI via `spec.json_schema` in `build_command` (or equivalent), add the
-  `capability_evidence` record to `backend_registry.ml`, and document the
-  expected JSON Schema draft in the evidence record `notes` field.
+  CLI via `spec.json_schema` in `build_command` (or equivalent), add a
+  `capability_evidence` record to `backend_registry.ml` with `tested_at_version`,
+  `json_schema_draft` (e.g. `"2020-12"`), and `test_method` (either
+  `Backend_types.E2e_test` or `Backend_types.Manual_probe "<invocation>"`), and
+  add the required credential env var to `required_credential_env_var` in
+  `test_native_json_schema_backends.ml`.
 - Claude Code uses `--output-schema <inline-JSON>` (JSON Schema draft 2020-12).
   The evidence record is in `backend_registry.ml` under the `claude-code`
   descriptor.
@@ -165,26 +168,36 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `test_backend.ml`, `test_model_probe.ml`, `test_agent_helpers.ml`,
   `test_pipeline_runtime.ml`, `test_build_flow.ml`.
 
-## E2E tests — Story #627
+## E2E tests — Stories #627 and #628
 
-- E2E tests for `Json_schema_enforcer` live in
+- E2E tests for `Json_schema_enforcer` (Story #627) live in
   `libs/cabal/test/test_demo_627.ml`.  They are **excluded from CI** via
   `(enabled_if (= %{env:CABAL_E2E_TESTS=0} 1))` in the dune stanza — the
   same pattern used by `EPURE_OCAMLLSP_TESTS=1` elsewhere in the repo.  The
   binary is neither built nor executed when `CABAL_E2E_TESTS` is unset.
-- Three env vars control execution: `CABAL_E2E_TESTS` (gate), `CABAL_E2E_BACKEND`
-  (backend id, e.g. `"claude-code"`), and `CABAL_E2E_MODEL` (model name, e.g.
-  `"haiku"`).  If either `CABAL_E2E_BACKEND` or `CABAL_E2E_MODEL` is unset the
-  test skips with a diagnostic message; it does not fail.
-- A `(alias e2e)` field in the test stanza makes `dune build @e2e` a
-  discoverable named target for contributors.
-- The test exercises `Json_schema_enforcer.run_task` with a simple JSON Schema
-  object (`{ answer: string }`) and asserts that the returned `agent_text`
-  passes `Json_schema_validator.validate`.  On the native path
-  (`native_json_schema_output = true`) the backend enforces the schema; on the
-  validate-and-retry path the enforcer validates and, if needed, makes one
-  corrective call.  The test accepts success on either attempt.
+- Three env vars control `test_demo_627` execution: `CABAL_E2E_TESTS` (gate),
+  `CABAL_E2E_BACKEND` (backend id, e.g. `"claude-code"`), and `CABAL_E2E_MODEL`
+  (model name, e.g. `"haiku"`).  If either `CABAL_E2E_BACKEND` or
+  `CABAL_E2E_MODEL` is unset the test skips with a diagnostic message; it does
+  not fail.
+- The generic native-path E2E test (Story #628) lives in
+  `libs/cabal/test/test_native_json_schema_backends.ml`, also gated by
+  `CABAL_E2E_TESTS=1`.  It iterates every backend in `Backend_registry.all ()`
+  with `native_json_schema_output = true`, skips any whose required credential
+  env var (e.g. `ANTHROPIC_API_KEY` for claude-code) is absent (with a
+  diagnostic naming the missing var), and exercises the native schema path for
+  the rest.  Version-drift detection is advisory: a warning is emitted when the
+  installed binary version is below `descriptor.baseline_version`; a debug log
+  when the version exceeds `evidence.tested_at_version`.
+- A `(alias e2e)` rule in `libs/cabal/test/dune` runs **both** binaries
+  sequentially; `dune build @e2e` is the discoverable named target.
+- The structural CI test for Story #628 lives in
+  `libs/cabal/test/test_demo_628.ml` (always compiled, never gated) and asserts:
+  (1) `Backend_types.test_method` has `E2e_test` and `Manual_probe of string`
+  constructors; (2) `capability_evidence` has `tested_at_version`,
+  `json_schema_draft`, and `test_method` fields; (3) every backend with
+  `native_json_schema_output = true` in `Backend_registry.all ()` carries
+  `native_json_schema_output_evidence = Some _`.
 - The test always calls `Adapter_loader.register_all ()` before `Registry.get`
-  so YAML-backed backends (codex, opencode, gemini-cli, copilot-cli) are
-  reachable by id.
-- `libs/cabal/README.md` documents the three env vars and links to the test file.
+  so YAML-backed backends are reachable by id.
+- `libs/cabal/README.md` documents all env vars and links to both test files.

@@ -171,20 +171,51 @@ type lsp_server_config = {
 
 (** {1 Capability Evidence} *)
 
+(** Verification method for a [capability_evidence] record.
+
+    Two constructors:
+    - [E2e_test] — the capability was verified by running
+      [test_native_json_schema_backends] with [CABAL_E2E_TESTS=1].
+      Self-documenting: the test file is the audit trail.
+    - [Manual_probe of string] — the capability was verified by a manual CLI
+      probe.  The string payload MUST document the exact invocation used
+      (e.g. [claude --version && printf '...' | claude --output-schema ...])
+      so the evidence is reproducible and reviewable in PRs. *)
+type test_method =
+  | E2e_test
+      (** Verified by running [test_native_json_schema_backends] with
+          [CABAL_E2E_TESTS=1]. *)
+  | Manual_probe of string
+      (** Verified by a manual CLI probe; the string documents the exact
+          invocation. *)
+
 (** Evidence record documenting the basis for a backend capability claim.
 
     Required as [Some _] whenever
-    [capabilities.native_json_schema_output = true].  Carries version
-    boundaries for drift detection and a link to upstream evidence.  Defined
-    here so it is available to [Backend_registry] without a dependency cycle. *)
+    [capabilities.native_json_schema_output = true].  Carries exactly three
+    fields (Story #628 decision D-8):
+
+    - [tested_at_version] — the backend binary version at which the capability
+      was last verified.  Used for drift detection: the installed version is
+      compared against [descriptor.baseline_version] (lower bound) and
+      [tested_at_version] (upper bound).
+    - [json_schema_draft] — the JSON Schema draft the native CLI accepted
+      (e.g. ["2020-12"]).  Callers using the native path are responsible for
+      supplying a conforming schema.
+    - [test_method] — how the capability was verified; prevents bare-string
+      guessing and creates a reviewable paper trail.
+
+    Defined here (not in [Backend_registry]) so it is available without a
+    dependency cycle. *)
 type capability_evidence = {
-  baseline_version : string;
-      (** Minimum binary version from which the capability is supported. *)
   tested_at_version : string;
-      (** Version at which the capability was last manually verified. *)
-  evidence_url : string;
-      (** Upstream documentation or changelog link supporting the claim. *)
-  notes : string;  (** Human-readable summary of the evidence. *)
+      (** Backend binary version at which the capability was last verified. *)
+  json_schema_draft : string;
+      (** JSON Schema draft accepted by the backend's native CLI
+          (e.g. ["2020-12"]). *)
+  test_method : test_method;
+      (** How the capability was verified — [E2e_test] or
+          [Manual_probe of invocation_string]. *)
 }
 
 (** {1 Task Specification} *)

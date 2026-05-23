@@ -97,11 +97,14 @@ type lsp_server_config = {
 
 (* Capability Evidence *)
 
+type test_method =
+  | E2e_test
+  | Manual_probe of string
+
 type capability_evidence = {
-  baseline_version : string;
   tested_at_version : string;
-  evidence_url : string;
-  notes : string;
+  json_schema_draft : string;
+  test_method : test_method;
 }
 
 (* Task Specification *)

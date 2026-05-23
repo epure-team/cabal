@@ -173,13 +173,21 @@ opam lint cabal.opam
 
 ### E2E tests (manual, CI-excluded)
 
-End-to-end tests for `Json_schema_enforcer` against real backend CLIs live in
-[`test/test_demo_627.ml`](test/test_demo_627.ml).  They are gated by the
-`CABAL_E2E_TESTS=1` environment variable and are **not** run in CI.
+Two E2E test binaries are gated by `CABAL_E2E_TESTS=1` and are **not** run
+in CI:
+
+| Binary | Purpose |
+|---|---|
+| [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the validate-and-retry enforcer path against a specific backend and model |
+| [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true` and exercises the native schema path (Story #628) |
+
+Both are built and run via `@e2e`.
+
+#### Env vars for `test_demo_627`
 
 | Variable | Purpose |
 |---|---|
-| `CABAL_E2E_TESTS=1` | Enables building and running the E2E test binary |
+| `CABAL_E2E_TESTS=1` | Enables building and running the E2E binaries |
 | `CABAL_E2E_BACKEND` | Backend id to exercise (e.g. `claude-code`, `codex`, `gemini-cli`) |
 | `CABAL_E2E_MODEL` | Model name (e.g. `haiku`, `gpt-4o-mini`, `gemini-2.0-flash`) |
 
@@ -188,10 +196,32 @@ CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
   dune runtest libs/cabal/test/ --force
 ```
 
-Or via the named alias:
+#### Env vars for `test_native_json_schema_backends`
+
+| Variable | Purpose |
+|---|---|
+| `CABAL_E2E_TESTS=1` | Enables building and running the E2E binaries |
+| `CABAL_E2E_MODEL` | Model name (e.g. `haiku`, `gpt-4o-mini`, `gemini-2.0-flash`) |
+| `ANTHROPIC_API_KEY` | Required by `claude-code`; backend is skipped if absent |
+
+The test iterates all registry entries with `native_json_schema_output = true`,
+skips any backend whose required credential env var is absent (with a diagnostic
+naming the missing var), and exercises the native schema path for the rest.
+Version-drift detection is advisory: a warning is emitted when the installed
+binary version is below the evidence `baseline_version`; a debug log is emitted
+when the installed version exceeds `tested_at_version`.
+
+```bash
+CABAL_E2E_TESTS=1 CABAL_E2E_MODEL=haiku \
+  ANTHROPIC_API_KEY=<key> \
+  dune runtest libs/cabal/test/ --force
+```
+
+#### Named alias (runs both)
 
 ```bash
 CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
+  ANTHROPIC_API_KEY=<key> \
   dune build @e2e
 ```
 

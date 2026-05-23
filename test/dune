@@ -185,10 +185,24 @@
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1)))
 
+(test
+ (name test_demo_628)
+ (libraries cabal alcotest)
+ (modules test_demo_628))
+
+(test
+ (name test_native_json_schema_backends)
+ (libraries cabal alcotest eio eio_main yojson unix)
+ (modules test_native_json_schema_backends)
+ (enabled_if
+  (= %{env:CABAL_E2E_TESTS=0} 1)))
+
 (rule
  (alias e2e)
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1))
- (deps test_demo_627.exe)
+ (deps test_demo_627.exe test_native_json_schema_backends.exe)
  (action
-  (run ./test_demo_627.exe)))
+  (progn
+   (run ./test_demo_627.exe)
+   (run ./test_native_json_schema_backends.exe))))
