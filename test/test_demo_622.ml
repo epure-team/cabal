@@ -17,7 +17,10 @@
 
 open Cabal
 
-let all_ids = ["claude-code"; "codex"; "opencode"; "gemini-cli"; "copilot-cli"]
+let all_ids =
+  List.map
+    (fun (d : Backend_registry.descriptor) -> d.id)
+    (Backend_registry.all ())
 
 let find_desc id =
   match Backend_registry.find id with
@@ -54,8 +57,7 @@ let test_task_spec_json_schema_roundtrip () =
     `Assoc
       [
         ("type", `String "object");
-        ( "properties",
-          `Assoc [("name", `Assoc [("type", `String "string")])] );
+        ("properties", `Assoc [("name", `Assoc [("type", `String "string")])]);
       ]
   in
   let spec =
@@ -67,7 +69,8 @@ let test_task_spec_json_schema_roundtrip () =
   in
   let json = Backend_types.task_spec_to_yojson spec in
   match Backend_types.task_spec_of_yojson json with
-  | Error e -> Alcotest.failf "task_spec with json_schema roundtrip failed: %s" e
+  | Error e ->
+      Alcotest.failf "task_spec with json_schema roundtrip failed: %s" e
   | Ok roundtripped ->
       Alcotest.(check bool)
         "json_schema survives JSON round-trip"
@@ -120,7 +123,8 @@ let test_all_backends_native_json_schema_output_false () =
       Alcotest.(check bool)
         (id ^ ": native_json_schema_output = false")
         false
-        d.Backend_registry.capabilities.Backend_registry.native_json_schema_output)
+        d.Backend_registry.capabilities
+          .Backend_registry.native_json_schema_output)
     all_ids
 
 let test_all_backends_native_json_schema_output_evidence_none () =
@@ -131,9 +135,25 @@ let test_all_backends_native_json_schema_output_evidence_none () =
         (id ^ ": native_json_schema_output_evidence = None")
         true
         (d.Backend_registry.capabilities
-           .Backend_registry
-            .native_json_schema_output_evidence
-        = None))
+           .Backend_registry.native_json_schema_output_evidence = None))
+    all_ids
+
+(** Structural invariant: every backend with [native_json_schema_output = true]
+    must carry [native_json_schema_output_evidence = Some _].
+
+    Currently all built-in backends have [native_json_schema_output = false], so
+    this test passes trivially.  It will catch any future story that sets the
+    flag to [true] without providing evidence. *)
+let test_native_json_schema_evidence_required_when_true () =
+  List.iter
+    (fun id ->
+      let d = find_desc id in
+      let cap = d.Backend_registry.capabilities in
+      if cap.Backend_registry.native_json_schema_output then
+        Alcotest.(check bool)
+          (id ^ ": native_json_schema_output = true requires evidence = Some _")
+          true
+          (cap.Backend_registry.native_json_schema_output_evidence <> None))
     all_ids
 
 (** {1 Suite} *)
@@ -182,5 +202,9 @@ let () =
             "native_json_schema_output_evidence = None for all backends"
             `Quick
             test_all_backends_native_json_schema_output_evidence_none;
+          Alcotest.test_case
+            "native_json_schema_output = true requires evidence = Some _"
+            `Quick
+            test_native_json_schema_evidence_required_when_true;
         ] );
     ]

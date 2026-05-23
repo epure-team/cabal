@@ -98,9 +98,7 @@ let make_invalid_result ?(session_id = "test-session-1") () =
 
 let test_pass_through () =
   let backend, call_count, _ =
-    make_mock
-      ~supports_resume:false
-      ~responses:[make_valid_result ()]
+    make_mock ~supports_resume:false ~responses:[make_valid_result ()]
   in
   let spec =
     Backend_types.make_task_spec ~prompt:"original" ~working_dir:"/tmp" ()
@@ -108,9 +106,7 @@ let test_pass_through () =
   (* json_schema = None → pass-through *)
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let result =
-    Json_schema_enforcer.run_task ~sw ~env ~backend spec
-  in
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC1: exactly one backend call" 1 !call_count ;
   Alcotest.(check bool) "AC1: result is Ok" true (Result.is_ok result)
 
@@ -118,9 +114,7 @@ let test_pass_through () =
 
 let test_valid_first_response () =
   let backend, call_count, _ =
-    make_mock
-      ~supports_resume:false
-      ~responses:[make_valid_result ()]
+    make_mock ~supports_resume:false ~responses:[make_valid_result ()]
   in
   let spec =
     Backend_types.make_task_spec
@@ -131,9 +125,7 @@ let test_valid_first_response () =
   in
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let result =
-    Json_schema_enforcer.run_task ~sw ~env ~backend spec
-  in
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC2: exactly one backend call" 1 !call_count ;
   Alcotest.(check bool) "AC2: result is Ok" true (Result.is_ok result)
 
@@ -161,9 +153,7 @@ let test_invalid_with_session_resume () =
   in
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let result =
-    Json_schema_enforcer.run_task ~sw ~env ~backend spec
-  in
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC3: exactly two backend calls" 2 !call_count ;
   Alcotest.(check bool) "AC3: result is Ok" true (Result.is_ok result) ;
   (* The second (most-recent) call prompt is at the head of the list. *)
@@ -196,9 +186,7 @@ let test_invalid_without_session_resume () =
   in
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let result =
-    Json_schema_enforcer.run_task ~sw ~env ~backend spec
-  in
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC4: exactly two backend calls" 2 !call_count ;
   Alcotest.(check bool) "AC4: result is Ok" true (Result.is_ok result) ;
   let second_prompt = List.hd !captured_prompts in
@@ -228,11 +216,9 @@ let test_both_invalid () =
   in
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let result =
-    Json_schema_enforcer.run_task ~sw ~env ~backend spec
-  in
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC5: exactly two backend calls" 2 !call_count ;
-  (match result with
+  match result with
   | Ok _ -> Alcotest.fail "AC5: expected Error but got Ok"
   | Error msg ->
       Alcotest.(check bool)
@@ -248,7 +234,7 @@ let test_both_invalid () =
       Alcotest.(check bool)
         "AC5: error references attempt 2"
         true
-        (contains msg "Attempt 2"))
+        (contains msg "Attempt 2")
 
 (** {1 AC6 — session_id from the resumed result is propagated} *)
 
@@ -272,9 +258,7 @@ let test_session_id_propagated () =
   in
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let result =
-    Json_schema_enforcer.run_task ~sw ~env ~backend spec
-  in
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   match result with
   | Error msg -> Alcotest.failf "AC6: expected Ok but got Error: %s" msg
   | Ok task_result ->
@@ -290,12 +274,8 @@ let () =
     "Story_626_enforcer_unit_tests"
     [
       ( "AC1 pass-through when json_schema = None",
-        [
-          Alcotest.test_case
-            "exactly one backend call"
-            `Quick
-            test_pass_through;
-        ] );
+        [Alcotest.test_case "exactly one backend call" `Quick test_pass_through]
+      );
       ( "AC2 valid first response — no spurious retry",
         [
           Alcotest.test_case

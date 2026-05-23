@@ -44,5 +44,4 @@
 
     {violates}
     (none) *)
-val validate :
-  schema:Yojson.Safe.t -> document:string -> (unit, string) result
+val validate : schema:Yojson.Safe.t -> document:string -> (unit, string) result

@@ -184,8 +184,7 @@ type capability_evidence = {
       (** Version at which the capability was last manually verified. *)
   evidence_url : string;
       (** Upstream documentation or changelog link supporting the claim. *)
-  notes : string;
-      (** Human-readable summary of the evidence. *)
+  notes : string;  (** Human-readable summary of the evidence. *)
 }
 
 (** {1 Task Specification} *)

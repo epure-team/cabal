@@ -65,13 +65,10 @@ let check_type ~expected ~doc =
             (Printf.sprintf
                "expected null but got %s"
                (Yojson.Safe.to_string other)))
-  | other ->
-      Error (Printf.sprintf "unsupported schema type %S" other)
+  | other -> Error (Printf.sprintf "unsupported schema type %S" other)
 
 let check_required ~required ~doc =
-  let fields =
-    match doc with `Assoc kv -> List.map fst kv | _ -> []
-  in
+  let fields = match doc with `Assoc kv -> List.map fst kv | _ -> [] in
   let missing = List.filter (fun r -> not (List.mem r fields)) required in
   match missing with
   | [] -> Ok ()
@@ -88,9 +85,7 @@ let validate ~schema ~document =
   | exception exn ->
       Error (Printf.sprintf "not valid JSON: %s" (Printexc.to_string exn))
   | doc ->
-      let schema_fields =
-        match schema with `Assoc kv -> kv | _ -> []
-      in
+      let schema_fields = match schema with `Assoc kv -> kv | _ -> [] in
       let ( let* ) = Result.bind in
       let* () =
         match List.assoc_opt "type" schema_fields with
@@ -102,9 +97,7 @@ let validate ~schema ~document =
         match List.assoc_opt "required" schema_fields with
         | Some (`List reqs) ->
             let required =
-              List.filter_map
-                (function `String s -> Some s | _ -> None)
-                reqs
+              List.filter_map (function `String s -> Some s | _ -> None) reqs
             in
             check_required ~required ~doc
         | Some _ -> Error "schema field 'required' must be an array"
