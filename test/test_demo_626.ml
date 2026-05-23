@@ -54,6 +54,8 @@ let make_mock ~supports_resume ~responses =
 
     let supports_session_resume = supports_resume
 
+    let native_json_schema_output = false
+
     let is_resume_failure _ = false
 
     let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =
@@ -297,7 +299,8 @@ let test_failed_backend_result_is_propagated () =
   match result with
   | Error msg ->
       Alcotest.failf
-        "AC7: expected Ok (propagated Failed result) but got Error: %s" msg
+        "AC7: expected Ok (propagated Failed result) but got Error: %s"
+        msg
   | Ok task_result ->
       Alcotest.(check bool)
         "AC7: returned status is Failed"

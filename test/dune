@@ -169,6 +169,11 @@
  (modules test_demo_623))
 
 (test
+ (name test_demo_625)
+ (libraries cabal alcotest eio eio_main)
+ (modules test_demo_625))
+
+(test
  (name test_demo_626)
  (libraries cabal alcotest eio eio_main)
  (modules test_demo_626))

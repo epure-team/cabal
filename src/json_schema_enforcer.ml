@@ -63,42 +63,69 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
   match spec.Backend_types.json_schema with
   | None -> Ok (Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec)
   | Some schema -> (
-      let schema_json = Yojson.Safe.to_string ~std:true schema in
-      let result1 =
-        Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
-      in
-      (* Schema validation only makes sense for successful invocations.
-         Propagate Failed/Timeout/Cancelled results directly so callers see
-         the real backend error rather than a spurious "not valid JSON"
-         schema-compliance failure. *)
-      match result1.Backend_types.status with
-      | Failed _ | Timeout | Cancelled -> Ok result1
-      | Success -> (
-      let agent_text1 = result1.Backend_types.agent_text in
-      match Json_schema_validator.validate ~schema ~document:agent_text1 with
-      | Ok () -> Ok result1
-      | Error err1 -> (
-          let retry_spec =
-            if Agentic_backend.supports_session_resume backend then
-              match result1.Backend_types.session_id with
-              | Some sid ->
-                  make_resume_retry_spec
-                    ~base:spec
-                    ~session_id:sid
-                    ~schema_json
-                    ~err:err1
-              | None -> make_fresh_retry_spec ~base:spec ~schema_json ~err:err1
-            else make_fresh_retry_spec ~base:spec ~schema_json ~err:err1
-          in
-          let result2 =
-            Agentic_backend.run_task ~sw ~env ?on_raw_line backend retry_spec
-          in
-          let agent_text2 = result2.Backend_types.agent_text in
-          match
-            Json_schema_validator.validate ~schema ~document:agent_text2
-          with
-          | Ok () -> Ok result2
-          | Error err2 ->
-              Error
-                ("Both schema validation attempts failed.\nAttempt 1: " ^ err1
-               ^ "\nAttempt 2: " ^ err2))))
+      if Agentic_backend.native_json_schema_output backend then
+        (* Native path (Story #625): the schema is in spec.json_schema and the
+           backend's run_task wires it to the CLI flag (e.g. --output-schema).
+           The validate-and-retry loop is NOT executed on this path.
+           Any Failed result is treated as a native-backend schema rejection and
+           returned as Error immediately — no fallback, no retry (D-5). *)
+        let result =
+          Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
+        in
+        match result.Backend_types.status with
+        | Backend_types.Failed msg ->
+            Error ("native-backend schema rejection: " ^ msg)
+        | Backend_types.Success | Backend_types.Timeout
+        | Backend_types.Cancelled ->
+            Ok result
+      else
+        (* Validate-and-retry path (Story #624): run the task, validate
+           agent_text, and make at most one corrective re-invocation on failure.
+           Hard cap of two backend calls per run_task invocation. *)
+        let schema_json = Yojson.Safe.to_string ~std:true schema in
+        let result1 =
+          Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
+        in
+        (* Schema validation only makes sense for successful invocations.
+           Propagate Failed/Timeout/Cancelled results directly so callers see
+           the real backend error rather than a spurious "not valid JSON"
+           schema-compliance failure. *)
+        match result1.Backend_types.status with
+        | Failed _ | Timeout | Cancelled -> Ok result1
+        | Success -> (
+            let agent_text1 = result1.Backend_types.agent_text in
+            match
+              Json_schema_validator.validate ~schema ~document:agent_text1
+            with
+            | Ok () -> Ok result1
+            | Error err1 -> (
+                let retry_spec =
+                  if Agentic_backend.supports_session_resume backend then
+                    match result1.Backend_types.session_id with
+                    | Some sid ->
+                        make_resume_retry_spec
+                          ~base:spec
+                          ~session_id:sid
+                          ~schema_json
+                          ~err:err1
+                    | None ->
+                        make_fresh_retry_spec ~base:spec ~schema_json ~err:err1
+                  else make_fresh_retry_spec ~base:spec ~schema_json ~err:err1
+                in
+                let result2 =
+                  Agentic_backend.run_task
+                    ~sw
+                    ~env
+                    ?on_raw_line
+                    backend
+                    retry_spec
+                in
+                let agent_text2 = result2.Backend_types.agent_text in
+                match
+                  Json_schema_validator.validate ~schema ~document:agent_text2
+                with
+                | Ok () -> Ok result2
+                | Error err2 ->
+                    Error
+                      ("Both schema validation attempts failed.\nAttempt 1: "
+                     ^ err1 ^ "\nAttempt 2: " ^ err2))))

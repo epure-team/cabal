@@ -62,8 +62,8 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `libs/cabal/test/test_demo_622.ml:test_native_json_schema_evidence_required_when_true`,
   which iterates `Backend_registry.all ()` — not a hardcoded list — so every
   backend added in the future is automatically checked.
-- All initially shipped backends set `native_json_schema_output = false` with
-  `native_json_schema_output_evidence = None`.
+- Claude Code (`claude-code`) is the first backend with `native_json_schema_output = true`
+  (Story #625).  All other built-in backends remain `false`.
 - The `capability_evidence` type is defined in `backend_types.mli` (not
   `backend_registry.mli`) to avoid import cycles and to keep it available
   wherever types are referenced.
@@ -71,3 +71,88 @@ standalone OCaml library and as the backend abstraction layer vendored under
   record literal (instead of using a built-in descriptor), add
   `native_json_schema_output = false; native_json_schema_output_evidence = None`
   to avoid record-field exhaustiveness errors as the type evolves.
+
+## Json_schema_validator — Story #623
+
+- `Json_schema_validator.validate` is backed by the `jsonschema` opam package
+  (v0.1.0). It supports all keywords defined in JSON Schema drafts 4, 6, 7,
+  2019-09, and 2020-12 — including `enum`, `additionalProperties`, `minimum`,
+  `maxLength`, `pattern`, `allOf`, `anyOf`, `oneOf`, `if/then/else`, and more.
+  Do NOT replace it with a hand-written keyword-subset implementation.
+- Default draft is 2020-12 (Decision D-2). Callers requiring a specific draft
+  must embed `"$schema"` in the schema document; the package reads that field and
+  selects the appropriate draft automatically.
+- The module is **pure**: no I/O, no subprocess, no LLM.  The `jsonschema`
+  package bundles all meta-schemas; no network access occurs for inline schemas
+  (schemas without external `$ref` URLs).
+- `Json_schema_validator` is used exclusively by the validate-and-retry path in
+  `Json_schema_enforcer`.  The native path (`native_json_schema_output = true`)
+  does not call this module.
+- The `jsonschema` opam dependency is declared in `libs/cabal/dune-project` and
+  `libs/cabal/src/dune`.  When adding `jsonschema` to the root `epure` package,
+  add it to `dune-project` under `(package (name epure) ...)` as well.
+- Test file: `libs/cabal/test/test_demo_623.ml` — covers AC1 (pure validation),
+  AC2 (full keyword coverage proves the package is used), AC3 ($schema draft
+  selection).  Test files in `libs/cabal/test/` must include `open Cabal` to
+  access library modules without the `Cabal.` prefix.
+
+## Json_schema_enforcer — Story #624
+
+- `Json_schema_enforcer.run_task` wraps `Agentic_backend.run_task` with optional
+  validate-and-retry enforcement.  Hard cap: **at most two backend calls** per
+  invocation.  No backoff, no configurable budget; callers wanting more attempts
+  must call `run_task` again.
+- Pass-through: `json_schema = None` → exactly one backend call, result returned
+  unchanged as `Ok`.
+- Happy path: `json_schema = Some _`, first response passes validation → exactly
+  one backend call.
+- Session-resume retry path (`capabilities.session_resume = true` and first
+  result carries a `session_id`): the session is resumed via
+  `Backend_types.make_resume_task_spec`; the retry prompt contains **only** the
+  schema block under `## Required output schema` and the compliance instruction
+  (original prompt omitted).  Use `Json_schema_enforcer.resume_retry_template`
+  as the pinned template constant.
+- Fresh-call retry path (otherwise): new invocation whose prompt contains the
+  original prompt, then the schema block, then the compliance instruction.  Use
+  `Json_schema_enforcer.fresh_retry_template` as the pinned template constant.
+- Both attempts fail: returns `Error msg` containing both error strings labelled
+  "Attempt 1" and "Attempt 2".  Neither is discarded.
+- Non-Success first result (`Failed`/`Timeout`/`Cancelled`): propagated as
+  `Ok result` without schema validation or retry.
+- `session_id` from the second `task_result` is propagated in the returned
+  record when the retry succeeds.
+- The two retry prompt template constants (`resume_retry_template`,
+  `fresh_retry_template`) are pinned in `json_schema_enforcer.mli` for
+  inspection and deterministic testing.
+- Unit tests with mock backends: `libs/cabal/test/test_demo_626.ml` — covers all
+  AC items above including call-count assertions, prompt-content assertions,
+  session-id propagation, and error-message preservation.
+
+## Native JSON schema wiring — Story #625
+
+- `Json_schema_enforcer.run_task` routes to the **native path** when
+  `Agentic_backend.native_json_schema_output backend = true`.  On this path:
+  - `task_spec.json_schema` is left intact; the backend's `run_task` wires it to
+    the CLI flag (e.g. `--output-schema <schema-json>` for claude-code).
+  - `Json_schema_validator` is **NOT** called — no validate-and-retry loop.
+  - Any `Failed` result is returned as `Error "native-backend schema rejection: <msg>"` 
+    immediately; no second call, no fallback (Decision D-5).
+  - `Timeout` / `Cancelled` results are returned as `Ok result` (transport
+    failures, not schema rejections).
+- **Adding a new `native_json_schema_output = true` backend**: you must also add
+  `native_json_schema_output : bool` to the `Agentic_backend.S` module type
+  (already done), set it `true` in the backend's `.ml`, wire the schema into the
+  CLI via `spec.json_schema` in `build_command` (or equivalent), add the
+  `capability_evidence` record to `backend_registry.ml`, and document the
+  expected JSON Schema draft in the evidence record `notes` field.
+- Claude Code uses `--output-schema <inline-JSON>` (JSON Schema draft 2020-12).
+  The evidence record is in `backend_registry.ml` under the `claude-code`
+  descriptor.
+- Unit tests: `libs/cabal/test/test_demo_625.ml` — covers native path routing,
+  fail-fast on rejection, pass-through when no schema, session-id propagation,
+  and schema presence in the spec passed to the native backend.
+- Every inline mock struct that implements `Agentic_backend.S` must declare
+  `let native_json_schema_output = false` (or `true` when intentionally testing
+  the native path).  Existing tests updated: `test_demo_626.ml`,
+  `test_backend.ml`, `test_model_probe.ml`, `test_agent_helpers.ml`,
+  `test_pipeline_runtime.ml`, `test_build_flow.ml`.

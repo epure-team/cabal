@@ -100,8 +100,7 @@ let valid_json_result ?(session_id = "sess-42") () =
 let native_rejection_result () =
   Backend_types.make_task_result
     ~status:
-      (Backend_types.Failed
-         "unsupported JSON Schema keywords: $defs, if, then")
+      (Backend_types.Failed "unsupported JSON Schema keywords: $defs, if, then")
     ()
 
 (** {1 AC-N1 — validate-and-retry NOT executed on native path}
@@ -154,9 +153,7 @@ let test_native_rejection_fail_fast () =
     1
     !call_count ;
   match result with
-  | Ok _ ->
-      Alcotest.fail
-        "AC-N2: expected Error (native rejection) but got Ok"
+  | Ok _ -> Alcotest.fail "AC-N2: expected Error (native rejection) but got Ok"
   | Error msg ->
       Alcotest.(check bool)
         "AC-N2: error message identifies native rejection"
@@ -173,10 +170,7 @@ let test_native_passthrough_no_schema () =
     make_native_mock ~responses:[valid_json_result ()] ()
   in
   let spec =
-    Backend_types.make_task_spec
-      ~prompt:"do something"
-      ~working_dir:"/tmp"
-      ()
+    Backend_types.make_task_spec ~prompt:"do something" ~working_dir:"/tmp" ()
     (* no json_schema *)
   in
   Eio_main.run @@ fun env ->
@@ -206,8 +200,7 @@ let test_native_session_id_propagated () =
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   match result with
-  | Error msg ->
-      Alcotest.failf "AC-N4: expected Ok but got Error: %s" msg
+  | Error msg -> Alcotest.failf "AC-N4: expected Ok but got Error: %s" msg
   | Ok task_result ->
       Alcotest.(check (option string))
         "AC-N4: session_id propagated from native result"

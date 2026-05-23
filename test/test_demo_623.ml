@@ -11,14 +11,16 @@
 open Cabal
 
 let validate = Json_schema_validator.validate
+
 let is_ok = Result.is_ok
+
 let is_error = Result.is_error
 
 (** {1 AC1 — Returns success or structured error without I/O, subprocess, or
     LLM} *)
 
 let test_valid_json_object_passes () =
-  let schema = `Assoc [ ("type", `String "object") ] in
+  let schema = `Assoc [("type", `String "object")] in
   let result = validate ~schema ~document:{|{"x":1}|} in
   Alcotest.(check bool)
     "AC1: valid JSON object passes object schema"
@@ -26,7 +28,7 @@ let test_valid_json_object_passes () =
     (is_ok result)
 
 let test_invalid_json_fails () =
-  let schema = `Assoc [ ("type", `String "object") ] in
+  let schema = `Assoc [("type", `String "object")] in
   let result = validate ~schema ~document:"not valid json {" in
   Alcotest.(check bool)
     "AC1: non-JSON document returns Error"
@@ -34,7 +36,7 @@ let test_invalid_json_fails () =
     (is_error result)
 
 let test_type_mismatch_returns_error () =
-  let schema = `Assoc [ ("type", `String "string") ] in
+  let schema = `Assoc [("type", `String "string")] in
   let result = validate ~schema ~document:"42" in
   Alcotest.(check bool)
     "AC1: integer document fails string schema"
@@ -46,7 +48,7 @@ let test_missing_required_returns_error () =
     `Assoc
       [
         ("type", `String "object");
-        ("required", `List [ `String "name"; `String "age" ]);
+        ("required", `List [`String "name"; `String "age"]);
       ]
   in
   let result = validate ~schema ~document:{|{"name":"Alice"}|} in
@@ -60,7 +62,7 @@ let test_all_required_fields_present () =
     `Assoc
       [
         ("type", `String "object");
-        ("required", `List [ `String "name"; `String "age" ]);
+        ("required", `List [`String "name"; `String "age"]);
       ]
   in
   let result = validate ~schema ~document:{|{"name":"Alice","age":30}|} in
@@ -70,7 +72,7 @@ let test_all_required_fields_present () =
     (is_ok result)
 
 let test_valid_json_string_passes_string_schema () =
-  let schema = `Assoc [ ("type", `String "string") ] in
+  let schema = `Assoc [("type", `String "string")] in
   let result = validate ~schema ~document:{|"hello"|} in
   Alcotest.(check bool)
     "AC1: valid string passes string schema"
@@ -78,7 +80,7 @@ let test_valid_json_string_passes_string_schema () =
     (is_ok result)
 
 let test_valid_json_array_passes_array_schema () =
-  let schema = `Assoc [ ("type", `String "array") ] in
+  let schema = `Assoc [("type", `String "array")] in
   let result = validate ~schema ~document:{|[1,2,3]|} in
   Alcotest.(check bool)
     "AC1: valid array passes array schema"
@@ -86,7 +88,7 @@ let test_valid_json_array_passes_array_schema () =
     (is_ok result)
 
 let test_empty_document_is_error () =
-  let schema = `Assoc [ ("type", `String "object") ] in
+  let schema = `Assoc [("type", `String "object")] in
   let result = validate ~schema ~document:"" in
   Alcotest.(check bool)
     "AC1: empty document returns Error"
@@ -103,7 +105,7 @@ let test_empty_document_is_error () =
 
 let test_enum_rejects_non_member () =
   let schema =
-    `Assoc [ ("enum", `List [ `String "a"; `String "b"; `String "c" ]) ]
+    `Assoc [("enum", `List [`String "a"; `String "b"; `String "c"])]
   in
   let result = validate ~schema ~document:{|"d"|} in
   Alcotest.(check bool)
@@ -113,7 +115,7 @@ let test_enum_rejects_non_member () =
 
 let test_enum_accepts_member () =
   let schema =
-    `Assoc [ ("enum", `List [ `String "a"; `String "b"; `String "c" ]) ]
+    `Assoc [("enum", `List [`String "a"; `String "b"; `String "c"])]
   in
   let result = validate ~schema ~document:{|"b"|} in
   Alcotest.(check bool)
@@ -126,8 +128,7 @@ let test_additional_properties_false_rejects_extra () =
     `Assoc
       [
         ("type", `String "object");
-        ( "properties",
-          `Assoc [ ("name", `Assoc [ ("type", `String "string") ]) ] );
+        ("properties", `Assoc [("name", `Assoc [("type", `String "string")])]);
         ("additionalProperties", `Bool false);
       ]
   in
@@ -142,8 +143,7 @@ let test_additional_properties_false_allows_declared () =
     `Assoc
       [
         ("type", `String "object");
-        ( "properties",
-          `Assoc [ ("name", `Assoc [ ("type", `String "string") ]) ] );
+        ("properties", `Assoc [("name", `Assoc [("type", `String "string")])]);
         ("additionalProperties", `Bool false);
       ]
   in
@@ -154,9 +154,7 @@ let test_additional_properties_false_allows_declared () =
     (is_ok result)
 
 let test_minimum_rejects_small_value () =
-  let schema =
-    `Assoc [ ("type", `String "number"); ("minimum", `Float 10.0) ]
-  in
+  let schema = `Assoc [("type", `String "number"); ("minimum", `Float 10.0)] in
   let result = validate ~schema ~document:"3" in
   Alcotest.(check bool)
     "AC2: minimum: value below minimum is rejected"
@@ -164,9 +162,7 @@ let test_minimum_rejects_small_value () =
     (is_error result)
 
 let test_minimum_accepts_valid_value () =
-  let schema =
-    `Assoc [ ("type", `String "number"); ("minimum", `Float 10.0) ]
-  in
+  let schema = `Assoc [("type", `String "number"); ("minimum", `Float 10.0)] in
   let result = validate ~schema ~document:"15" in
   Alcotest.(check bool)
     "AC2: minimum: value above minimum is accepted"
@@ -174,9 +170,7 @@ let test_minimum_accepts_valid_value () =
     (is_ok result)
 
 let test_max_length_rejects_long_string () =
-  let schema =
-    `Assoc [ ("type", `String "string"); ("maxLength", `Int 5) ]
-  in
+  let schema = `Assoc [("type", `String "string"); ("maxLength", `Int 5)] in
   let result = validate ~schema ~document:{|"toolong"|} in
   Alcotest.(check bool)
     "AC2: maxLength: string exceeding max length is rejected"
@@ -184,9 +178,7 @@ let test_max_length_rejects_long_string () =
     (is_error result)
 
 let test_max_length_accepts_short_string () =
-  let schema =
-    `Assoc [ ("type", `String "string"); ("maxLength", `Int 5) ]
-  in
+  let schema = `Assoc [("type", `String "string"); ("maxLength", `Int 5)] in
   let result = validate ~schema ~document:{|"hi"|} in
   Alcotest.(check bool)
     "AC2: maxLength: string within max length is accepted"
@@ -199,8 +191,7 @@ let test_properties_type_check () =
     `Assoc
       [
         ("type", `String "object");
-        ( "properties",
-          `Assoc [ ("count", `Assoc [ ("type", `String "integer") ]) ] );
+        ("properties", `Assoc [("count", `Assoc [("type", `String "integer")])]);
       ]
   in
   let result = validate ~schema ~document:{|{"count":"not-an-integer"}|} in
@@ -218,7 +209,7 @@ let test_schema_draft_2020_12_valid () =
       [
         ("$schema", `String "https://json-schema.org/draft/2020-12/schema");
         ("type", `String "object");
-        ("required", `List [ `String "id" ]);
+        ("required", `List [`String "id"]);
       ]
   in
   let result = validate ~schema ~document:{|{"id":"abc"}|} in
@@ -233,7 +224,7 @@ let test_schema_draft_2020_12_rejects_invalid () =
       [
         ("$schema", `String "https://json-schema.org/draft/2020-12/schema");
         ("type", `String "object");
-        ("required", `List [ `String "id" ]);
+        ("required", `List [`String "id"]);
       ]
   in
   let result = validate ~schema ~document:{|{"name":"Alice"}|} in
@@ -295,7 +286,7 @@ let test_schema_draft_04_valid () =
       [
         ("$schema", `String "http://json-schema.org/draft-04/schema#");
         ("type", `String "object");
-        ("required", `List [ `String "name" ]);
+        ("required", `List [`String "name"]);
       ]
   in
   let result = validate ~schema ~document:{|{"name":"Bob"}|} in
@@ -312,58 +303,104 @@ let () =
     [
       ( "AC1 — returns success or error without I/O",
         [
-          Alcotest.test_case "valid object passes" `Quick
+          Alcotest.test_case
+            "valid object passes"
+            `Quick
             test_valid_json_object_passes;
-          Alcotest.test_case "invalid JSON returns Error" `Quick
+          Alcotest.test_case
+            "invalid JSON returns Error"
+            `Quick
             test_invalid_json_fails;
-          Alcotest.test_case "type mismatch returns Error" `Quick
+          Alcotest.test_case
+            "type mismatch returns Error"
+            `Quick
             test_type_mismatch_returns_error;
-          Alcotest.test_case "missing required returns Error" `Quick
+          Alcotest.test_case
+            "missing required returns Error"
+            `Quick
             test_missing_required_returns_error;
-          Alcotest.test_case "all required fields present returns Ok" `Quick
+          Alcotest.test_case
+            "all required fields present returns Ok"
+            `Quick
             test_all_required_fields_present;
-          Alcotest.test_case "valid string passes string schema" `Quick
+          Alcotest.test_case
+            "valid string passes string schema"
+            `Quick
             test_valid_json_string_passes_string_schema;
-          Alcotest.test_case "valid array passes array schema" `Quick
+          Alcotest.test_case
+            "valid array passes array schema"
+            `Quick
             test_valid_json_array_passes_array_schema;
-          Alcotest.test_case "empty document returns Error" `Quick
+          Alcotest.test_case
+            "empty document returns Error"
+            `Quick
             test_empty_document_is_error;
         ] );
       ( "AC2 — no $schema uses draft 2020-12 (full keyword support via \
          jsonschema package)",
         [
-          Alcotest.test_case "enum: non-member rejected" `Quick
+          Alcotest.test_case
+            "enum: non-member rejected"
+            `Quick
             test_enum_rejects_non_member;
-          Alcotest.test_case "enum: member accepted" `Quick
+          Alcotest.test_case
+            "enum: member accepted"
+            `Quick
             test_enum_accepts_member;
-          Alcotest.test_case "additionalProperties:false rejects extra" `Quick
+          Alcotest.test_case
+            "additionalProperties:false rejects extra"
+            `Quick
             test_additional_properties_false_rejects_extra;
-          Alcotest.test_case "additionalProperties:false allows declared" `Quick
+          Alcotest.test_case
+            "additionalProperties:false allows declared"
+            `Quick
             test_additional_properties_false_allows_declared;
-          Alcotest.test_case "minimum: small value rejected" `Quick
+          Alcotest.test_case
+            "minimum: small value rejected"
+            `Quick
             test_minimum_rejects_small_value;
-          Alcotest.test_case "minimum: valid value accepted" `Quick
+          Alcotest.test_case
+            "minimum: valid value accepted"
+            `Quick
             test_minimum_accepts_valid_value;
-          Alcotest.test_case "maxLength: long string rejected" `Quick
+          Alcotest.test_case
+            "maxLength: long string rejected"
+            `Quick
             test_max_length_rejects_long_string;
-          Alcotest.test_case "maxLength: short string accepted" `Quick
+          Alcotest.test_case
+            "maxLength: short string accepted"
+            `Quick
             test_max_length_accepts_short_string;
-          Alcotest.test_case "properties type check rejects wrong type" `Quick
+          Alcotest.test_case
+            "properties type check rejects wrong type"
+            `Quick
             test_properties_type_check;
         ] );
       ( "AC3 — $schema field selects draft among 4, 6, 7, 2019-09, 2020-12",
         [
-          Alcotest.test_case "$schema=2020-12: valid passes" `Quick
+          Alcotest.test_case
+            "$schema=2020-12: valid passes"
+            `Quick
             test_schema_draft_2020_12_valid;
-          Alcotest.test_case "$schema=2020-12: missing required fails" `Quick
+          Alcotest.test_case
+            "$schema=2020-12: missing required fails"
+            `Quick
             test_schema_draft_2020_12_rejects_invalid;
-          Alcotest.test_case "$schema=draft-07: valid string passes" `Quick
+          Alcotest.test_case
+            "$schema=draft-07: valid string passes"
+            `Quick
             test_schema_draft_07_valid;
-          Alcotest.test_case "$schema=draft-07: short string fails" `Quick
+          Alcotest.test_case
+            "$schema=draft-07: short string fails"
+            `Quick
             test_schema_draft_07_rejects_short_string;
-          Alcotest.test_case "$schema=2019-09: valid object passes" `Quick
+          Alcotest.test_case
+            "$schema=2019-09: valid object passes"
+            `Quick
             test_schema_draft_2019_09_valid;
-          Alcotest.test_case "$schema=draft-04: valid object passes" `Quick
+          Alcotest.test_case
+            "$schema=draft-04: valid object passes"
+            `Quick
             test_schema_draft_04_valid;
         ] );
     ]

@@ -147,7 +147,9 @@ let test_non_native_backends_evidence_none () =
       (* Only assert None for backends that have NOT enabled native support. *)
       if not cap.Backend_registry.native_json_schema_output then
         Alcotest.(check bool)
-          (id ^ ": native_json_schema_output_evidence = None for non-native backend")
+          (id
+         ^ ": native_json_schema_output_evidence = None for non-native backend"
+          )
           true
           (cap.Backend_registry.native_json_schema_output_evidence = None))
     all_ids

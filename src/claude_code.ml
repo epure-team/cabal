@@ -387,7 +387,8 @@ let build_command ?(streaming = false) ?(project_config_path = None)
     else spec.prompt
   in
   (* Return command args and prompt separately - prompt goes via stdin *)
-  (base @ mcp_args @ config_args @ model_args @ max_turns_args @ schema_args, full_prompt)
+  ( base @ mcp_args @ config_args @ model_args @ max_turns_args @ schema_args,
+    full_prompt )
 
 (** Parse a stream-json event line and extract displayable content.
     Returns Some text if there's something to display, None otherwise. *)
