@@ -164,3 +164,27 @@ standalone OCaml library and as the backend abstraction layer vendored under
   the native path).  Existing tests updated: `test_demo_626.ml`,
   `test_backend.ml`, `test_model_probe.ml`, `test_agent_helpers.ml`,
   `test_pipeline_runtime.ml`, `test_build_flow.ml`.
+
+## E2E tests — Story #627
+
+- E2E tests for `Json_schema_enforcer` live in
+  `libs/cabal/test/test_demo_627.ml`.  They are **excluded from CI** via
+  `(enabled_if (= %{env:CABAL_E2E_TESTS=0} 1))` in the dune stanza — the
+  same pattern used by `EPURE_OCAMLLSP_TESTS=1` elsewhere in the repo.  The
+  binary is neither built nor executed when `CABAL_E2E_TESTS` is unset.
+- Three env vars control execution: `CABAL_E2E_TESTS` (gate), `CABAL_E2E_BACKEND`
+  (backend id, e.g. `"claude-code"`), and `CABAL_E2E_MODEL` (model name, e.g.
+  `"haiku"`).  If either `CABAL_E2E_BACKEND` or `CABAL_E2E_MODEL` is unset the
+  test skips with a diagnostic message; it does not fail.
+- A `(alias e2e)` field in the test stanza makes `dune build @e2e` a
+  discoverable named target for contributors.
+- The test exercises `Json_schema_enforcer.run_task` with a simple JSON Schema
+  object (`{ answer: string }`) and asserts that the returned `agent_text`
+  passes `Json_schema_validator.validate`.  On the native path
+  (`native_json_schema_output = true`) the backend enforces the schema; on the
+  validate-and-retry path the enforcer validates and, if needed, makes one
+  corrective call.  The test accepts success on either attempt.
+- The test always calls `Adapter_loader.register_all ()` before `Registry.get`
+  so YAML-backed backends (codex, opencode, gemini-cli, copilot-cli) are
+  reachable by id.
+- `libs/cabal/README.md` documents the three env vars and links to the test file.

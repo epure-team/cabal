@@ -365,10 +365,7 @@ let test_cancelled_result_is_propagated () =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
-  Alcotest.(check int)
-    "AC7c: exactly one backend call (no retry)"
-    1
-    !call_count ;
+  Alcotest.(check int) "AC7c: exactly one backend call (no retry)" 1 !call_count ;
   match result with
   | Error msg ->
       Alcotest.failf
@@ -410,9 +407,7 @@ let test_resume_prompt_matches_template () =
   let schema_json = Yojson.Safe.to_string ~std:true schema in
   (* Compute the validation error that the enforcer will see for invalid_response. *)
   let err =
-    match
-      Json_schema_validator.validate ~schema ~document:invalid_response
-    with
+    match Json_schema_validator.validate ~schema ~document:invalid_response with
     | Ok () ->
         Alcotest.fail
           "AC8 setup: expected validation error for invalid_response but got Ok"
@@ -456,9 +451,7 @@ let test_fresh_prompt_matches_template () =
   let schema = object_schema in
   let schema_json = Yojson.Safe.to_string ~std:true schema in
   let err =
-    match
-      Json_schema_validator.validate ~schema ~document:invalid_response
-    with
+    match Json_schema_validator.validate ~schema ~document:invalid_response with
     | Ok () ->
         Alcotest.fail
           "AC9 setup: expected validation error for invalid_response but got Ok"

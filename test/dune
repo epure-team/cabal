@@ -177,3 +177,18 @@
  (name test_demo_626)
  (libraries cabal alcotest eio eio_main yojson)
  (modules test_demo_626))
+
+(test
+ (name test_demo_627)
+ (libraries cabal alcotest eio eio_main yojson unix)
+ (modules test_demo_627)
+ (enabled_if
+  (= %{env:CABAL_E2E_TESTS=0} 1)))
+
+(rule
+ (alias e2e)
+ (enabled_if
+  (= %{env:CABAL_E2E_TESTS=0} 1))
+ (deps test_demo_627.exe)
+ (action
+  (run ./test_demo_627.exe)))

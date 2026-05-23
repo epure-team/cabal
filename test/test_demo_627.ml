@@ -46,34 +46,46 @@ open Cabal
 open Backend_types
 
 (* -------------------------------------------------------------------------
-   Helpers
+   Helpers — all process invocations use Eio.Process (no Sys.command)
    ---------------------------------------------------------------------- *)
 
-let with_tmpdir f =
-  let dir = Filename.temp_dir "cabal_e2e_627_" "" in
-  Fun.protect
-    ~finally:(fun () ->
-      let _ = Sys.command ("rm -rf " ^ Filename.quote dir) in
-      ())
-    (fun () -> f dir)
+(** Run a command via [Eio.Process.run].  Returns [Ok ()] on exit code 0,
+    [Error msg] on non-zero exit or process spawn failure.  Never uses
+    [Sys.command] or any other blocking Unix shell invocation. *)
+let run_cmd_eio proc_mgr args =
+  try
+    Eio.Process.run proc_mgr args ;
+    Ok ()
+  with exn ->
+    Error
+      (Printf.sprintf
+         "command (%s) failed: %s"
+         (String.concat " " args)
+         (Printexc.to_string exn))
 
-let init_git_repo dir =
-  let q = Filename.quote dir in
+(** Recursively remove [dir] via [rm -rf] using [Eio.Process].  Silently
+    ignores failures (best-effort cleanup in [Fun.protect ~finally]). *)
+let rmdir_r_eio proc_mgr dir =
+  match run_cmd_eio proc_mgr ["rm"; "-rf"; dir] with Ok () | Error _ -> ()
+
+(** Write a minimal README, then initialise a git repository in [dir] using
+    [Eio.Process.run].  Returns [Ok ()] or [Error msg].  No [Sys.command]
+    or shell string concatenation is used. *)
+let init_git_repo_eio proc_mgr dir =
   let readme = Filename.concat dir "README.md" in
   let oc = open_out readme in
   output_string oc "# cabal e2e\n" ;
   close_out oc ;
-  let cmd =
-    Printf.sprintf
-      "git -C %s init -q && \
-       git -C %s -c user.name=Cabal -c user.email=cabal@example.invalid \
-         add README.md && \
-       git -C %s -c user.name=Cabal -c user.email=cabal@example.invalid \
-         commit -q -m init"
-      q q q
+  let run args = run_cmd_eio proc_mgr (["git"; "-C"; dir] @ args) in
+  let git_cfg =
+    ["-c"; "user.name=Cabal"; "-c"; "user.email=cabal@example.invalid"]
   in
-  if Sys.command cmd <> 0 then Error "could not initialise temporary git repo"
-  else Ok ()
+  match run ["init"; "-q"] with
+  | Error msg -> Error msg
+  | Ok () -> (
+      match run (git_cfg @ ["add"; "README.md"]) with
+      | Error msg -> Error msg
+      | Ok () -> run (git_cfg @ ["commit"; "-q"; "-m"; "init"]))
 
 (* -------------------------------------------------------------------------
    Schema and prompt
@@ -87,9 +99,8 @@ let answer_schema : Yojson.Safe.t =
   `Assoc
     [
       ("type", `String "object");
-      ( "properties",
-        `Assoc [ ("answer", `Assoc [ ("type", `String "string") ]) ] );
-      ("required", `List [ `String "answer" ]);
+      ("properties", `Assoc [("answer", `Assoc [("type", `String "string")])]);
+      ("required", `List [`String "answer"]);
       ("additionalProperties", `Bool false);
     ]
 
@@ -98,8 +109,7 @@ let answer_schema : Yojson.Safe.t =
     with small models such as haiku or gpt-4o-mini. *)
 let enforcer_prompt =
   "Output exactly the following JSON object and nothing else.\n\
-   Do not add markdown code fences, explanation, or extra whitespace.\n\
-   \n\
+   Do not add markdown code fences, explanation, or extra whitespace.\n\n\
    {\"answer\":\"ok\"}"
 
 (* -------------------------------------------------------------------------
@@ -116,6 +126,10 @@ let enforcer_prompt =
 
     The test asserts that [run_task] returns [Ok result] with
     [status = Success] and that [result.agent_text] satisfies [answer_schema].
+
+    All subprocess invocations (git, rm) use [Eio.Process.run] — no
+    [Sys.command] or blocking Unix shell calls are made anywhere in this
+    module.
 *)
 let test_enforcer_schema_compliance () =
   (* Resolve required env vars.  Unset → skip so contributors without a
@@ -125,8 +139,9 @@ let test_enforcer_schema_compliance () =
     | Some v when v <> "" -> v
     | _ ->
         Printf.eprintf
-          "[e2e-627] SKIPPED: CABAL_E2E_BACKEND not set \
-           (set to a backend id such as 'claude-code')\n%!" ;
+          "[e2e-627] SKIPPED: CABAL_E2E_BACKEND not set (set to a backend id \
+           such as 'claude-code')\n\
+           %!" ;
         Alcotest.skip ()
   in
   let model =
@@ -134,8 +149,9 @@ let test_enforcer_schema_compliance () =
     | Some v when v <> "" -> v
     | _ ->
         Printf.eprintf
-          "[e2e-627] SKIPPED: CABAL_E2E_MODEL not set \
-           (set to a model name such as 'haiku')\n%!" ;
+          "[e2e-627] SKIPPED: CABAL_E2E_MODEL not set (set to a model name \
+           such as 'haiku')\n\
+           %!" ;
         Alcotest.skip ()
   in
   (* Register all built-in and YAML-backed adapters so [Registry.get] can
@@ -155,10 +171,19 @@ let test_enforcer_schema_compliance () =
     backend_id
     model
     (Agentic_backend.native_json_schema_output backend) ;
-  with_tmpdir (fun working_dir ->
-      match init_git_repo working_dir with
+  (* All Eio operations (process spawning for git, rm, and the enforcer
+     itself) share a single Eio_main.run + Switch.run scope so that
+     proc_mgr is available for both setup and cleanup. *)
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let proc_mgr = Eio.Stdenv.process_mgr env in
+  let working_dir = Filename.temp_dir "cabal_e2e_627_" "" in
+  Fun.protect
+    ~finally:(fun () -> rmdir_r_eio proc_mgr working_dir)
+    (fun () ->
+      match init_git_repo_eio proc_mgr working_dir with
       | Error msg -> Alcotest.failf "git repo setup failed: %s" msg
-      | Ok () ->
+      | Ok () -> (
           let spec =
             Backend_types.make_task_spec
               ~prompt:enforcer_prompt
@@ -170,12 +195,8 @@ let test_enforcer_schema_compliance () =
               ~json_schema:answer_schema
               ()
           in
-          let result =
-            Eio_main.run @@ fun env ->
-            Eio.Switch.run @@ fun sw ->
-            Json_schema_enforcer.run_task ~sw ~env ~backend spec
-          in
-          (match result with
+          let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+          match result with
           | Error msg ->
               Alcotest.failf
                 "Json_schema_enforcer returned Error (both attempts failed \
@@ -183,19 +204,18 @@ let test_enforcer_schema_compliance () =
                 msg
           | Ok task_result -> (
               match task_result.status with
-              | Failed msg ->
-                  Alcotest.failf "backend returned Failed: %s" msg
+              | Failed msg -> Alcotest.failf "backend returned Failed: %s" msg
               | Timeout -> Alcotest.fail "backend timed out"
               | Cancelled -> Alcotest.fail "backend was cancelled"
-              | Success ->
+              | Success -> (
                   Printf.eprintf
                     "[e2e-627] agent_text: %s\n%!"
                     task_result.agent_text ;
-                  (match
-                     Json_schema_validator.validate
-                       ~schema:answer_schema
-                       ~document:task_result.agent_text
-                   with
+                  match
+                    Json_schema_validator.validate
+                      ~schema:answer_schema
+                      ~document:task_result.agent_text
+                  with
                   | Ok () ->
                       Printf.eprintf
                         "[e2e-627] OK: agent_text passes schema validation\n%!"
