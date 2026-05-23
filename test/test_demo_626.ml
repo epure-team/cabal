@@ -267,6 +267,45 @@ let test_session_id_propagated () =
         (Some second_session_id)
         task_result.Backend_types.session_id
 
+(** {1 AC7 — Failed/Timeout/Cancelled backend result is propagated without
+    schema validation or retry.
+
+    Regression guard: a non-Success [result1.status] must NOT trigger
+    schema validation (which would misdiagnose the failure as schema
+    non-conformance and waste a backend call). *)
+
+let test_failed_backend_result_is_propagated () =
+  let failed_result =
+    Backend_types.make_task_result
+      ~status:(Backend_types.Failed "backend process crashed")
+      ()
+  in
+  let backend, call_count, _ =
+    make_mock ~supports_resume:false ~responses:[failed_result]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"original"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+  Alcotest.(check int) "AC7: exactly one backend call (no retry)" 1 !call_count ;
+  match result with
+  | Error msg ->
+      Alcotest.failf
+        "AC7: expected Ok (propagated Failed result) but got Error: %s" msg
+  | Ok task_result ->
+      Alcotest.(check bool)
+        "AC7: returned status is Failed"
+        true
+        (match task_result.Backend_types.status with
+        | Backend_types.Failed _ -> true
+        | _ -> false)
+
 (** {1 Suite} *)
 
 let () =
@@ -310,5 +349,12 @@ let () =
             "session_id from second result is returned"
             `Quick
             test_session_id_propagated;
+        ] );
+      ( "AC7 Failed backend result propagated without retry",
+        [
+          Alcotest.test_case
+            "exactly one call; Ok with Failed status"
+            `Quick
+            test_failed_backend_result_is_propagated;
         ] );
     ]

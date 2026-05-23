@@ -67,6 +67,13 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
       let result1 =
         Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
       in
+      (* Schema validation only makes sense for successful invocations.
+         Propagate Failed/Timeout/Cancelled results directly so callers see
+         the real backend error rather than a spurious "not valid JSON"
+         schema-compliance failure. *)
+      match result1.Backend_types.status with
+      | Failed _ | Timeout | Cancelled -> Ok result1
+      | Success -> (
       let agent_text1 = result1.Backend_types.agent_text in
       match Json_schema_validator.validate ~schema ~document:agent_text1 with
       | Ok () -> Ok result1
@@ -94,4 +101,4 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
           | Error err2 ->
               Error
                 ("Both schema validation attempts failed.\nAttempt 1: " ^ err1
-               ^ "\nAttempt 2: " ^ err2)))
+               ^ "\nAttempt 2: " ^ err2))))
