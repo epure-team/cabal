@@ -15,7 +15,11 @@
     - AC4: first invalid + no session_resume → 2 calls; second prompt has both
            original prompt and schema
     - AC5: both invalid → Failed result surfacing both error messages
-    - AC6: resumed response succeeds → session_id from second result propagated *)
+    - AC6: resumed response succeeds → session_id from second result propagated
+    - AC7: Failed/Timeout/Cancelled first result propagated without retry
+           (all three status constructors exercised separately)
+    - AC8: resume retry prompt matches resume_retry_template with substitutions
+    - AC9: fresh retry prompt matches fresh_retry_template with substitutions *)
 
 open Cabal
 
@@ -309,6 +313,189 @@ let test_failed_backend_result_is_propagated () =
         | Backend_types.Failed _ -> true
         | _ -> false)
 
+(** {1 AC7b — Timeout backend result is propagated without retry} *)
+
+let test_timeout_result_is_propagated () =
+  let timeout_result =
+    Backend_types.make_task_result ~status:Backend_types.Timeout ()
+  in
+  let backend, call_count, _ =
+    make_mock ~supports_resume:false ~responses:[timeout_result]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"original"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+  Alcotest.(check int) "AC7b: exactly one backend call (no retry)" 1 !call_count ;
+  match result with
+  | Error msg ->
+      Alcotest.failf
+        "AC7b: expected Ok (propagated Timeout result) but got Error: %s"
+        msg
+  | Ok task_result ->
+      Alcotest.(check bool)
+        "AC7b: returned status is Timeout"
+        true
+        (match task_result.Backend_types.status with
+        | Backend_types.Timeout -> true
+        | _ -> false)
+
+(** {1 AC7c — Cancelled backend result is propagated without retry} *)
+
+let test_cancelled_result_is_propagated () =
+  let cancelled_result =
+    Backend_types.make_task_result ~status:Backend_types.Cancelled ()
+  in
+  let backend, call_count, _ =
+    make_mock ~supports_resume:false ~responses:[cancelled_result]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"original"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+  Alcotest.(check int)
+    "AC7c: exactly one backend call (no retry)"
+    1
+    !call_count ;
+  match result with
+  | Error msg ->
+      Alcotest.failf
+        "AC7c: expected Ok (propagated Cancelled result) but got Error: %s"
+        msg
+  | Ok task_result ->
+      Alcotest.(check bool)
+        "AC7c: returned status is Cancelled"
+        true
+        (match task_result.Backend_types.status with
+        | Backend_types.Cancelled -> true
+        | _ -> false)
+
+(** {1 Template helpers}
+
+    Substitute named placeholders of the form [{key}] in a template string.
+    Replacements are applied in-order; first match wins for each placeholder. *)
+
+let replace_first s ~from ~to_ =
+  let sl = String.length s and fl = String.length from in
+  let rec find i =
+    if i + fl > sl then s
+    else if String.sub s i fl = from then
+      String.sub s 0 i ^ to_ ^ String.sub s (i + fl) (sl - i - fl)
+    else find (i + 1)
+  in
+  find 0
+
+let expand_template template substs =
+  List.fold_left
+    (fun s (placeholder, value) -> replace_first s ~from:placeholder ~to_:value)
+    template
+    substs
+
+(** {1 AC8 — resume retry prompt matches resume_retry_template} *)
+
+let test_resume_prompt_matches_template () =
+  let schema = object_schema in
+  let schema_json = Yojson.Safe.to_string ~std:true schema in
+  (* Compute the validation error that the enforcer will see for invalid_response. *)
+  let err =
+    match
+      Json_schema_validator.validate ~schema ~document:invalid_response
+    with
+    | Ok () ->
+        Alcotest.fail
+          "AC8 setup: expected validation error for invalid_response but got Ok"
+    | Error e -> e
+  in
+  let second_session_id = "template-resume-session-2" in
+  let backend, _, captured_prompts =
+    make_mock
+      ~supports_resume:true
+      ~responses:
+        [
+          make_invalid_result ~session_id:"template-resume-session-1" ();
+          make_valid_result ~session_id:second_session_id ();
+        ]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"template-test-original-prompt"
+      ~working_dir:"/tmp"
+      ~json_schema:schema
+      ()
+  in
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let _result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+  (* The second (most-recent) call prompt is at the head of the captured list. *)
+  let second_prompt = List.hd !captured_prompts in
+  let expected =
+    expand_template
+      Json_schema_enforcer.resume_retry_template
+      [("{schema}", schema_json); ("{error}", err)]
+  in
+  Alcotest.(check string)
+    "AC8: resume prompt equals template with {schema} and {error} substituted"
+    expected
+    second_prompt
+
+(** {1 AC9 — fresh retry prompt matches fresh_retry_template} *)
+
+let test_fresh_prompt_matches_template () =
+  let schema = object_schema in
+  let schema_json = Yojson.Safe.to_string ~std:true schema in
+  let err =
+    match
+      Json_schema_validator.validate ~schema ~document:invalid_response
+    with
+    | Ok () ->
+        Alcotest.fail
+          "AC9 setup: expected validation error for invalid_response but got Ok"
+    | Error e -> e
+  in
+  let original_prompt = "fresh-template-original-prompt-unique-token" in
+  let backend, _, captured_prompts =
+    make_mock
+      ~supports_resume:false
+      ~responses:[make_invalid_result (); make_valid_result ()]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:original_prompt
+      ~working_dir:"/tmp"
+      ~json_schema:schema
+      ()
+  in
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let _result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+  let second_prompt = List.hd !captured_prompts in
+  let expected =
+    expand_template
+      Json_schema_enforcer.fresh_retry_template
+      [
+        ("{original_prompt}", original_prompt);
+        ("{schema}", schema_json);
+        ("{error}", err);
+      ]
+  in
+  Alcotest.(check string)
+    "AC9: fresh prompt equals template with {original_prompt}, {schema}, and \
+     {error} substituted"
+    expected
+    second_prompt
+
 (** {1 Suite} *)
 
 let () =
@@ -353,11 +540,39 @@ let () =
             `Quick
             test_session_id_propagated;
         ] );
-      ( "AC7 Failed backend result propagated without retry",
+      ( "AC7a Failed backend result propagated without retry",
         [
           Alcotest.test_case
             "exactly one call; Ok with Failed status"
             `Quick
             test_failed_backend_result_is_propagated;
+        ] );
+      ( "AC7b Timeout backend result propagated without retry",
+        [
+          Alcotest.test_case
+            "exactly one call; Ok with Timeout status"
+            `Quick
+            test_timeout_result_is_propagated;
+        ] );
+      ( "AC7c Cancelled backend result propagated without retry",
+        [
+          Alcotest.test_case
+            "exactly one call; Ok with Cancelled status"
+            `Quick
+            test_cancelled_result_is_propagated;
+        ] );
+      ( "AC8 resume retry prompt matches resume_retry_template",
+        [
+          Alcotest.test_case
+            "prompt equals template with substitutions"
+            `Quick
+            test_resume_prompt_matches_template;
+        ] );
+      ( "AC9 fresh retry prompt matches fresh_retry_template",
+        [
+          Alcotest.test_case
+            "prompt equals template with substitutions"
+            `Quick
+            test_fresh_prompt_matches_template;
         ] );
     ]

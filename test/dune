@@ -175,5 +175,5 @@
 
 (test
  (name test_demo_626)
- (libraries cabal alcotest eio eio_main)
+ (libraries cabal alcotest eio eio_main yojson)
  (modules test_demo_626))

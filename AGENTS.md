@@ -126,7 +126,15 @@ standalone OCaml library and as the backend abstraction layer vendored under
   inspection and deterministic testing.
 - Unit tests with mock backends: `libs/cabal/test/test_demo_626.ml` — covers all
   AC items above including call-count assertions, prompt-content assertions,
-  session-id propagation, and error-message preservation.
+  session-id propagation, and error-message preservation.  Specifically:
+  - `Failed`, `Timeout`, and `Cancelled` first-result propagation are each
+    tested as separate cases (AC7a/7b/7c) — all three match arms are exercised.
+  - Template constant fidelity (AC8/AC9): the actual retry prompt captured from
+    the mock is compared byte-for-byte against the exported template constant
+    with `{schema}`, `{error}`, and `{original_prompt}` substituted using the
+    known schema JSON and the error produced by `Json_schema_validator.validate`
+    on the same invalid input.  Divergence between `build_resume_prompt` /
+    `build_fresh_prompt` and the exported templates is caught deterministically.
 
 ## Native JSON schema wiring — Story #625
 
