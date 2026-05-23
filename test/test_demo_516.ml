@@ -36,6 +36,7 @@ let minimal_spec ?resume_session_id () : Backend_types.task_spec =
     resume_session_id;
     max_turns = None;
     read_only = false;
+    json_schema = None;
   }
 
 (** {1 AC1 — All 8 Gemini registry fields match target values exactly} *)

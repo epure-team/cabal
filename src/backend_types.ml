@@ -95,6 +95,15 @@ type lsp_server_config = {
 }
 [@@deriving show, eq, yojson]
 
+(* Capability Evidence *)
+
+type capability_evidence = {
+  baseline_version : string;
+  tested_at_version : string;
+  evidence_url : string;
+  notes : string;
+}
+
 (* Task Specification *)
 
 type output_spec = Files_changed | Structured_report
@@ -121,6 +130,11 @@ type task_spec = {
           and [--disallowedTools "Bash Write Edit NotebookEdit"] in claude-code.
           Use for validator roles (Reviewer, Critic, Architect) that must
           analyse diffs without being able to compile or patch code. *)
+  json_schema : Yojson.Safe.t option; [@default None]
+      (** Optional inline JSON Schema document (as a parsed JSON value).
+          When [Some schema], the enforcer validates the backend's response
+          against [schema] and retries on failure.  When [None], the task
+          runs without schema enforcement (pass-through). *)
 }
 [@@deriving show, eq, yojson]
 
@@ -177,7 +191,8 @@ let make_task_spec ~prompt ?(instructions = "") ?(mcp_servers = [])
     ?(lsp_servers = []) ~working_dir ?(timeout = max_float)
     ?(expected_outputs = [Files_changed; Structured_report]) ?model
     ?resume_session_id ?max_turns
-    ?(managed_namespace = default_managed_namespace) ?(read_only = false) () =
+    ?(managed_namespace = default_managed_namespace) ?(read_only = false)
+    ?json_schema () =
   (match validate_managed_namespace managed_namespace with
   | Ok () -> ()
   | Error msg -> invalid_arg msg) ;
@@ -194,6 +209,7 @@ let make_task_spec ~prompt ?(instructions = "") ?(mcp_servers = [])
     resume_session_id;
     max_turns;
     read_only;
+    json_schema;
   }
 
 let generic_resume_prompt =

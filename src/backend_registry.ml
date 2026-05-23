@@ -29,6 +29,8 @@ type capabilities = {
   precedence_confidence : precedence_confidence;
   generated_lsp_config : bool;
   file_reading : bool;
+  native_json_schema_output : bool;
+  native_json_schema_output_evidence : Backend_types.capability_evidence option;
 }
 
 type descriptor = {
@@ -64,6 +66,8 @@ let builtin_backends =
           precedence_confidence = High;
           generated_lsp_config = true;
           file_reading = true;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
         };
     };
     {
@@ -82,6 +86,8 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = false;
           file_reading = false;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
         };
     };
     {
@@ -100,6 +106,8 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = true;
           file_reading = true;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
         };
     };
     {
@@ -124,6 +132,8 @@ let builtin_backends =
           precedence_confidence = Low;
           generated_lsp_config = false;
           file_reading = false;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
         };
     };
     {
@@ -142,6 +152,8 @@ let builtin_backends =
           precedence_confidence = Low;
           generated_lsp_config = true;
           file_reading = false;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
         };
     };
   ]

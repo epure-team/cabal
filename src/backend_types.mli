@@ -169,6 +169,25 @@ type lsp_server_config = {
 }
 [@@deriving show, eq, yojson]
 
+(** {1 Capability Evidence} *)
+
+(** Evidence record documenting the basis for a backend capability claim.
+
+    Required as [Some _] whenever
+    [capabilities.native_json_schema_output = true].  Carries version
+    boundaries for drift detection and a link to upstream evidence.  Defined
+    here so it is available to [Backend_registry] without a dependency cycle. *)
+type capability_evidence = {
+  baseline_version : string;
+      (** Minimum binary version from which the capability is supported. *)
+  tested_at_version : string;
+      (** Version at which the capability was last manually verified. *)
+  evidence_url : string;
+      (** Upstream documentation or changelog link supporting the claim. *)
+  notes : string;
+      (** Human-readable summary of the evidence. *)
+}
+
 (** {1 Task Specification} *)
 
 (** Expected output specification. *)
@@ -210,6 +229,11 @@ type task_spec = {
           execution, no file writes.  Maps to [--sandbox read-only] in codex
           and [--disallowedTools "Bash Write Edit NotebookEdit"] in claude-code.
           Use for validator roles (Reviewer, Critic, Architect). *)
+  json_schema : Yojson.Safe.t option; [@default None]
+      (** Optional inline JSON Schema document (as a parsed JSON value).
+          When [Some schema], the enforcer validates the backend's response
+          against [schema] and retries on failure.  When [None], the task
+          runs without schema enforcement (pass-through). *)
 }
 [@@deriving show, eq, yojson]
 
@@ -322,6 +346,7 @@ val make_task_spec :
   ?max_turns:int ->
   ?managed_namespace:managed_namespace ->
   ?read_only:bool ->
+  ?json_schema:Yojson.Safe.t ->
   unit ->
   task_spec
 

@@ -52,3 +52,18 @@ standalone OCaml library and as the backend abstraction layer vendored under
   for emergency fixes that cannot wait for the Épure PR path. Normal source of
   truth remains `epure/libs/cabal`; direct Cabal PR changes should land through
   the mirrored Épure PR and then flow back to Cabal `main` via mirror sync.
+
+## Capability evidence convention (Story #622 / #628)
+
+- `capabilities.native_json_schema_output = true` MUST be accompanied by
+  `native_json_schema_output_evidence = Some _`; setting it to `true` with
+  `None` evidence is a CI-enforced contract violation.
+- All initially shipped backends set `native_json_schema_output = false` with
+  `native_json_schema_output_evidence = None`.
+- The `capability_evidence` type is defined in `backend_types.mli` (not
+  `backend_registry.mli`) to avoid import cycles and to keep it available
+  wherever types are referenced.
+- When writing new test helpers that directly construct a `Backend_registry.capabilities`
+  record literal (instead of using a built-in descriptor), add
+  `native_json_schema_output = false; native_json_schema_output_evidence = None`
+  to avoid record-field exhaustiveness errors as the type evolves.

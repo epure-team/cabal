@@ -91,6 +91,17 @@ type capabilities = {
       (** True when the backend can read arbitrary file paths supplied as
           references in the prompt (file-reading/tool classification).
           Currently only claude-code exposes this capability. *)
+  native_json_schema_output : bool;
+      (** True when the backend supports native JSON schema enforcement via a
+          CLI flag at invocation time (e.g. [--output-format json-schema]).
+          When [false], the enforcer uses the validate-and-retry path instead.
+          All initially shipped backends declare [false]; set to [true] only
+          when [native_json_schema_output_evidence] carries a [Some _] record. *)
+  native_json_schema_output_evidence : Backend_types.capability_evidence option;
+      (** Evidence record required when [native_json_schema_output = true].
+          Must be [Some _] for every backend that sets the flag to [true];
+          checked by the structural CI test iterating [Backend_registry.all ()].
+          Set to [None] for all initially shipped backends. *)
 }
 
 (** Static descriptor for a built-in backend. *)

@@ -50,6 +50,7 @@ let minimal_spec () : Backend_types.task_spec =
     resume_session_id = None;
     max_turns = None;
     read_only = false;
+    json_schema = None;
   }
 
 let test_build_command_allows_project_custom_instructions () =
