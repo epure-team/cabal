@@ -5,20 +5,32 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** JSON Schema enforcement — validate-and-retry wrapper around agentic
-    backends — Story #624.
+(** JSON Schema enforcement — native and validate-and-retry paths — Stories
+    #624 and #625.
 
     Wraps a backend invocation with optional schema validation.  When the
-    caller attaches [task_spec.json_schema = Some schema], the enforcer
-    validates [task_result.agent_text] and makes at most one corrective
-    re-invocation on failure.
+    caller attaches [task_spec.json_schema = Some schema], the enforcer routes
+    to one of two paths based on the backend's declared capability:
 
-    {b Retry budget.}  Hard cap of two backend calls per [run_task] invocation.
-    No backoff, no configurable budget, no internal timeout beyond the existing
-    [task_spec.timeout] which applies per attempt.  Callers wanting more
-    attempts must call [run_task] again themselves.
+    {b Native path} (Story #625, when [backend] declares
+    [native_json_schema_output = true]): the schema is already present in
+    [spec.json_schema]; the backend's own [run_task] wires it to the CLI
+    flag.  The validate-and-retry loop is NOT executed.  Any [Failed] result
+    is treated as a native-backend schema rejection and returned as [Error]
+    immediately; no fallback is performed (D-5).
 
-    {b Retry paths.}
+    {b Validate-and-retry path} (Story #624, when [backend] declares
+    [native_json_schema_output = false]): the enforcer validates
+    [task_result.agent_text] and makes at most one corrective re-invocation on
+    failure.
+
+    {b Retry budget.}  Hard cap of two backend calls per [run_task] invocation
+    (validate-and-retry path only).  No backoff, no configurable budget, no
+    internal timeout beyond the existing [task_spec.timeout] which applies per
+    attempt.  Callers wanting more attempts must call [run_task] again
+    themselves.
+
+    {b Validate-and-retry sub-paths.}
     - {i Session-resume path} (when [backend] advertises [session_resume] and
       the first result carries a session id): the session is resumed via
       {!Backend_types.make_resume_task_spec} with a prompt containing only the
@@ -48,16 +60,16 @@ val fresh_retry_template : string
     {post}
     - When [spec.json_schema = None]: exactly one backend call; returns
       [Ok result] identical to calling [Agentic_backend.run_task] directly.
-    - When [spec.json_schema = Some _] and the first response is valid:
-      exactly one backend call; returns [Ok result].
-    - When the first response fails validation and the backend supports session
-      resume: the session is resumed exactly once; returns [Ok result] when the
-      second response is valid, or [Error msg] carrying both validation error
-      messages when it also fails.
-    - When the first response fails validation and the backend does not support
-      session resume: a fresh corrective call is made; same two-call semantics.
-    - When both attempts fail validation: returns [Error msg] carrying both
-      validation error messages; neither is discarded.
+    - When [spec.json_schema = Some _] and backend declares
+      [native_json_schema_output = true] (native path): exactly one backend
+      call; returns [Ok result] on [Success]/[Timeout]/[Cancelled], or
+      [Error "native-backend schema rejection: <msg>"] on [Failed] — no retry.
+    - When [spec.json_schema = Some _] and backend declares
+      [native_json_schema_output = false] (validate-and-retry path):
+      exactly one call when the first response is valid; otherwise at most one
+      corrective re-invocation.
+    - When both validate-and-retry attempts fail validation: returns [Error msg]
+      carrying both validation error messages; neither is discarded.
 
     {violators}
     (none)

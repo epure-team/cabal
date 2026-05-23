@@ -75,6 +75,8 @@ let available ~sw:_ ~env =
 
 let supports_session_resume = true
 
+let native_json_schema_output = false
+
 let config_body =
   "# MCP servers are disabled by default — activate only approved\n\
    # registry-backed entries.  Codex uses top-level [mcp_servers.<name>]\n\

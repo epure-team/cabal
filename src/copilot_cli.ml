@@ -33,6 +33,8 @@ let available ~sw:_ ~env =
 
 let supports_session_resume = false
 
+let native_json_schema_output = false
+
 let is_resume_failure (_result : task_result) = false
 
 let read_project_file ~env ~project_dir rel_path =

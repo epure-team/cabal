@@ -34,6 +34,8 @@ let available ~sw:_ ~env:_ =
 
 let supports_session_resume = false
 
+let native_json_schema_output = false
+
 let is_resume_failure (_result : Backend_types.task_result) = false
 
 let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =

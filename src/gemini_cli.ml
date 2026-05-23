@@ -77,6 +77,8 @@ let available ~sw:_ ~env =
 
 let supports_session_resume = true
 
+let native_json_schema_output = false
+
 (* Shared json_string_map encoding lives in Backend_json_helpers. *)
 type json_string_map = Backend_json_helpers.json_string_map
 

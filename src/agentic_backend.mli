@@ -77,6 +77,19 @@ module type S = sig
   (** Whether this backend supports resuming a prior CLI session. *)
   val supports_session_resume : bool
 
+  (** Whether this backend natively accepts a JSON Schema on invocation and
+      enforces it at the CLI level (Story #625).
+
+      When [true], [Json_schema_enforcer.run_task] passes [task_spec.json_schema]
+      through to the backend's CLI mechanism rather than running the
+      validate-and-retry loop.  The backend's [run_task] is responsible for
+      translating [spec.json_schema] into the appropriate CLI flag.
+
+      Callers using the native path are responsible for matching the JSON Schema
+      draft expected by the backend's CLI (see the backend's registry evidence
+      record for the expected draft). *)
+  val native_json_schema_output : bool
+
   (** Whether a task result represents a backend-specific resume failure. *)
   val is_resume_failure : task_result -> bool
 
@@ -224,6 +237,23 @@ val available : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> t -> bool
     (none)
 *)
 val supports_session_resume : t -> bool
+
+(** [native_json_schema_output backend] returns [true] when [backend] accepts
+    a JSON Schema natively at invocation time (Story #625).
+
+    {pre}
+    (none)
+
+    {post}
+    Returns the backend-defined native JSON schema output capability flag.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none)
+*)
+val native_json_schema_output : t -> bool
 
 (** [is_resume_failure backend result] returns [true] when [result] matches the
     backend-specific shape of a failed resume attempt.

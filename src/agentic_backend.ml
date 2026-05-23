@@ -31,6 +31,8 @@ module type S = sig
 
   val supports_session_resume : bool
 
+  val native_json_schema_output : bool
+
   val is_resume_failure : task_result -> bool
 
   val check_project_config :
@@ -61,6 +63,8 @@ let models_probe (module B : S) = B.models_probe
 let available ~sw ~env (module B : S) = B.available ~sw ~env
 
 let supports_session_resume (module B : S) = B.supports_session_resume
+
+let native_json_schema_output (module B : S) = B.native_json_schema_output
 
 let is_resume_failure (module B : S) result = B.is_resume_failure result
 

@@ -76,6 +76,12 @@ val available : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> bool
  *)
 val supports_session_resume : bool
 
+(** Whether the mock backend declares native JSON schema output.
+
+    {post}
+    Always [false] — the mock backend never wires native schema flags. *)
+val native_json_schema_output : bool
+
 (** Classify whether a task result is a resume-specific failure.
 
     {pre}

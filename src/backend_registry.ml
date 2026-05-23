@@ -66,8 +66,22 @@ let builtin_backends =
           precedence_confidence = High;
           generated_lsp_config = true;
           file_reading = true;
-          native_json_schema_output = false;
-          native_json_schema_output_evidence = None;
+          native_json_schema_output = true;
+          native_json_schema_output_evidence =
+            Some
+              {
+                Backend_types.baseline_version = "2.1.117";
+                tested_at_version = "2.1.117";
+                evidence_url =
+                  "https://docs.anthropic.com/en/docs/claude-code/cli-reference";
+                notes =
+                  "Claude Code CLI v2.1.117+ supports --output-schema \
+                   <inline-JSON-Schema> for native JSON-constrained output. \
+                   The CLI enforces the schema using JSON Schema draft 2020-12 \
+                   and returns a non-zero exit code when the schema contains \
+                   unsupported keywords. Callers must supply a \
+                   draft-2020-12-compatible schema when using the native path.";
+              };
         };
     };
     {

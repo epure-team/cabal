@@ -79,6 +79,14 @@ let available ~sw:_ ~env =
 
 let supports_session_resume = true
 
+(* Claude Code CLI v2.1.117+ supports native JSON Schema-constrained output
+   via --output-schema <inline-schema-json>.  The CLI enforces the schema at
+   invocation time using JSON Schema draft 2020-12, returning a non-zero exit
+   code when the schema contains unsupported keywords.  Callers using the
+   native path must supply a draft-2020-12-compatible schema.
+   Evidence: see backend_registry.ml for the capability_evidence record. *)
+let native_json_schema_output = true
+
 type permissions_json = {allow : string list; deny : string list}
 [@@deriving yojson]
 
@@ -361,6 +369,14 @@ let build_command ?(streaming = false) ?(project_config_path = None)
     | Some n -> ["--max-turns"; string_of_int n]
     | None -> []
   in
+  (* Native JSON Schema constraint — passed when spec.json_schema is set.
+     The CLI validates the schema at invocation; unsupported keywords cause a
+     non-zero exit which the enforcer surfaces as native rejection (D-5). *)
+  let schema_args =
+    match spec.json_schema with
+    | Some s -> ["--output-schema"; Yojson.Safe.to_string ~std:true s]
+    | None -> []
+  in
   (* Combine prompt and instructions into a single task description *)
   let full_prompt =
     if String.length spec.instructions > 0 then
@@ -371,7 +387,7 @@ let build_command ?(streaming = false) ?(project_config_path = None)
     else spec.prompt
   in
   (* Return command args and prompt separately - prompt goes via stdin *)
-  (base @ mcp_args @ config_args @ model_args @ max_turns_args, full_prompt)
+  (base @ mcp_args @ config_args @ model_args @ max_turns_args @ schema_args, full_prompt)
 
 (** Parse a stream-json event line and extract displayable content.
     Returns Some text if there's something to display, None otherwise. *)
