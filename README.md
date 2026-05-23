@@ -171,6 +171,30 @@ opam exec -- dune runtest
 opam lint cabal.opam
 ```
 
+### E2E tests (manual, CI-excluded)
+
+End-to-end tests for `Json_schema_enforcer` against real backend CLIs live in
+[`test/test_demo_627.ml`](test/test_demo_627.ml).  They are gated by the
+`CABAL_E2E_TESTS=1` environment variable and are **not** run in CI.
+
+| Variable | Purpose |
+|---|---|
+| `CABAL_E2E_TESTS=1` | Enables building and running the E2E test binary |
+| `CABAL_E2E_BACKEND` | Backend id to exercise (e.g. `claude-code`, `codex`, `gemini-cli`) |
+| `CABAL_E2E_MODEL` | Model name (e.g. `haiku`, `gpt-4o-mini`, `gemini-2.0-flash`) |
+
+```bash
+CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
+  dune runtest libs/cabal/test/ --force
+```
+
+Or via the named alias:
+
+```bash
+CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
+  dune build @e2e
+```
+
 If you consume Cabal as a vendored subtree inside a host monorepo, dune sees
 the cabal directory directly as part of the workspace — no `opam pin` is
 required. Host-side build/test invocations and any host-specific escape
