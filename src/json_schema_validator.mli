@@ -8,20 +8,26 @@
 (** Pure JSON Schema validator — Story #623.
 
     Validates a JSON document against an inline JSON Schema without performing
-    any I/O, subprocess call, or LLM invocation.
+    any I/O, subprocess call, or LLM invocation.  Backed by the [jsonschema]
+    opam package (v0.1.0).
 
-    {b Implemented keywords.}  This validator checks the following JSON Schema
-    keywords; all other keywords are silently accepted (unknown keywords do not
-    cause validation to fail):
-    - [type]: the document must have the JSON type named by the keyword
-      ([object], [array], [string], [number], [integer], [boolean], [null]).
-    - [required]: every string named in the array must be present as a key in
-      the document object.
+    {b Keyword coverage.}  All keywords defined in JSON Schema drafts 4, 6, 7,
+    2019-09, and 2020-12 are supported (including [type], [required],
+    [properties], [additionalProperties], [enum], [const], [minimum],
+    [maximum], [minLength], [maxLength], [pattern], [items], [contains],
+    [allOf], [anyOf], [oneOf], [not], [if/then/else], and more).
 
-    {b Scope.}  This is a structural type-and-presence checker, not a full
-    JSON Schema implementation.  Callers who need keyword coverage beyond [type]
-    and [required] (e.g. [properties], [enum], [pattern],
-    [additionalProperties]) should not rely on this module for those checks.
+    {b Draft selection.}  The draft used during validation is chosen as
+    follows:
+    - When the schema document contains a [$schema] field, the draft named by
+      that field is used (among the supported drafts: 4, 6, 7, 2019-09,
+      2020-12).
+    - When no [$schema] field is present, draft 2020-12 is used by default
+      (Decision D-2).
+
+    {b Scope.}  This module validates the structure and content of a JSON
+    document against an inline schema.  It does not resolve external [$ref]
+    URLs — schemas with remote references will produce a compile error.
 
     This module is used exclusively by the validate-and-retry path in
     {!Json_schema_enforcer}; the native path does not call this module. *)
@@ -33,11 +39,11 @@
     [document] is the text string to validate (e.g. [task_result.agent_text]).
 
     {post}
-    Returns [Ok ()] when [document] parses as valid JSON and passes all
-    supported keyword checks ([type] and [required]).  Returns [Error msg]
-    with a human-readable diagnostic when [document] is not valid JSON or
-    fails a supported keyword check.  Unknown schema keywords are silently
-    accepted.  Never performs I/O, subprocess calls, or LLM invocations.
+    Returns [Ok ()] when [document] parses as valid JSON and satisfies all
+    constraints expressed in [schema].  Returns [Error msg] with a
+    human-readable diagnostic when [document] is not valid JSON or fails any
+    schema keyword check.  Never performs I/O, subprocess calls, or LLM
+    invocations.
 
     {violators}
     (none)
