@@ -59,6 +59,17 @@ let make_fresh_retry_spec ~base ~schema_json ~err =
   in
   {base with Backend_types.prompt; resume_session_id = None; json_schema = None}
 
+let backend_status_error_text = function
+  | Backend_types.Failed msg -> "Failed: " ^ msg
+  | Backend_types.Timeout -> "Timeout"
+  | Backend_types.Cancelled -> "Cancelled"
+  | Backend_types.Success -> "Success"
+
+let both_attempts_error ~attempt1 ~attempt2 =
+  Error
+    ("Both schema enforcement attempts failed.\nAttempt 1: " ^ attempt1
+   ^ "\nAttempt 2: " ^ attempt2)
+
 let run_task ~sw ~env ?on_raw_line ~backend spec =
   match spec.Backend_types.json_schema with
   | None -> Ok (Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec)
@@ -120,12 +131,20 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
                     backend
                     retry_spec
                 in
-                let agent_text2 = result2.Backend_types.agent_text in
-                match
-                  Json_schema_validator.validate ~schema ~document:agent_text2
-                with
-                | Ok () -> Ok result2
-                | Error err2 ->
-                    Error
-                      ("Both schema validation attempts failed.\nAttempt 1: "
-                     ^ err1 ^ "\nAttempt 2: " ^ err2))))
+                match result2.Backend_types.status with
+                | Backend_types.Failed _ | Backend_types.Timeout
+                | Backend_types.Cancelled ->
+                    both_attempts_error
+                      ~attempt1:err1
+                      ~attempt2:
+                        (backend_status_error_text result2.Backend_types.status)
+                | Backend_types.Success -> (
+                    let agent_text2 = result2.Backend_types.agent_text in
+                    match
+                      Json_schema_validator.validate
+                        ~schema
+                        ~document:agent_text2
+                    with
+                    | Ok () -> Ok result2
+                    | Error err2 ->
+                        both_attempts_error ~attempt1:err1 ~attempt2:err2))))

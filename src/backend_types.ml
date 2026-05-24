@@ -97,9 +97,7 @@ type lsp_server_config = {
 
 (* Capability Evidence *)
 
-type test_method =
-  | E2e_test
-  | Manual_probe of string
+type test_method = E2e_test | Manual_probe of string
 
 type capability_evidence = {
   tested_at_version : string;

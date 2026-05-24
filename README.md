@@ -93,8 +93,14 @@ prompt policy, retry, UI).
 open Cabal
 
 let () =
-  (* 1. Register every built-in backend adapter (YAML + hand-written). *)
+  (* 1. Load YAML adapters, then register handwritten built-ins when the host
+        needs their backend-specific runtime capabilities. *)
   Adapter_loader.register_all () ;
+  Registry.register (module Claude_code) ;
+  Registry.register (module Gemini_cli) ;
+  Registry.register (module Codex_cli) ;
+  Registry.register (module Opencode_cli) ;
+  Registry.register (module Copilot_cli) ;
 
   (* 2. Pick a backend by canonical id — the same id used in
         Backend_registry and Backend_config_gen. *)
@@ -149,9 +155,16 @@ Project-local adapters override user-global, which override built-ins by
 id. Hosts that don't want to honour user-supplied adapters should call
 `register_all` without `?project_dir` and validate `$HOME` themselves.
 
+`Adapter_loader.register_all` registers YAML-backed adapters only. It does not
+by itself install handwritten backend modules such as `Claude_code`, so hosts
+that require backend-specific runtime behavior (native JSON schema enforcement,
+read-only flags, resume semantics, config validation, MCP handling, or safety
+checks) should register the handwritten built-ins afterward to override the same
+backend ids.
+
 ### Known limitations
 
-1. Some built-in adapter flows can execute through the generic YAML-backed adapter path rather than a native backend implementation, so hosts that need strict backend-specific behavior (read-only semantics, resume, config validation, MCP handling, or safety checks) should validate which backend path is active before execution.
+1. `Adapter_loader.register_all` alone executes built-ins through the generic YAML-backed adapter path; hosts that need strict backend-specific behavior (native schema output, read-only semantics, resume, config validation, MCP handling, or safety checks) should register handwritten built-ins after the loader and validate which backend path is active before execution.
 2. Provider model-discovery probes may pass credentials in subprocess argv or URL arguments. Avoid running probe-enabled providers with live API keys in shared or untrusted environments until this path is hardened.
 3. Config artifact paths are treated as trusted project-relative paths. Hosts should sanitize and validate user-supplied paths before passing artifacts into Cabal.
 4. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
@@ -179,7 +192,7 @@ in CI:
 | Binary | Purpose |
 |---|---|
 | [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the validate-and-retry enforcer path against a specific backend and model |
-| [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true` and exercises the native schema path (Story #628) |
+| [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true`, mirrors host registration by loading YAML adapters and then handwritten built-ins, and exercises the native schema path (Story #628) |
 
 Both are built and run via `@e2e`.
 
@@ -204,12 +217,18 @@ CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
 | `CABAL_E2E_MODEL` | Model name (e.g. `haiku`, `gpt-4o-mini`, `gemini-2.0-flash`) |
 | `ANTHROPIC_API_KEY` | Required by `claude-code`; backend is skipped if absent |
 
-The test iterates all registry entries with `native_json_schema_output = true`,
-skips any backend whose required credential env var is absent (with a diagnostic
-naming the missing var), and exercises the native schema path for the rest.
-Version-drift detection is advisory: a warning is emitted when the installed
-binary version is below the evidence `baseline_version`; a debug log is emitted
-when the installed version exceeds `tested_at_version`.
+The test iterates all registry entries with `native_json_schema_output = true`.
+Before any credential skip, it calls `Adapter_loader.register_all ()` and then
+registers the handwritten built-ins (`Claude_code`, `Gemini_cli`, `Codex_cli`,
+`Opencode_cli`, `Copilot_cli`) to mirror host usage; if a descriptor-native
+backend resolves to a runtime backend whose
+`Agentic_backend.native_json_schema_output` is false, the test fails closed.
+After that runtime-capability check, it skips any backend whose required
+credential env var is absent (with a diagnostic naming the missing var) and
+exercises the native schema path for the rest. Version-drift detection is
+advisory: a warning is emitted when the installed binary version is below
+`descriptor.baseline_version`; a debug log is emitted when the installed version
+exceeds `tested_at_version`.
 
 ```bash
 CABAL_E2E_TESTS=1 CABAL_E2E_MODEL=haiku \

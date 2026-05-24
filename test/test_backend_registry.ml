@@ -24,6 +24,23 @@ let find_desc id =
   | Some d -> d
   | None -> Alcotest.failf "backend descriptor not found for id=%s" id
 
+let register_host_runtime_backends () =
+  Registry.clear () ;
+  Adapter_loader.register_all () ;
+  Registry.register (module Claude_code) ;
+  Registry.register (module Gemini_cli) ;
+  Registry.register (module Codex_cli) ;
+  Registry.register (module Opencode_cli) ;
+  Registry.register (module Copilot_cli)
+
+let with_host_runtime_backends f =
+  Registry.clear () ;
+  Fun.protect
+    ~finally:(fun () -> Registry.clear ())
+    (fun () ->
+      register_host_runtime_backends () ;
+      f ())
+
 (** {1 AC1 — Registry coverage: all 5 backends have a descriptor} *)
 
 let test_all_backends_have_descriptor () =
@@ -122,7 +139,7 @@ let test_structured_output_capabilities () =
     false
     d_cop.Backend_registry.capabilities.Backend_registry.structured_output
 
-(* session_resume: claude-code and codex *)
+(* session_resume: claude-code, codex, and gemini-cli *)
 let test_session_resume_capabilities () =
   List.iter
     (fun id ->
@@ -251,51 +268,74 @@ let test_unknown_backend_no_file_reading () =
 (** {1 AC5 — Static-vs-runtime consistency property} *)
 
 (** For every static descriptor in [Backend_registry], the runtime registry
-    populated by [Adapter_loader.register_all] must hold a backend whose
-    [Agentic_backend.id] matches and whose [name] is non-empty. This catches
-    drift between the static facts and the actually-registered modules
-    (e.g., a backend deleted in code but left in the registry table). *)
+    populated using host order ([Adapter_loader.register_all] followed by the
+    handwritten built-ins) must hold a backend whose [Agentic_backend.id]
+    matches and whose [name] is non-empty. This catches drift between the
+    static facts and the actually-registered modules (e.g., a backend deleted
+    in code but left in the registry table). *)
 let test_runtime_modules_match_descriptors () =
-  Registry.clear () ;
-  Adapter_loader.register_all () ;
-  let descriptors = Backend_registry.all () in
-  Alcotest.(check bool) "at least one descriptor exists" true (descriptors <> []) ;
-  List.iter
-    (fun (d : Backend_registry.descriptor) ->
-      match Registry.get d.id with
-      | None ->
-          Alcotest.failf
-            "registered backend module missing for descriptor id=%s"
-            d.id
-      | Some backend ->
-          let actual_id = Agentic_backend.id backend in
-          let actual_name = Agentic_backend.name backend in
-          Alcotest.(check string)
-            (Printf.sprintf "%s: runtime id matches descriptor" d.id)
-            d.id
-            actual_id ;
-          Alcotest.(check bool)
-            (Printf.sprintf "%s: runtime name is non-empty" d.id)
-            true
-            (String.length (String.trim actual_name) > 0))
-    descriptors ;
-  Registry.clear ()
+  with_host_runtime_backends (fun () ->
+      let descriptors = Backend_registry.all () in
+      Alcotest.(check bool)
+        "at least one descriptor exists"
+        true
+        (descriptors <> []) ;
+      List.iter
+        (fun (d : Backend_registry.descriptor) ->
+          match Registry.get d.id with
+          | None ->
+              Alcotest.failf
+                "registered backend module missing for descriptor id=%s"
+                d.id
+          | Some backend ->
+              let actual_id = Agentic_backend.id backend in
+              let actual_name = Agentic_backend.name backend in
+              Alcotest.(check string)
+                (Printf.sprintf "%s: runtime id matches descriptor" d.id)
+                d.id
+                actual_id ;
+              Alcotest.(check bool)
+                (Printf.sprintf "%s: runtime name is non-empty" d.id)
+                true
+                (String.length (String.trim actual_name) > 0))
+        descriptors)
 
 (** Symmetric check: every backend module the runtime registry knows about
     must correspond to a static descriptor. Catches a backend registered in
     code but missing from the static table. *)
 let test_runtime_ids_have_descriptors () =
-  Registry.clear () ;
-  Adapter_loader.register_all () ;
-  let runtime_ids = Registry.list_ids () in
-  List.iter
-    (fun id ->
-      match Backend_registry.find id with
-      | None ->
-          Alcotest.failf "runtime backend id=%s has no static descriptor" id
-      | Some _ -> ())
-    runtime_ids ;
-  Registry.clear ()
+  with_host_runtime_backends (fun () ->
+      let runtime_ids = Registry.list_ids () in
+      List.iter
+        (fun id ->
+          match Backend_registry.find id with
+          | None ->
+              Alcotest.failf "runtime backend id=%s has no static descriptor" id
+          | Some _ -> ())
+        runtime_ids)
+
+(** Native-schema capability must agree between static descriptors and the
+    runtime modules hosts actually execute.  In particular, claude-code must be
+    the handwritten native backend after host-order registration; a generic
+    YAML replacement with [native_json_schema_output = false] is not enough to
+    prove Story #628's native path. *)
+let test_runtime_native_schema_capabilities_match_descriptors () =
+  with_host_runtime_backends (fun () ->
+      List.iter
+        (fun (d : Backend_registry.descriptor) ->
+          match Registry.get d.id with
+          | None ->
+              Alcotest.failf
+                "registered backend module missing for descriptor id=%s"
+                d.id
+          | Some backend ->
+              Alcotest.(check bool)
+                (Printf.sprintf
+                   "%s: runtime native_json_schema_output matches descriptor"
+                   d.id)
+                d.capabilities.native_json_schema_output
+                (Agentic_backend.native_json_schema_output backend))
+        (Backend_registry.all ()))
 
 (** {1 Suite} *)
 
@@ -341,7 +381,7 @@ let () =
       ( "AC3 capability flags",
         [
           Alcotest.test_case
-            "file_reading: only claude-code"
+            "file_reading: claude-code and opencode"
             `Quick
             test_file_reading_capabilities;
           Alcotest.test_case
@@ -349,7 +389,7 @@ let () =
             `Quick
             test_structured_output_capabilities;
           Alcotest.test_case
-            "session_resume: claude-code and codex"
+            "session_resume: claude-code, codex, and gemini-cli"
             `Quick
             test_session_resume_capabilities;
           Alcotest.test_case
@@ -357,7 +397,7 @@ let () =
             `Quick
             test_read_only_support_capabilities;
           Alcotest.test_case
-            "streaming_output: claude-code"
+            "streaming_output: claude-code, opencode, and gemini-cli"
             `Quick
             test_streaming_output_capability;
           Alcotest.test_case
@@ -394,5 +434,9 @@ let () =
             "every runtime backend has a descriptor"
             `Quick
             test_runtime_ids_have_descriptors;
+          Alcotest.test_case
+            "runtime native schema capability matches descriptor"
+            `Quick
+            test_runtime_native_schema_capabilities_match_descriptors;
         ] );
     ]

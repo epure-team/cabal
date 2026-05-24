@@ -8,9 +8,11 @@
 (** Generic native-path E2E test — Story #628.
 
     Iterates every backend in [Backend_registry.all ()] whose
-    [capabilities.native_json_schema_output = true], skips any whose
-    required credential env var is absent, and exercises the native path via
-    [Json_schema_enforcer.run_task] against a small model.
+    [capabilities.native_json_schema_output = true], mirrors host runtime
+    registration ([Adapter_loader.register_all ()] followed by handwritten
+    built-in modules), fails closed if the runtime backend is not native, skips
+    any backend whose required credential env var is absent, and exercises the
+    native path via [Json_schema_enforcer.run_task] against a small model.
 
     {b Gate}: only compiled and executed when [CABAL_E2E_TESTS=1].
 
@@ -47,6 +49,33 @@ let required_credential_env_var = function
   | "copilot-cli" -> None (* uses system auth; no isolated env var *)
   | _ -> None
 
+let register_host_runtime_backends () =
+  Registry.clear () ;
+  Adapter_loader.register_all () ;
+  Registry.register (module Claude_code) ;
+  Registry.register (module Gemini_cli) ;
+  Registry.register (module Codex_cli) ;
+  Registry.register (module Opencode_cli) ;
+  Registry.register (module Copilot_cli)
+
+let runtime_backend_for_native_descriptor (d : Backend_registry.descriptor) =
+  match Registry.get d.id with
+  | None ->
+      Alcotest.failf
+        "[e2e-628] %s: descriptor declares native_json_schema_output=true but \
+         no runtime backend is registered; the generic E2E cannot prove the \
+         native path"
+        d.id
+  | Some backend ->
+      let runtime_native = Agentic_backend.native_json_schema_output backend in
+      if not runtime_native then
+        Alcotest.failf
+          "[e2e-628] %s: descriptor declares native_json_schema_output=true \
+           but runtime backend native_json_schema_output=false; the generic \
+           E2E would exercise validate-and-retry instead of the native path"
+          d.id ;
+      backend
+
 (* -------------------------------------------------------------------------
    Version probe — advisory only.
    Runs [binary_name --version], parses the output, and emits drift warnings.
@@ -72,22 +101,23 @@ let probe_installed_version binary_name =
     Backend_version.parse_from_output output
   with _ -> Error "version probe failed (binary not found or not executable)"
 
-let emit_version_drift_info backend_id binary_name (d : Backend_registry.descriptor) =
+let emit_version_drift_info backend_id binary_name
+    (d : Backend_registry.descriptor) =
   match probe_installed_version binary_name with
   | Error msg ->
       Printf.eprintf
         "[e2e-628] %s: version probe failed (%s); skipping drift check\n%!"
         backend_id
         msg
-  | Ok installed ->
+  | Ok installed -> (
       let baseline_str = d.baseline_version in
-      (match
-         ( Backend_version.of_string baseline_str,
-           Backend_version.of_string
-             (match d.capabilities.native_json_schema_output_evidence with
-             | Some ev -> ev.Backend_types.tested_at_version
-             | None -> baseline_str) )
-       with
+      match
+        ( Backend_version.of_string baseline_str,
+          Backend_version.of_string
+            (match d.capabilities.native_json_schema_output_evidence with
+            | Some ev -> ev.Backend_types.tested_at_version
+            | None -> baseline_str) )
+      with
       | Error _, _ | _, Error _ ->
           Printf.eprintf
             "[e2e-628] %s: could not parse baseline or tested_at version\n%!"
@@ -98,8 +128,9 @@ let emit_version_drift_info backend_id binary_name (d : Backend_registry.descrip
           if cmp_baseline < 0 then
             Printf.eprintf
               "[e2e-628] WARNING: %s installed version (%d.%d.%d) is BELOW \
-               baseline %s — the native schema feature may not be present; \
-               the E2E call is the real gate\n%!"
+               baseline %s — the native schema feature may not be present; the \
+               E2E call is the real gate\n\
+               %!"
               backend_id
               installed.Backend_version.major
               installed.Backend_version.minor
@@ -109,7 +140,8 @@ let emit_version_drift_info backend_id binary_name (d : Backend_registry.descrip
             Printf.eprintf
               "[e2e-628] debug: %s installed version (%d.%d.%d) is ABOVE \
                tested_at_version %s — feature likely still works but has not \
-               been re-verified\n%!"
+               been re-verified\n\
+               %!"
               backend_id
               installed.Backend_version.major
               installed.Backend_version.minor
@@ -123,15 +155,16 @@ let emit_version_drift_info backend_id binary_name (d : Backend_registry.descrip
    ------------------------------------------------------------------------- *)
 
 let rmdir_r proc_mgr dir =
-  (try Eio.Process.run proc_mgr ["rm"; "-rf"; dir]
-   with _ -> ())
+  try Eio.Process.run proc_mgr ["rm"; "-rf"; dir] with _ -> ()
 
 let init_git_repo proc_mgr dir =
   try
     Eio.Process.run proc_mgr ["git"; "-C"; dir; "init"] ;
-    Eio.Process.run proc_mgr
+    Eio.Process.run
+      proc_mgr
       ["git"; "-C"; dir; "config"; "user.email"; "e2e-628@test.cabal"] ;
-    Eio.Process.run proc_mgr
+    Eio.Process.run
+      proc_mgr
       ["git"; "-C"; dir; "config"; "user.name"; "Cabal E2E 628"] ;
     Ok ()
   with exn -> Error (Printexc.to_string exn)
@@ -146,94 +179,83 @@ let answer_schema : Yojson.Safe.t =
     [
       ("$schema", `String "https://json-schema.org/draft/2020-12/schema");
       ("type", `String "object");
-      ( "properties",
-        `Assoc [("answer", `Assoc [("type", `String "string")])] );
+      ("properties", `Assoc [("answer", `Assoc [("type", `String "string")])]);
       ("required", `List [`String "answer"]);
       ("additionalProperties", `Bool false);
     ]
 
 let enforcer_prompt =
-  "Reply ONLY with a JSON object matching the required output schema. \
-   Set the 'answer' field to the string 'pong'. \
-   No prose, no markdown fences — raw JSON only."
+  "Reply ONLY with a JSON object matching the required output schema. Set the \
+   'answer' field to the string 'pong'. No prose, no markdown fences — raw \
+   JSON only."
 
 (* -------------------------------------------------------------------------
    Exercise the native path for one backend.
    Returns unit on success; calls Alcotest.failf on hard failure.
-   Skips gracefully when the backend is unavailable.
+   The caller already verified the runtime backend is registered and native.
    ------------------------------------------------------------------------- *)
 
 let run_native_e2e_for_backend ~sw ~env ~proc_mgr ~model
-    (d : Backend_registry.descriptor) =
+    (d : Backend_registry.descriptor) backend =
   Printf.eprintf "[e2e-628] exercising native path for %s...\n%!" d.id ;
   emit_version_drift_info d.id d.binary_name d ;
-  match Registry.get d.id with
-  | None ->
-      Printf.eprintf
-        "[e2e-628] skipping %s: backend not found in runtime registry \
-         (Adapter_loader not registered or binary absent)\n%!"
-        d.id
-  | Some backend ->
-      let working_dir = Filename.temp_dir ("cabal_e2e_628_" ^ d.id ^ "_") "" in
-      Fun.protect
-        ~finally:(fun () -> rmdir_r proc_mgr working_dir)
-        (fun () ->
-          match init_git_repo proc_mgr working_dir with
+  let working_dir = Filename.temp_dir ("cabal_e2e_628_" ^ d.id ^ "_") "" in
+  Fun.protect
+    ~finally:(fun () -> rmdir_r proc_mgr working_dir)
+    (fun () ->
+      match init_git_repo proc_mgr working_dir with
+      | Error msg ->
+          Alcotest.failf "[e2e-628] %s: git repo setup failed: %s" d.id msg
+      | Ok () -> (
+          let spec =
+            Backend_types.make_task_spec
+              ~prompt:enforcer_prompt
+              ~working_dir
+              ~timeout:120.0
+              ~expected_outputs:[]
+              ~model
+              ~read_only:true
+              ~json_schema:answer_schema
+              ()
+          in
+          let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+          match result with
           | Error msg ->
-              Alcotest.failf "[e2e-628] %s: git repo setup failed: %s" d.id msg
-          | Ok () ->
-              let spec =
-                Backend_types.make_task_spec
-                  ~prompt:enforcer_prompt
-                  ~working_dir
-                  ~timeout:120.0
-                  ~expected_outputs:[]
-                  ~model
-                  ~read_only:true
-                  ~json_schema:answer_schema
-                  ()
-              in
-              let result =
-                Json_schema_enforcer.run_task ~sw ~env ~backend spec
-              in
-              (match result with
-              | Error msg ->
+              Alcotest.failf
+                "[e2e-628] %s: Json_schema_enforcer returned Error (native \
+                 rejection or schema compliance failure): %s"
+                d.id
+                msg
+          | Ok task_result -> (
+              match task_result.Backend_types.status with
+              | Backend_types.Failed msg ->
                   Alcotest.failf
-                    "[e2e-628] %s: Json_schema_enforcer returned Error \
-                     (native rejection or schema compliance failure): %s"
+                    "[e2e-628] %s: backend returned Failed: %s"
                     d.id
                     msg
-              | Ok task_result -> (
-                  match task_result.Backend_types.status with
-                  | Backend_types.Failed msg ->
-                      Alcotest.failf
-                        "[e2e-628] %s: backend returned Failed: %s"
-                        d.id
-                        msg
-                  | Backend_types.Timeout ->
-                      Alcotest.failf "[e2e-628] %s: backend timed out" d.id
-                  | Backend_types.Cancelled ->
-                      Alcotest.failf
-                        "[e2e-628] %s: backend was cancelled" d.id
-                  | Backend_types.Success ->
+              | Backend_types.Timeout ->
+                  Alcotest.failf "[e2e-628] %s: backend timed out" d.id
+              | Backend_types.Cancelled ->
+                  Alcotest.failf "[e2e-628] %s: backend was cancelled" d.id
+              | Backend_types.Success -> (
+                  Printf.eprintf
+                    "[e2e-628] %s: OK — agent_text: %s\n%!"
+                    d.id
+                    task_result.Backend_types.agent_text ;
+                  match
+                    Json_schema_validator.validate
+                      ~schema:answer_schema
+                      ~document:task_result.Backend_types.agent_text
+                  with
+                  | Ok () ->
                       Printf.eprintf
-                        "[e2e-628] %s: OK — agent_text: %s\n%!"
+                        "[e2e-628] %s: agent_text passes schema validation\n%!"
                         d.id
-                        task_result.Backend_types.agent_text ;
-                      (match
-                         Json_schema_validator.validate
-                           ~schema:answer_schema
-                           ~document:task_result.Backend_types.agent_text
-                       with
-                      | Ok () ->
-                          Printf.eprintf
-                            "[e2e-628] %s: agent_text passes schema \
-                             validation\n%!"
-                            d.id
-                      | Error err ->
-                          Alcotest.failf
+                  | Error err ->
+                      Alcotest.failf
                         "[e2e-628] %s: agent_text does not satisfy the schema.\n\
-                         Schema error: %s\nagent_text: %s"
+                         Schema error: %s\n\
+                         agent_text: %s"
                         d.id
                         err
                         task_result.Backend_types.agent_text))))
@@ -248,11 +270,12 @@ let test_native_json_schema_backends () =
     | Some v when v <> "" -> v
     | _ ->
         Printf.eprintf
-          "[e2e-628] SKIPPED: CABAL_E2E_MODEL not set \
-           (set to a model name such as 'haiku')\n%!" ;
+          "[e2e-628] SKIPPED: CABAL_E2E_MODEL not set (set to a model name \
+           such as 'haiku')\n\
+           %!" ;
         Alcotest.skip ()
   in
-  Adapter_loader.register_all () ;
+  register_host_runtime_backends () ;
   let native_backends =
     List.filter
       (fun (d : Backend_registry.descriptor) ->
@@ -262,14 +285,21 @@ let test_native_json_schema_backends () =
   if native_backends = [] then (
     Printf.eprintf
       "[e2e-628] No backends with native_json_schema_output = true in \
-       registry; test trivially passes.\n%!" ;
-    ()
-  ) else
+       registry; test trivially passes.\n\
+       %!" ;
+    ())
+  else
+    let runtime_backends =
+      List.map
+        (fun (d : Backend_registry.descriptor) ->
+          (d, runtime_backend_for_native_descriptor d))
+        native_backends
+    in
     Eio_main.run @@ fun env ->
     Eio.Switch.run @@ fun sw ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
     List.iter
-      (fun (d : Backend_registry.descriptor) ->
+      (fun ((d : Backend_registry.descriptor), backend) ->
         (* Credential gate *)
         let skip =
           match required_credential_env_var d.id with
@@ -285,8 +315,8 @@ let test_native_json_schema_backends () =
           | None -> false
         in
         if not skip then
-          run_native_e2e_for_backend ~sw ~env ~proc_mgr ~model d)
-      native_backends
+          run_native_e2e_for_backend ~sw ~env ~proc_mgr ~model d backend)
+      runtime_backends
 
 (** {1 Suite} *)
 

@@ -243,6 +243,38 @@ let test_build_command_with_resume () =
   | Some sid -> Alcotest.(check string) "session_id" "abc-123-def" sid
   | None -> Alcotest.fail "--resume not found in command"
 
+let rec find_flag_value flag = function
+  | candidate :: value :: _ when candidate = flag -> Some value
+  | _ :: rest -> find_flag_value flag rest
+  | [] -> None
+
+let test_build_command_with_output_schema () =
+  let schema : Yojson.Safe.t =
+    `Assoc
+      [
+        ("$schema", `String "https://json-schema.org/draft/2020-12/schema");
+        ("type", `String "object");
+        ("properties", `Assoc [("answer", `Assoc [("type", `String "string")])]);
+        ("required", `List [`String "answer"]);
+        ("additionalProperties", `Bool false);
+      ]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"Return a JSON object."
+      ~working_dir:"/tmp/test"
+      ~json_schema:schema
+      ()
+  in
+  let cmd, _stdin = Claude_code.build_command ~mcp_config_path:None spec in
+  match find_flag_value "--output-schema" cmd with
+  | Some actual ->
+      Alcotest.(check string)
+        "--output-schema inline JSON"
+        (Yojson.Safe.to_string ~std:true schema)
+        actual
+  | None -> Alcotest.fail "--output-schema not found in command"
+
 let test_parse_session_id_from_stdout () =
   let stdout =
     Yojson.Safe.to_string
@@ -317,6 +349,9 @@ let session_reuse_tests =
   [
     ("build_command without resume", `Quick, test_build_command_no_resume);
     ("build_command with resume", `Quick, test_build_command_with_resume);
+    ( "build_command with output schema",
+      `Quick,
+      test_build_command_with_output_schema );
     ("parse session_id from stdout", `Quick, test_parse_session_id_from_stdout);
     ("parse session_id missing", `Quick, test_parse_session_id_missing);
     ("parse session_id not json", `Quick, test_parse_session_id_not_json);

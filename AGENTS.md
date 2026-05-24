@@ -183,12 +183,16 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - The generic native-path E2E test (Story #628) lives in
   `libs/cabal/test/test_native_json_schema_backends.ml`, also gated by
   `CABAL_E2E_TESTS=1`.  It iterates every backend in `Backend_registry.all ()`
-  with `native_json_schema_output = true`, skips any whose required credential
-  env var (e.g. `ANTHROPIC_API_KEY` for claude-code) is absent (with a
-  diagnostic naming the missing var), and exercises the native schema path for
-  the rest.  Version-drift detection is advisory: a warning is emitted when the
-  installed binary version is below `descriptor.baseline_version`; a debug log
-  when the version exceeds `evidence.tested_at_version`.
+  with `native_json_schema_output = true`, mirrors host registration by calling
+  `Adapter_loader.register_all ()` and then registering the handwritten built-ins
+  (`Claude_code`, `Gemini_cli`, `Codex_cli`, `Opencode_cli`, `Copilot_cli`), and
+  fails closed if a descriptor-native backend resolves to a runtime backend whose
+  `Agentic_backend.native_json_schema_output` is false.  Only after that runtime
+  capability check may it skip a backend whose required credential env var (e.g.
+  `ANTHROPIC_API_KEY` for claude-code) is absent.  Version-drift detection is
+  advisory: a warning is emitted when the installed binary version is below
+  `descriptor.baseline_version`; a debug log when the version exceeds
+  `evidence.tested_at_version`.
 - A `(alias e2e)` rule in `libs/cabal/test/dune` runs **both** binaries
   sequentially; `dune build @e2e` is the discoverable named target.
 - The structural CI test for Story #628 lives in
@@ -198,6 +202,9 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `json_schema_draft`, and `test_method` fields; (3) every backend with
   `native_json_schema_output = true` in `Backend_registry.all ()` carries
   `native_json_schema_output_evidence = Some _`.
-- The test always calls `Adapter_loader.register_all ()` before `Registry.get`
-  so YAML-backed backends are reachable by id.
+- `Adapter_loader.register_all ()` alone registers YAML-backed adapters and does
+  not install handwritten runtime modules or their native capability values. The
+  Story #628 E2E and structural guards register handwritten built-ins after the
+  loader before calling `Registry.get`, matching host usage without changing
+  adapter-loader semantics.
 - `libs/cabal/README.md` documents all env vars and links to both test files.

@@ -19,7 +19,9 @@
     - AC7: Failed/Timeout/Cancelled first result propagated without retry
            (all three status constructors exercised separately)
     - AC8: resume retry prompt matches resume_retry_template with substitutions
-    - AC9: fresh retry prompt matches fresh_retry_template with substitutions *)
+    - AC9: fresh retry prompt matches fresh_retry_template with substitutions
+    - AC10: first invalid + second Failed/Timeout/Cancelled reports the real
+            second-attempt backend status *)
 
 open Cabal
 
@@ -98,6 +100,30 @@ let make_invalid_result ?(session_id = "test-session-1") () =
     ~status:Backend_types.Success
     ~agent_text:invalid_response
     ~session_id
+    ()
+
+(** A failed second-attempt result with invalid text that must not be schema
+    validated. *)
+let make_failed_retry_result msg =
+  Backend_types.make_task_result
+    ~status:(Backend_types.Failed msg)
+    ~agent_text:"retry-failed-not-json"
+    ()
+
+(** A timed-out second-attempt result with invalid text that must not be schema
+    validated. *)
+let make_timeout_retry_result () =
+  Backend_types.make_task_result
+    ~status:Backend_types.Timeout
+    ~agent_text:"retry-timeout-not-json"
+    ()
+
+(** A cancelled second-attempt result with invalid text that must not be schema
+    validated. *)
+let make_cancelled_retry_result () =
+  Backend_types.make_task_result
+    ~status:Backend_types.Cancelled
+    ~agent_text:"retry-cancelled-not-json"
     ()
 
 (** {1 AC1 — pass-through when json_schema = None} *)
@@ -379,6 +405,71 @@ let test_cancelled_result_is_propagated () =
         | Backend_types.Cancelled -> true
         | _ -> false)
 
+(** {1 AC10 — Failed/Timeout/Cancelled second attempt reports backend status}
+
+    Regression guard: when attempt 1 succeeds at the transport layer but fails
+    schema validation, the retry result must have [status] checked before
+    validating [agent_text]. Otherwise Failed/Timeout/Cancelled retries are
+    misreported as schema-validation failures for their placeholder text. *)
+
+let check_second_attempt_backend_status_is_reported ~case_label ~second_result
+    ~expected_status_text () =
+  let backend, call_count, _ =
+    make_mock
+      ~supports_resume:false
+      ~responses:[make_invalid_result (); second_result]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"original"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+  Alcotest.(check int)
+    (case_label ^ ": exactly two backend calls")
+    2
+    !call_count ;
+  match result with
+  | Ok _ -> Alcotest.failf "%s: expected Error but got Ok" case_label
+  | Error msg ->
+      Alcotest.(check bool)
+        (case_label ^ ": error references attempt 1")
+        true
+        (contains msg "Attempt 1") ;
+      Alcotest.(check bool)
+        (case_label ^ ": error references attempt 2")
+        true
+        (contains msg "Attempt 2") ;
+      Alcotest.(check bool)
+        (case_label ^ ": error preserves retry backend status")
+        true
+        (contains msg expected_status_text)
+
+let test_second_attempt_failed_status_is_reported () =
+  check_second_attempt_backend_status_is_reported
+    ~case_label:"AC10a Failed retry"
+    ~second_result:(make_failed_retry_result "backend died on retry")
+    ~expected_status_text:"Failed: backend died on retry"
+    ()
+
+let test_second_attempt_timeout_status_is_reported () =
+  check_second_attempt_backend_status_is_reported
+    ~case_label:"AC10b Timeout retry"
+    ~second_result:(make_timeout_retry_result ())
+    ~expected_status_text:"Timeout"
+    ()
+
+let test_second_attempt_cancelled_status_is_reported () =
+  check_second_attempt_backend_status_is_reported
+    ~case_label:"AC10c Cancelled retry"
+    ~second_result:(make_cancelled_retry_result ())
+    ~expected_status_text:"Cancelled"
+    ()
+
 (** {1 Template helpers}
 
     Substitute named placeholders of the form [{key}] in a template string.
@@ -553,6 +644,27 @@ let () =
             "exactly one call; Ok with Cancelled status"
             `Quick
             test_cancelled_result_is_propagated;
+        ] );
+      ( "AC10a invalid first + Failed retry reports backend status",
+        [
+          Alcotest.test_case
+            "Error includes retry Failed status"
+            `Quick
+            test_second_attempt_failed_status_is_reported;
+        ] );
+      ( "AC10b invalid first + Timeout retry reports backend status",
+        [
+          Alcotest.test_case
+            "Error includes retry Timeout status"
+            `Quick
+            test_second_attempt_timeout_status_is_reported;
+        ] );
+      ( "AC10c invalid first + Cancelled retry reports backend status",
+        [
+          Alcotest.test_case
+            "Error includes retry Cancelled status"
+            `Quick
+            test_second_attempt_cancelled_status_is_reported;
         ] );
       ( "AC8 resume retry prompt matches resume_retry_template",
         [

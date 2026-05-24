@@ -18,9 +18,21 @@
            [native_json_schema_output_evidence] record.
     - AC4: For each such backend the evidence record fields are valid:
            [tested_at_version] and [json_schema_draft] are non-empty strings,
-           and when [test_method = Manual_probe s] the string [s] is non-empty. *)
+           and when [test_method = Manual_probe s] the string [s] is non-empty.
+    - AC5: The generic native E2E's host-style runtime registration resolves
+           descriptor-native backends to runtime-native handwritten modules,
+           not generic YAML adapters. *)
 
 open Cabal
+
+let register_host_runtime_backends () =
+  Registry.clear () ;
+  Adapter_loader.register_all () ;
+  Registry.register (module Claude_code) ;
+  Registry.register (module Gemini_cli) ;
+  Registry.register (module Codex_cli) ;
+  Registry.register (module Opencode_cli) ;
+  Registry.register (module Copilot_cli)
 
 (** {1 AC1 & AC2 — capability_evidence type shape and test_method variant}
 
@@ -80,7 +92,9 @@ let test_capability_evidence_test_method_e2e () =
     | Backend_types.Manual_probe _ -> false)
 
 let test_capability_evidence_test_method_manual_probe () =
-  let probe_invocation = "claude --version 2>/dev/null | head -1  # verified 2.1.117" in
+  let probe_invocation =
+    "claude --version 2>/dev/null | head -1  # verified 2.1.117"
+  in
   let ev : Backend_types.capability_evidence =
     {
       Backend_types.tested_at_version = "2.1.117";
@@ -124,8 +138,10 @@ let test_native_backend_evidence_fields_valid () =
       if cap.native_json_schema_output then
         match cap.native_json_schema_output_evidence with
         | None ->
-            Alcotest.failf "%s: native backend has None evidence (AC3 gate)" d.id
-        | Some ev ->
+            Alcotest.failf
+              "%s: native backend has None evidence (AC3 gate)"
+              d.id
+        | Some ev -> (
             Alcotest.(check bool)
               (d.id ^ ": tested_at_version must be non-empty")
               true
@@ -134,7 +150,7 @@ let test_native_backend_evidence_fields_valid () =
               (d.id ^ ": json_schema_draft must be non-empty")
               true
               (ev.Backend_types.json_schema_draft <> "") ;
-            (match ev.Backend_types.test_method with
+            match ev.Backend_types.test_method with
             | Backend_types.E2e_test -> ()
             | Backend_types.Manual_probe s ->
                 Alcotest.(check bool)
@@ -142,6 +158,36 @@ let test_native_backend_evidence_fields_valid () =
                   true
                   (s <> "")))
     (Backend_registry.all ())
+
+(** {1 AC5 — Generic E2E runtime registration proves the native path}
+
+    [Adapter_loader.register_all ()] alone installs YAML-backed adapters whose
+    runtime capability values are generic.  The Story #628 E2E mirrors host
+    usage by registering handwritten built-ins afterward; this structural guard
+    fails if any descriptor-native backend would resolve to a non-native runtime
+    backend before the live credential-gated call can run. *)
+
+let test_native_backends_resolve_to_native_runtime_modules () =
+  Registry.clear () ;
+  Fun.protect
+    ~finally:(fun () -> Registry.clear ())
+    (fun () ->
+      register_host_runtime_backends () ;
+      List.iter
+        (fun (d : Backend_registry.descriptor) ->
+          if d.capabilities.native_json_schema_output then
+            match Registry.get d.id with
+            | None ->
+                Alcotest.failf
+                  "%s: native descriptor has no runtime backend after host \
+                   registration"
+                  d.id
+            | Some backend ->
+                Alcotest.(check bool)
+                  (d.id ^ ": runtime backend must be native")
+                  true
+                  (Agentic_backend.native_json_schema_output backend))
+        (Backend_registry.all ()))
 
 (** {1 Suite} *)
 
@@ -189,5 +235,12 @@ let () =
             "native backend evidence fields are valid and non-empty"
             `Quick
             test_native_backend_evidence_fields_valid;
+        ] );
+      ( "AC5 — generic E2E resolves descriptor-native backends to native runtime",
+        [
+          Alcotest.test_case
+            "native descriptors resolve to runtime-native handwritten modules"
+            `Quick
+            test_native_backends_resolve_to_native_runtime_modules;
         ] );
     ]
