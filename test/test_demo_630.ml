@@ -5,22 +5,23 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Tests for Story #630 — Native JSON schema wiring for codex (AC2(b)).
+(** Tests for Story #630 — Native JSON schema wiring for codex (AC2(a)).
 
-    Outcome: documented non-support.  At baseline_version 0.122.0, the codex
-    CLI does not expose a CLI surface to forward [response_format: json_schema]
-    strict mode to the underlying OpenAI API.  The three-artifact contract
+    Outcome: confirmed support.  The codex CLI exposes [--output-schema <FILE>]
+    (shipped in codex @openai/codex@0.41.0 / rust-v0.41.0, PR #4079) which
+    forwards a caller-supplied JSON Schema to the underlying OpenAI Responses
+    API as [response_format: json_schema].  The three-artifact contract
     (NFR-R1) is satisfied:
       (1) investigation note at the canonical path;
-      (2) this pinning test asserting [native_json_schema_output = false];
+      (2) this pinning test asserting [native_json_schema_output = true];
       (3) story completion notes referencing AC1 sources.
 
     Covers:
     - AC1: Investigation note exists at the canonical path, cites
            baseline_version 0.122.0, and records at least one source URL.
-    - AC2(b): codex descriptor has native_json_schema_output = false
+    - AC2(a): codex descriptor has native_json_schema_output = true
               (NFR-R1 pinning test).
-    - AC2(b): codex has capability_evidence = None.
+    - AC2(a): codex has capability_evidence = Some _.
     - QG-1: Structural integrity — every built-in backend whose descriptor
             declares native_json_schema_output = true must carry a non-None
             capability_evidence record (no regression).
@@ -46,8 +47,7 @@ let project_root () =
         if Sys.file_exists (Filename.concat dir "dune-project") then dir
         else
           let parent = Filename.dirname dir in
-          if parent = dir then Sys.getcwd ()
-          else walk parent
+          if parent = dir then Sys.getcwd () else walk parent
       in
       walk (Sys.getcwd ())
 
@@ -91,8 +91,7 @@ let test_investigation_note_exists () =
 let test_investigation_note_cites_baseline_version () =
   let path = investigation_note_path () in
   if not (Sys.file_exists path) then
-    Alcotest.fail
-      (Printf.sprintf "investigation note not found at %s" path)
+    Alcotest.fail (Printf.sprintf "investigation note not found at %s" path)
   else begin
     let content = read_file path in
     Alcotest.(check bool)
@@ -106,8 +105,7 @@ let test_investigation_note_cites_baseline_version () =
 let test_investigation_note_cites_source_url () =
   let path = investigation_note_path () in
   if not (Sys.file_exists path) then
-    Alcotest.fail
-      (Printf.sprintf "investigation note not found at %s" path)
+    Alcotest.fail (Printf.sprintf "investigation note not found at %s" path)
   else begin
     let content = read_file path in
     Alcotest.(check bool)
@@ -121,8 +119,7 @@ let test_investigation_note_cites_source_url () =
 let test_investigation_note_has_accessed_date () =
   let path = investigation_note_path () in
   if not (Sys.file_exists path) then
-    Alcotest.fail
-      (Printf.sprintf "investigation note not found at %s" path)
+    Alcotest.fail (Printf.sprintf "investigation note not found at %s" path)
   else begin
     let content = read_file path in
     (* "accessed" appears in "accessed YYYY-MM-DD" or "accessed on YYYY-MM-DD" *)
@@ -132,26 +129,26 @@ let test_investigation_note_has_accessed_date () =
       (contains_substring content "accessed")
   end
 
-(** {1 AC2(b) — codex descriptor pinning} *)
+(** {1 AC2(a) — codex descriptor} *)
 
-(** AC2(b) / NFR-R1: codex must retain native_json_schema_output = false.
-    This is the pinning test required by the three-artifact AC2(b) contract. *)
-let test_codex_native_json_schema_output_false () =
+(** AC2(a) / NFR-R1: codex must have native_json_schema_output = true.
+    This is the pinning test required by the three-artifact AC2(a) contract. *)
+let test_codex_native_json_schema_output_true () =
   let d = find_desc "codex" in
   Alcotest.(check bool)
-    "native_json_schema_output = false for codex (pinning test)"
-    false
+    "native_json_schema_output = true for codex (pinning test)"
+    true
     d.Backend_registry.capabilities.Backend_registry.native_json_schema_output
 
-(** AC2(b): codex must have capability_evidence = None.
-    Carrying evidence on a false flag would be misleading. *)
-let test_codex_capability_evidence_none () =
+(** AC2(a): codex must have capability_evidence = Some _.
+    Evidence is required whenever the flag is true (NFR-S1). *)
+let test_codex_capability_evidence_some () =
   match Backend_registry.get_capability_evidence "codex" with
+  | Some _ -> ()
   | None ->
-      ()
-  | Some _ ->
       Alcotest.fail
-        "capability_evidence is Some _ for codex — unexpected on false flag"
+        "capability_evidence is None for codex — expected Some _ when flag is \
+         true"
 
 (** {1 QG-1 — Structural integrity (no regression)} *)
 
@@ -162,20 +159,21 @@ let test_structural_all_native_true_have_evidence () =
   List.iter
     (fun (d : Backend_registry.descriptor) ->
       if d.capabilities.Backend_registry.native_json_schema_output then
-        match d.capability_evidence with
+        match
+          d.capabilities.Backend_registry.native_json_schema_output_evidence
+        with
         | None ->
             Alcotest.failf
               "backend %s: native_json_schema_output=true but \
                capability_evidence=None (NFR-S1 violation)"
               d.id
-        | Some _ ->
-            ())
+        | Some _ -> ())
     (Backend_registry.all ())
 
 (** {1 NFR-U2 — Scope isolation} *)
 
-(** NFR-U2: Story #630 must not touch claude-code's descriptor.
-    claude-code was flipped to true by Story #629 and must stay true. *)
+(** NFR-U2: Story #630 flipped codex to true.  claude-code was already true
+    from Story #629 and must stay true. *)
 let test_claude_code_still_native_true () =
   let d = find_desc "claude-code" in
   Alcotest.(check bool)
@@ -192,14 +190,15 @@ let test_other_backends_still_false () =
       Alcotest.(check bool)
         (id ^ " retains native_json_schema_output = false (not touched by #630)")
         false
-        d.Backend_registry.capabilities.Backend_registry.native_json_schema_output)
+        d.Backend_registry.capabilities
+          .Backend_registry.native_json_schema_output)
     others
 
 (** {1 Suite} *)
 
 let () =
   Alcotest.run
-    "Story #630 — Native JSON schema for codex (AC2(b) documented non-support)"
+    "Story #630 — Native JSON schema for codex (AC2(a) confirmed support)"
     [
       ( "AC1 investigation note",
         [
@@ -220,16 +219,16 @@ let () =
             `Quick
             test_investigation_note_has_accessed_date;
         ] );
-      ( "AC2(b) codex descriptor pinning",
+      ( "AC2(a) codex descriptor",
         [
           Alcotest.test_case
-            "native_json_schema_output = false for codex"
+            "native_json_schema_output = true for codex"
             `Quick
-            test_codex_native_json_schema_output_false;
+            test_codex_native_json_schema_output_true;
           Alcotest.test_case
-            "capability_evidence = None for codex"
+            "capability_evidence = Some _ for codex"
             `Quick
-            test_codex_capability_evidence_none;
+            test_codex_capability_evidence_some;
         ] );
       ( "QG-1 structural integrity",
         [

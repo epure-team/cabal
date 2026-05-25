@@ -232,3 +232,15 @@ val supports_read_only : string -> bool
     Used by the routing layer to list alternatives when a validator is routed
     to an unsafe backend. *)
 val read_only_safe_backend_ids : unit -> string list
+
+(** [get_capability_evidence backend_id] returns the recorded
+    [Backend_types.capability_evidence] for [backend_id], or [None] when
+    the backend is unknown or has no native-schema evidence pinned. *)
+val get_capability_evidence : string -> Backend_types.capability_evidence option
+
+(** [capability_evidence_table ()] returns an association list of
+    [(backend_id, capability_evidence)] for every built-in backend that has
+    a recorded native-schema evidence record. Backends without evidence are
+    omitted. *)
+val capability_evidence_table :
+  unit -> (string * Backend_types.capability_evidence) list

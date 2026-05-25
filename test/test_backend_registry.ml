@@ -349,13 +349,13 @@ let project_root () =
         if Sys.file_exists (Filename.concat dir "dune-project") then dir
         else
           let parent = Filename.dirname dir in
-          if parent = dir then Sys.getcwd ()
-          else walk parent
+          if parent = dir then Sys.getcwd () else walk parent
       in
       walk (Sys.getcwd ())
 
 let investigation_note_path backend_id =
-  Filename.concat (project_root ())
+  Filename.concat
+    (project_root ())
     (Printf.sprintf
        "libs/cabal/docs/native-json-schema-investigation/%s.md"
        backend_id)
@@ -401,8 +401,7 @@ let test_629_claude_code_native_json_schema_output_true () =
 let test_629_claude_code_capability_evidence_present () =
   match Backend_registry.get_capability_evidence "claude-code" with
   | None ->
-      Alcotest.fail
-        "claude-code capability_evidence = None (NFR-S1 violation)"
+      Alcotest.fail "claude-code capability_evidence = None (NFR-S1 violation)"
   | Some ev ->
       Alcotest.(check string)
         "capability_evidence.tested_at_version pinned to baseline 2.1.117"
@@ -416,21 +415,21 @@ let test_629_investigation_note_exists () =
     true
     (Sys.file_exists path)
 
-(** Story #630 — codex: AC2(b) documented non-support *)
+(** Story #630 — codex: AC2(a) confirmed support *)
 
-let test_630_codex_native_json_schema_output_false () =
+let test_630_codex_native_json_schema_output_true () =
   let d = find_desc "codex" in
   Alcotest.(check bool)
-    "codex native_json_schema_output = false (AC2(b) pinning)"
-    false
+    "codex native_json_schema_output = true (AC2(a) pinning)"
+    true
     d.Backend_registry.capabilities.Backend_registry.native_json_schema_output
 
-let test_630_codex_capability_evidence_none () =
+let test_630_codex_capability_evidence_some () =
   match Backend_registry.get_capability_evidence "codex" with
-  | None -> ()
-  | Some _ ->
+  | Some _ -> ()
+  | None ->
       Alcotest.fail
-        "codex capability_evidence = Some _ (unexpected on false flag)"
+        "codex capability_evidence = None (expected Some _ when flag is true)"
 
 let test_630_investigation_note_exists () =
   let path = investigation_note_path "codex" in
@@ -462,7 +461,8 @@ let test_631_opencode_capability_evidence_none () =
   | None -> ()
   | Some _ ->
       Alcotest.fail
-        "opencode capability_evidence = Some _ (unexpected on AC2(b) false flag)"
+        "opencode capability_evidence = Some _ (unexpected on AC2(b) false \
+         flag)"
 
 (** AC1: investigation note at canonical path. *)
 let test_631_investigation_note_exists () =
@@ -500,7 +500,9 @@ let test_qg1_all_native_true_have_evidence () =
   List.iter
     (fun (d : Backend_registry.descriptor) ->
       if d.capabilities.Backend_registry.native_json_schema_output then
-        match d.capability_evidence with
+        match
+          d.capabilities.Backend_registry.native_json_schema_output_evidence
+        with
         | None ->
             Alcotest.failf
               "backend %s: native_json_schema_output=true but \
@@ -516,15 +518,17 @@ let test_631_scope_isolation () =
   Alcotest.(check bool)
     "claude-code retains native_json_schema_output = true (not touched by #631)"
     true
-    d_claude.Backend_registry.capabilities.Backend_registry.native_json_schema_output ;
+    d_claude.Backend_registry.capabilities
+      .Backend_registry.native_json_schema_output ;
   List.iter
     (fun id ->
       let d = find_desc id in
       Alcotest.(check bool)
         (Printf.sprintf "%s retains native_json_schema_output = false" id)
         false
-        d.Backend_registry.capabilities.Backend_registry.native_json_schema_output)
-    ["codex"; "gemini-cli"; "copilot-cli"]
+        d.Backend_registry.capabilities
+          .Backend_registry.native_json_schema_output)
+    ["gemini-cli"; "copilot-cli"]
 
 (** {1 Suite} *)
 
@@ -643,13 +647,13 @@ let () =
             `Quick
             test_629_investigation_note_exists;
           Alcotest.test_case
-            "#630 codex native_json_schema_output = false (pinning)"
+            "#630 codex native_json_schema_output = true (pinning)"
             `Quick
-            test_630_codex_native_json_schema_output_false;
+            test_630_codex_native_json_schema_output_true;
           Alcotest.test_case
-            "#630 codex capability_evidence = None"
+            "#630 codex capability_evidence = Some _"
             `Quick
-            test_630_codex_capability_evidence_none;
+            test_630_codex_capability_evidence_some;
           Alcotest.test_case
             "#630 codex investigation note exists"
             `Quick

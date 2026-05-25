@@ -28,7 +28,7 @@
             declares native_json_schema_output = true must carry a non-None
             capability_evidence record (no regression).
     - NFR-U2: Scope isolation — Story #631 must not touch other backends;
-              claude-code stays true, codex/gemini-cli/copilot-cli stay false. *)
+              claude-code and codex stay true, gemini-cli/copilot-cli stay false. *)
 
 open Cabal
 
@@ -49,8 +49,7 @@ let project_root () =
         if Sys.file_exists (Filename.concat dir "dune-project") then dir
         else
           let parent = Filename.dirname dir in
-          if parent = dir then Sys.getcwd ()
-          else walk parent
+          if parent = dir then Sys.getcwd () else walk parent
       in
       walk (Sys.getcwd ())
 
@@ -94,8 +93,7 @@ let test_investigation_note_exists () =
 let test_investigation_note_cites_baseline_version () =
   let path = investigation_note_path () in
   if not (Sys.file_exists path) then
-    Alcotest.fail
-      (Printf.sprintf "investigation note not found at %s" path)
+    Alcotest.fail (Printf.sprintf "investigation note not found at %s" path)
   else begin
     let content = read_file path in
     Alcotest.(check bool)
@@ -109,8 +107,7 @@ let test_investigation_note_cites_baseline_version () =
 let test_investigation_note_cites_source_url () =
   let path = investigation_note_path () in
   if not (Sys.file_exists path) then
-    Alcotest.fail
-      (Printf.sprintf "investigation note not found at %s" path)
+    Alcotest.fail (Printf.sprintf "investigation note not found at %s" path)
   else begin
     let content = read_file path in
     Alcotest.(check bool)
@@ -124,8 +121,7 @@ let test_investigation_note_cites_source_url () =
 let test_investigation_note_has_accessed_date () =
   let path = investigation_note_path () in
   if not (Sys.file_exists path) then
-    Alcotest.fail
-      (Printf.sprintf "investigation note not found at %s" path)
+    Alcotest.fail (Printf.sprintf "investigation note not found at %s" path)
   else begin
     let content = read_file path in
     (* "accessed" appears in "accessed YYYY-MM-DD" or "accessed on YYYY-MM-DD" *)
@@ -150,8 +146,7 @@ let test_opencode_native_json_schema_output_false () =
     Carrying evidence on a false flag would be misleading. *)
 let test_opencode_capability_evidence_none () =
   match Backend_registry.get_capability_evidence "opencode" with
-  | None ->
-      ()
+  | None -> ()
   | Some _ ->
       Alcotest.fail
         "capability_evidence is Some _ for opencode — unexpected on false flag"
@@ -165,14 +160,15 @@ let test_structural_all_native_true_have_evidence () =
   List.iter
     (fun (d : Backend_registry.descriptor) ->
       if d.capabilities.Backend_registry.native_json_schema_output then
-        match d.capability_evidence with
+        match
+          d.capabilities.Backend_registry.native_json_schema_output_evidence
+        with
         | None ->
             Alcotest.failf
               "backend %s: native_json_schema_output=true but \
                capability_evidence=None (NFR-S1 violation)"
               d.id
-        | Some _ ->
-            ())
+        | Some _ -> ())
     (Backend_registry.all ())
 
 (** {1 NFR-U2 — Scope isolation} *)
@@ -188,21 +184,23 @@ let test_claude_code_still_native_true () =
 
 (** NFR-U2: Other pending backends must retain native_json_schema_output = false. *)
 let test_other_backends_still_false () =
-  let others = ["codex"; "gemini-cli"; "copilot-cli"] in
+  let others = ["gemini-cli"; "copilot-cli"] in
   List.iter
     (fun id ->
       let d = find_desc id in
       Alcotest.(check bool)
         (id ^ " retains native_json_schema_output = false (not touched by #631)")
         false
-        d.Backend_registry.capabilities.Backend_registry.native_json_schema_output)
+        d.Backend_registry.capabilities
+          .Backend_registry.native_json_schema_output)
     others
 
 (** {1 Suite} *)
 
 let () =
   Alcotest.run
-    "Story #631 — Native JSON schema for opencode (AC2(b) documented non-support)"
+    "Story #631 — Native JSON schema for opencode (AC2(b) documented \
+     non-support)"
     [
       ( "AC1 investigation note",
         [

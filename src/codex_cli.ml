@@ -75,7 +75,7 @@ let available ~sw:_ ~env =
 
 let supports_session_resume = true
 
-let native_json_schema_output = false
+let native_json_schema_output = true
 
 let config_body =
   "# MCP servers are disabled by default — activate only approved\n\
@@ -382,15 +382,30 @@ let build_command ~mcp_config_path:_ (spec : task_spec) =
   let sandbox_flags =
     if spec.read_only then ["-s"; "read-only"] else ["--full-auto"]
   in
+  (* Native JSON Schema constraint — written to a temp file and passed via
+     --output-schema <path>.  The temp file is cleaned up on process exit.
+     Codex reads the schema path as a PathBuf (codex-rs/exec/src/cli.rs).
+     Feature ships since codex @openai/codex@0.41.0 / rust-v0.41.0 (PR #4079). *)
+  let schema_args =
+    match spec.json_schema with
+    | Some s ->
+        let path = Filename.temp_file "cabal_schema_" ".json" in
+        at_exit (fun () -> try Sys.remove path with _ -> ()) ;
+        let oc = open_out path in
+        output_string oc (Yojson.Safe.to_string ~std:true s) ;
+        close_out oc ;
+        ["--output-schema"; path]
+    | None -> []
+  in
   let base =
     match spec.resume_session_id with
     | Some sid ->
         (["codex"; "exec"; "resume"; sid; "--json"; "--skip-git-repo-check"]
         @ sandbox_flags)
-        @ model_flags @ ["-"]
+        @ model_flags @ schema_args @ ["-"]
     | None ->
         (["codex"; "exec"; "--json"; "--skip-git-repo-check"] @ sandbox_flags)
-        @ model_flags @ ["-"]
+        @ model_flags @ schema_args @ ["-"]
   in
   let full_prompt =
     if String.length spec.instructions > 0 then

@@ -5,7 +5,7 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Tests for Story #630 — Native JSON schema wiring for codex (AC2(b)).
+(** Tests for Story #630 — Native JSON schema wiring for codex (AC2(a)).
 
     This module is a test executable.  It has no public API.
 

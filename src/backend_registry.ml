@@ -92,8 +92,14 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = false;
           file_reading = false;
-          native_json_schema_output = false;
-          native_json_schema_output_evidence = None;
+          native_json_schema_output = true;
+          native_json_schema_output_evidence =
+            Some
+              {
+                Backend_types.tested_at_version = "0.131.0";
+                json_schema_draft = "2020-12";
+                test_method = Backend_types.E2e_test;
+              };
         };
     };
     {
@@ -326,4 +332,23 @@ let supports_read_only backend_id =
 let read_only_safe_backend_ids () =
   List.filter_map
     (fun d -> if d.capabilities.read_only_support then Some d.id else None)
+    builtin_backends
+
+(** [get_capability_evidence backend_id] returns the native JSON schema
+    capability evidence for the descriptor, if present. Returns [None]
+    when the backend is unknown or has no recorded evidence. *)
+let get_capability_evidence backend_id =
+  match find backend_id with
+  | Some d -> d.capabilities.native_json_schema_output_evidence
+  | None -> None
+
+(** [capability_evidence_table ()] returns [(backend_id, evidence)] pairs for
+    every built-in backend that carries a recorded native-schema capability
+    evidence record. Backends without evidence are omitted. *)
+let capability_evidence_table () =
+  List.filter_map
+    (fun d ->
+      match d.capabilities.native_json_schema_output_evidence with
+      | Some ev -> Some (d.id, ev)
+      | None -> None)
     builtin_backends

@@ -206,3 +206,23 @@
   (progn
    (run ./test_demo_627.exe)
    (run ./test_native_json_schema_backends.exe))))
+
+(test
+ (name test_demo_630)
+ (libraries cabal alcotest)
+ (modules test_demo_630))
+
+(test
+ (name test_demo_631)
+ (libraries cabal alcotest)
+ (modules test_demo_631))
+
+(test
+ (name test_demo_632)
+ (libraries cabal alcotest)
+ (modules test_demo_632))
+
+(test
+ (name test_demo_633)
+ (libraries cabal alcotest)
+ (modules test_demo_633))
