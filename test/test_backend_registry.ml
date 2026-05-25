@@ -337,6 +337,195 @@ let test_runtime_native_schema_capabilities_match_descriptors () =
                 (Agentic_backend.native_json_schema_output backend))
         (Backend_registry.all ()))
 
+(** {1 Helpers for investigation note tests (Epic #95)} *)
+
+(** Walk up from CWD until a directory containing [dune-project] is found.
+    Falls back to CWD if not found (e.g. in a nested _build sandbox). *)
+let project_root () =
+  match Sys.getenv_opt "PROJECT_ROOT" with
+  | Some r -> r
+  | None ->
+      let rec walk dir =
+        if Sys.file_exists (Filename.concat dir "dune-project") then dir
+        else
+          let parent = Filename.dirname dir in
+          if parent = dir then Sys.getcwd ()
+          else walk parent
+      in
+      walk (Sys.getcwd ())
+
+let investigation_note_path backend_id =
+  Filename.concat (project_root ())
+    (Printf.sprintf
+       "libs/cabal/docs/native-json-schema-investigation/%s.md"
+       backend_id)
+
+let read_note backend_id =
+  let path = investigation_note_path backend_id in
+  if not (Sys.file_exists path) then None
+  else begin
+    let ic = open_in path in
+    let n = in_channel_length ic in
+    let s = Bytes.create n in
+    really_input ic s 0 n ;
+    close_in ic ;
+    Some (Bytes.to_string s)
+  end
+
+let note_contains backend_id needle =
+  match read_note backend_id with
+  | None -> false
+  | Some content ->
+      let hlen = String.length content in
+      let nlen = String.length needle in
+      if nlen = 0 then true
+      else
+        let rec loop i =
+          if i + nlen > hlen then false
+          else if String.sub content i nlen = needle then true
+          else loop (i + 1)
+        in
+        loop 0
+
+(** {1 AC6 — Epic #95 native_json_schema_output} *)
+
+(** Story #629 — claude-code: AC2(a) retrofit capability_evidence *)
+
+let test_629_claude_code_native_json_schema_output_true () =
+  let d = find_desc "claude-code" in
+  Alcotest.(check bool)
+    "claude-code native_json_schema_output = true (AC2(a))"
+    true
+    d.Backend_registry.capabilities.Backend_registry.native_json_schema_output
+
+let test_629_claude_code_capability_evidence_present () =
+  match Backend_registry.get_capability_evidence "claude-code" with
+  | None ->
+      Alcotest.fail
+        "claude-code capability_evidence = None (NFR-S1 violation)"
+  | Some ev ->
+      Alcotest.(check string)
+        "capability_evidence.tested_at_version pinned to baseline 2.1.117"
+        "2.1.117"
+        ev.Backend_types.tested_at_version
+
+let test_629_investigation_note_exists () =
+  let path = investigation_note_path "claude-code" in
+  Alcotest.(check bool)
+    "claude-code investigation note exists at canonical path"
+    true
+    (Sys.file_exists path)
+
+(** Story #630 — codex: AC2(b) documented non-support *)
+
+let test_630_codex_native_json_schema_output_false () =
+  let d = find_desc "codex" in
+  Alcotest.(check bool)
+    "codex native_json_schema_output = false (AC2(b) pinning)"
+    false
+    d.Backend_registry.capabilities.Backend_registry.native_json_schema_output
+
+let test_630_codex_capability_evidence_none () =
+  match Backend_registry.get_capability_evidence "codex" with
+  | None -> ()
+  | Some _ ->
+      Alcotest.fail
+        "codex capability_evidence = Some _ (unexpected on false flag)"
+
+let test_630_investigation_note_exists () =
+  let path = investigation_note_path "codex" in
+  Alcotest.(check bool)
+    "codex investigation note exists at canonical path"
+    true
+    (Sys.file_exists path)
+
+let test_630_investigation_note_cites_baseline () =
+  Alcotest.(check bool)
+    "codex investigation note cites baseline_version 0.122.0"
+    true
+    (note_contains "codex" "0.122.0")
+
+(** Story #631 — opencode: AC2(b) documented non-support.
+
+    NFR-R1 pinning test: fails if a contributor flips
+    [native_json_schema_output] without updating the investigation note. *)
+
+let test_631_opencode_native_json_schema_output_false () =
+  let d = find_desc "opencode" in
+  Alcotest.(check bool)
+    "opencode native_json_schema_output = false (AC2(b) NFR-R1 pinning)"
+    false
+    d.Backend_registry.capabilities.Backend_registry.native_json_schema_output
+
+let test_631_opencode_capability_evidence_none () =
+  match Backend_registry.get_capability_evidence "opencode" with
+  | None -> ()
+  | Some _ ->
+      Alcotest.fail
+        "opencode capability_evidence = Some _ (unexpected on AC2(b) false flag)"
+
+(** AC1: investigation note at canonical path. *)
+let test_631_investigation_note_exists () =
+  let path = investigation_note_path "opencode" in
+  Alcotest.(check bool)
+    "opencode investigation note exists at canonical path (AC1)"
+    true
+    (Sys.file_exists path)
+
+(** AC1: investigation note cites the pinned baseline_version. *)
+let test_631_investigation_note_cites_baseline () =
+  Alcotest.(check bool)
+    "opencode investigation note cites baseline_version 1.14.20 (AC1 / NFR-U3)"
+    true
+    (note_contains "opencode" "1.14.20")
+
+(** AC1: investigation note cites at least one authoritative source URL. *)
+let test_631_investigation_note_cites_source_url () =
+  Alcotest.(check bool)
+    "opencode investigation note cites at least one https:// source URL (AC1)"
+    true
+    (note_contains "opencode" "https://")
+
+(** AC1: investigation note records an accessed-on date. *)
+let test_631_investigation_note_cites_accessed_on_date () =
+  Alcotest.(check bool)
+    "opencode investigation note records an accessed-on date (AC1 / NFR-U3)"
+    true
+    (note_contains "opencode" "accessed")
+
+(** QG-1 (all stories): structural integrity — every descriptor with
+    [native_json_schema_output = true] carries a non-[None]
+    [capability_evidence] record (NFR-S1). *)
+let test_qg1_all_native_true_have_evidence () =
+  List.iter
+    (fun (d : Backend_registry.descriptor) ->
+      if d.capabilities.Backend_registry.native_json_schema_output then
+        match d.capability_evidence with
+        | None ->
+            Alcotest.failf
+              "backend %s: native_json_schema_output=true but \
+               capability_evidence=None (NFR-S1 / QG-1 violation)"
+              d.id
+        | Some _ -> ())
+    (Backend_registry.all ())
+
+(** NFR-U2 — Story #631 scope isolation: only opencode is touched; all other
+    backends retain their existing state. *)
+let test_631_scope_isolation () =
+  let d_claude = find_desc "claude-code" in
+  Alcotest.(check bool)
+    "claude-code retains native_json_schema_output = true (not touched by #631)"
+    true
+    d_claude.Backend_registry.capabilities.Backend_registry.native_json_schema_output ;
+  List.iter
+    (fun id ->
+      let d = find_desc id in
+      Alcotest.(check bool)
+        (Printf.sprintf "%s retains native_json_schema_output = false" id)
+        false
+        d.Backend_registry.capabilities.Backend_registry.native_json_schema_output)
+    ["codex"; "gemini-cli"; "copilot-cli"]
+
 (** {1 Suite} *)
 
 let () =
@@ -438,5 +627,68 @@ let () =
             "runtime native schema capability matches descriptor"
             `Quick
             test_runtime_native_schema_capabilities_match_descriptors;
+        ] );
+      ( "AC6 Epic #95 native_json_schema_output",
+        [
+          Alcotest.test_case
+            "#629 claude-code native_json_schema_output = true"
+            `Quick
+            test_629_claude_code_native_json_schema_output_true;
+          Alcotest.test_case
+            "#629 claude-code capability_evidence present and pinned"
+            `Quick
+            test_629_claude_code_capability_evidence_present;
+          Alcotest.test_case
+            "#629 claude-code investigation note exists"
+            `Quick
+            test_629_investigation_note_exists;
+          Alcotest.test_case
+            "#630 codex native_json_schema_output = false (pinning)"
+            `Quick
+            test_630_codex_native_json_schema_output_false;
+          Alcotest.test_case
+            "#630 codex capability_evidence = None"
+            `Quick
+            test_630_codex_capability_evidence_none;
+          Alcotest.test_case
+            "#630 codex investigation note exists"
+            `Quick
+            test_630_investigation_note_exists;
+          Alcotest.test_case
+            "#630 codex investigation note cites baseline 0.122.0"
+            `Quick
+            test_630_investigation_note_cites_baseline;
+          Alcotest.test_case
+            "#631 opencode native_json_schema_output = false (NFR-R1 pinning)"
+            `Quick
+            test_631_opencode_native_json_schema_output_false;
+          Alcotest.test_case
+            "#631 opencode capability_evidence = None"
+            `Quick
+            test_631_opencode_capability_evidence_none;
+          Alcotest.test_case
+            "#631 opencode investigation note exists (AC1)"
+            `Quick
+            test_631_investigation_note_exists;
+          Alcotest.test_case
+            "#631 opencode investigation note cites baseline 1.14.20 (AC1)"
+            `Quick
+            test_631_investigation_note_cites_baseline;
+          Alcotest.test_case
+            "#631 opencode investigation note cites source URL (AC1)"
+            `Quick
+            test_631_investigation_note_cites_source_url;
+          Alcotest.test_case
+            "#631 opencode investigation note cites accessed-on date (AC1)"
+            `Quick
+            test_631_investigation_note_cites_accessed_on_date;
+          Alcotest.test_case
+            "QG-1 all native_true backends have capability_evidence"
+            `Quick
+            test_qg1_all_native_true_have_evidence;
+          Alcotest.test_case
+            "#631 scope isolation (NFR-U2)"
+            `Quick
+            test_631_scope_isolation;
         ] );
     ]
