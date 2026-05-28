@@ -153,9 +153,10 @@ standalone OCaml library and as the backend abstraction layer vendored under
   CLI via `spec.json_schema` in `build_command` (or equivalent), add a
   `capability_evidence` record to `backend_registry.ml` with `tested_at_version`,
   `json_schema_draft` (e.g. `"2020-12"`), and `test_method` (either
-  `Backend_types.E2e_test` or `Backend_types.Manual_probe "<invocation>"`), and
-  add the required credential env var to `required_credential_env_var` in
-  `test_native_json_schema_backends.ml`.
+  `Backend_types.E2e_test` or `Backend_types.Manual_probe "<invocation>"`).
+  If the backend needs a model override for the manual E2E harness, add its
+  default and `CABAL_E2E_MODEL_<BACKEND>` entry to
+  `libs/cabal/test/e2e_harness_config.ml`.
 - Claude Code uses `--output-schema <inline-JSON>` (JSON Schema draft 2020-12).
   The evidence record is in `backend_registry.ml` under the `claude-code`
   descriptor.
@@ -175,11 +176,19 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `(enabled_if (= %{env:CABAL_E2E_TESTS=0} 1))` in the dune stanza — the
   same pattern used by `EPURE_OCAMLLSP_TESTS=1` elsewhere in the repo.  The
   binary is neither built nor executed when `CABAL_E2E_TESTS` is unset.
-- Three env vars control `test_demo_627` execution: `CABAL_E2E_TESTS` (gate),
-  `CABAL_E2E_BACKEND` (backend id, e.g. `"claude-code"`), and `CABAL_E2E_MODEL`
-  (model name, e.g. `"haiku"`).  If either `CABAL_E2E_BACKEND` or
-  `CABAL_E2E_MODEL` is unset the test skips with a diagnostic message; it does
-  not fail.
+- `CABAL_E2E_TESTS=1` builds and runs the E2E binaries.  With no other env vars,
+  `test_demo_627` is a multi-backend run over the default backend ids in
+  `libs/cabal/test/e2e_harness_config.ml` (`claude-code`, `codex`, `opencode`,
+  `copilot-cli`).  `CABAL_E2E_BACKEND` is an optional comma-separated filter for
+  manual debugging, not a required gate; `gemini-cli` is opt-in through that
+  filter.
+- The shared `CABAL_E2E_MODEL` contract is removed.  Model overrides are
+  backend-specific: `CABAL_E2E_MODEL_CLAUDE_CODE`, `CABAL_E2E_MODEL_CODEX`,
+  `CABAL_E2E_MODEL_COPILOT_CLI`, `CABAL_E2E_MODEL_OPENCODE`, and
+  `CABAL_E2E_MODEL_GEMINI_CLI`.  Defaults live in
+  `e2e_harness_config.ml`: Claude Code uses `haiku`; Codex passes no model and
+  keeps the CLI default; Copilot uses `claude-haiku-4.5`; OpenCode uses
+  `openai/gpt-5.4-mini`; Gemini uses `gemini-3-flash-preview`.
 - The generic native-path E2E test (Story #628) lives in
   `libs/cabal/test/test_native_json_schema_backends.ml`, also gated by
   `CABAL_E2E_TESTS=1`.  It iterates every backend in `Backend_registry.all ()`
@@ -188,9 +197,10 @@ standalone OCaml library and as the backend abstraction layer vendored under
   (`Claude_code`, `Gemini_cli`, `Codex_cli`, `Opencode_cli`, `Copilot_cli`), and
   fails closed if a descriptor-native backend resolves to a runtime backend whose
   `Agentic_backend.native_json_schema_output` is false.  Only after that runtime
-  capability check may it skip a backend whose required credential env var (e.g.
-  `ANTHROPIC_API_KEY` for claude-code) is absent.  Version-drift detection is
-  advisory: a warning is emitted when the installed binary version is below
+  capability check may it skip a backend whose CLI binary is unavailable on
+  `PATH`; installed but unauthenticated CLIs fail as real E2E failures.
+  Version-drift detection is advisory: a warning is emitted when the installed
+  binary version is below
   `descriptor.baseline_version`; a debug log when the version exceeds
   `evidence.tested_at_version`.
 - A `(alias e2e)` rule in `libs/cabal/test/dune` runs **both** binaries

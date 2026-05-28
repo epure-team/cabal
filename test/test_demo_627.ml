@@ -19,25 +19,26 @@
 
     {ul
       {li [CABAL_E2E_TESTS=1] — required to build and run this binary at all.}
-      {li [CABAL_E2E_BACKEND] — backend id to exercise
+      {li [CABAL_E2E_BACKEND] — optional backend id filter
           (e.g. ["claude-code"], ["codex"], ["opencode"],
-          ["gemini-cli"], ["copilot-cli"]).
-          If unset the test is skipped.}
-      {li [CABAL_E2E_MODEL] — model name to pass to the backend
-          (e.g. ["haiku"], ["gpt-4o-mini"], ["gemini-2.0-flash"]).
-          If unset the test is skipped.}}
+          ["gemini-cli"], ["copilot-cli"]). If unset, all default E2E
+          backends are exercised.}
+      {li [CABAL_E2E_MODEL_<BACKEND>] — optional per-backend model override,
+          where backend ids are uppercased and non-alphanumerics become
+          underscores (for example [CABAL_E2E_MODEL_CLAUDE_CODE]). Defaults
+          are backend-specific; Codex omits the model flag by default.}}
 
     {b Exact invocation}
 
 {[
-  CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
+  CABAL_E2E_TESTS=1 \
     dune runtest libs/cabal/test/ --force
 ]}
 
     Or via the named alias:
 
 {[
-  CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
+  CABAL_E2E_TESTS=1 \
     dune build @e2e
 ]}
 *)
@@ -112,6 +113,15 @@ let enforcer_prompt =
    Do not add markdown code fences, explanation, or extra whitespace.\n\n\
    {\"answer\":\"ok\"}"
 
+let register_host_runtime_backends () =
+  Registry.clear () ;
+  Adapter_loader.register_all () ;
+  Registry.register (module Claude_code) ;
+  Registry.register (module Gemini_cli) ;
+  Registry.register (module Codex_cli) ;
+  Registry.register (module Opencode_cli) ;
+  Registry.register (module Copilot_cli)
+
 (* -------------------------------------------------------------------------
    Tests
    ---------------------------------------------------------------------- *)
@@ -131,32 +141,7 @@ let enforcer_prompt =
     [Sys.command] or blocking Unix shell calls are made anywhere in this
     module.
 *)
-let test_enforcer_schema_compliance () =
-  (* Resolve required env vars.  Unset → skip so contributors without a
-     particular backend configured are not blocked. *)
-  let backend_id =
-    match Sys.getenv_opt "CABAL_E2E_BACKEND" with
-    | Some v when v <> "" -> v
-    | _ ->
-        Printf.eprintf
-          "[e2e-627] SKIPPED: CABAL_E2E_BACKEND not set (set to a backend id \
-           such as 'claude-code')\n\
-           %!" ;
-        Alcotest.skip ()
-  in
-  let model =
-    match Sys.getenv_opt "CABAL_E2E_MODEL" with
-    | Some v when v <> "" -> v
-    | _ ->
-        Printf.eprintf
-          "[e2e-627] SKIPPED: CABAL_E2E_MODEL not set (set to a model name \
-           such as 'haiku')\n\
-           %!" ;
-        Alcotest.skip ()
-  in
-  (* Register all built-in and YAML-backed adapters so [Registry.get] can
-     resolve any canonical backend id. *)
-  Adapter_loader.register_all () ;
+let run_enforcer_schema_compliance_for_backend ~sw ~env ~proc_mgr backend_id =
   let backend =
     match Registry.get backend_id with
     | Some b -> b
@@ -166,66 +151,95 @@ let test_enforcer_schema_compliance () =
           backend_id ;
         Alcotest.skip ()
   in
+  if not (Agentic_backend.available ~sw ~env backend) then
+    Printf.eprintf
+      "[e2e-627] skipping %s: backend binary is not available on PATH\n%!"
+      backend_id
+  else
+    let model = E2e_harness_config.model_for_backend backend_id in
+    let model_label = E2e_harness_config.model_label model in
+    let model_env_var =
+      E2e_harness_config.model_env_var_for_backend backend_id
+    in
+    Printf.eprintf
+      "[e2e-627] backend=%s model=%s (override env %s) native_schema=%b\n%!"
+      backend_id
+      model_label
+      model_env_var
+      (Agentic_backend.native_json_schema_output backend) ;
+    let working_dir = Filename.temp_dir "cabal_e2e_627_" "" in
+    Fun.protect
+      ~finally:(fun () -> rmdir_r_eio proc_mgr working_dir)
+      (fun () ->
+        match init_git_repo_eio proc_mgr working_dir with
+        | Error msg -> Alcotest.failf "git repo setup failed: %s" msg
+        | Ok () -> (
+            let spec =
+              Backend_types.make_task_spec
+                ~prompt:enforcer_prompt
+                ~working_dir
+                ~timeout:120.0
+                ~expected_outputs:[]
+                ?model
+                ~read_only:true
+                ~json_schema:answer_schema
+                ()
+            in
+            let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
+            match result with
+            | Error msg ->
+                Alcotest.failf
+                  "Json_schema_enforcer returned Error (both attempts failed \
+                   schema validation or native rejection): %s"
+                  msg
+            | Ok task_result -> (
+                match task_result.status with
+                | Failed msg -> Alcotest.failf "backend returned Failed: %s" msg
+                | Timeout -> Alcotest.fail "backend timed out"
+                | Cancelled -> Alcotest.fail "backend was cancelled"
+                | Success -> (
+                    Printf.eprintf
+                      "[e2e-627] agent_text: %s\n%!"
+                      task_result.agent_text ;
+                    match
+                      Json_schema_validator.validate
+                        ~schema:answer_schema
+                        ~document:task_result.agent_text
+                    with
+                    | Ok () ->
+                        Printf.eprintf
+                          "[e2e-627] OK: agent_text passes schema validation\n\
+                           %!"
+                    | Error err ->
+                        Alcotest.failf
+                          "agent_text does not satisfy the schema.\n\
+                           Schema error: %s\n\
+                           agent_text: %s"
+                          err
+                          task_result.agent_text))))
+
+let test_enforcer_schema_compliance () =
+  register_host_runtime_backends () ;
+  let backend_ids =
+    E2e_harness_config.selected_backend_ids
+      ~all_backend_ids:E2e_harness_config.all_backend_ids
+      ()
+  in
+  if backend_ids = [] then (
+    Printf.eprintf "[e2e-627] no backend ids selected; test skipped\n%!" ;
+    Alcotest.skip ()) ;
   Printf.eprintf
-    "[e2e-627] backend=%s model=%s native_schema=%b\n%!"
-    backend_id
-    model
-    (Agentic_backend.native_json_schema_output backend) ;
+    "[e2e-627] selected backends: %s\n%!"
+    (String.concat ", " backend_ids) ;
   (* All Eio operations (process spawning for git, rm, and the enforcer
      itself) share a single Eio_main.run + Switch.run scope so that
      proc_mgr is available for both setup and cleanup. *)
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let proc_mgr = Eio.Stdenv.process_mgr env in
-  let working_dir = Filename.temp_dir "cabal_e2e_627_" "" in
-  Fun.protect
-    ~finally:(fun () -> rmdir_r_eio proc_mgr working_dir)
-    (fun () ->
-      match init_git_repo_eio proc_mgr working_dir with
-      | Error msg -> Alcotest.failf "git repo setup failed: %s" msg
-      | Ok () -> (
-          let spec =
-            Backend_types.make_task_spec
-              ~prompt:enforcer_prompt
-              ~working_dir
-              ~timeout:120.0
-              ~expected_outputs:[]
-              ~model
-              ~read_only:true
-              ~json_schema:answer_schema
-              ()
-          in
-          let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
-          match result with
-          | Error msg ->
-              Alcotest.failf
-                "Json_schema_enforcer returned Error (both attempts failed \
-                 schema validation or native rejection): %s"
-                msg
-          | Ok task_result -> (
-              match task_result.status with
-              | Failed msg -> Alcotest.failf "backend returned Failed: %s" msg
-              | Timeout -> Alcotest.fail "backend timed out"
-              | Cancelled -> Alcotest.fail "backend was cancelled"
-              | Success -> (
-                  Printf.eprintf
-                    "[e2e-627] agent_text: %s\n%!"
-                    task_result.agent_text ;
-                  match
-                    Json_schema_validator.validate
-                      ~schema:answer_schema
-                      ~document:task_result.agent_text
-                  with
-                  | Ok () ->
-                      Printf.eprintf
-                        "[e2e-627] OK: agent_text passes schema validation\n%!"
-                  | Error err ->
-                      Alcotest.failf
-                        "agent_text does not satisfy the schema.\n\
-                         Schema error: %s\n\
-                         agent_text: %s"
-                        err
-                        task_result.agent_text))))
+  List.iter
+    (run_enforcer_schema_compliance_for_backend ~sw ~env ~proc_mgr)
+    backend_ids
 
 (* -------------------------------------------------------------------------
    Entry point

@@ -17,7 +17,7 @@ type process_result = {
   session_id : string option;
 }
 
-let shell_quote_argv argv = argv |> List.map Filename.quote |> String.concat " "
+let shell_quote_argv argv = argv |> String.concat " "
 
 let invalid_managed_namespace_result msg =
   make_task_result ~status:(Failed msg) ~stderr:msg ~exit_code:1 ()
@@ -33,10 +33,10 @@ let validate_task_namespace (spec : task_spec) =
    This is the version-detection primitive: callers should never crash on
    a non-zero exit from a --version command. *)
 
-(** Default cap for version / availability probes. Five seconds is long
-    enough for cold-start CLIs (large Node binaries on slow disks) but short
-    enough that a hung backend cannot freeze registry initialisation for
-    the whole host. *)
+(** Default cap for version / availability probes. Five seconds is long enough
+    for cold-start CLIs (large Node binaries on slow disks) but short enough
+    that a hung backend cannot freeze registry initialisation for the whole
+    host. *)
 let default_probe_timeout_seconds = 5.0
 
 let capture_version_output ~env
@@ -159,11 +159,11 @@ let lines_of_output output =
   output |> String.split_on_char '\n'
   |> List.filter (fun s -> String.length (String.trim s) > 0)
 
-(** Pathspec exclusions appended to every [git diff] call.
-    These directories are build artefacts that should never appear in the
-    diff shown to review agents — they inflate context, cause context-window
-    overflows, and contain no meaningful code changes.
-    The ":!" pathspec magic works for both commit-range diffs and HEAD diffs. *)
+(** Pathspec exclusions appended to every [git diff] call. These directories are
+    build artefacts that should never appear in the diff shown to review agents
+    — they inflate context, cause context-window overflows, and contain no
+    meaningful code changes. The ":!" pathspec magic works for both commit-range
+    diffs and HEAD diffs. *)
 let diff_exclude_pathspecs =
   [
     ":(exclude)node_modules";

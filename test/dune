@@ -1,3 +1,8 @@
+(library
+ (name cabal_e2e_harness_config)
+ (wrapped false)
+ (modules e2e_harness_config))
+
 (test
  (name test_backend)
  (libraries cabal alcotest eio eio_posix yojson unix)
@@ -40,7 +45,7 @@
 
 (test
  (name test_codex_cli)
- (libraries cabal alcotest eio eio_posix)
+ (libraries cabal cabal_e2e_harness_config alcotest eio eio_posix)
  (modules test_codex_cli))
 
 (test
@@ -180,7 +185,7 @@
 
 (test
  (name test_demo_627)
- (libraries cabal alcotest eio eio_main yojson unix)
+ (libraries cabal cabal_e2e_harness_config alcotest eio eio_main yojson unix)
  (modules test_demo_627)
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1)))
@@ -192,7 +197,7 @@
 
 (test
  (name test_native_json_schema_backends)
- (libraries cabal alcotest eio eio_main yojson unix)
+ (libraries cabal cabal_e2e_harness_config alcotest eio eio_main yojson unix)
  (modules test_native_json_schema_backends)
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1)))

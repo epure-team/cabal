@@ -11,43 +11,50 @@
     [capabilities.native_json_schema_output = true], mirrors host runtime
     registration ([Adapter_loader.register_all ()] followed by handwritten
     built-in modules), fails closed if the runtime backend is not native, skips
-    any backend whose required credential env var is absent, and exercises the
-    native path via [Json_schema_enforcer.run_task] against a small model.
+    unavailable backend binaries, and exercises the native path via
+    [Json_schema_enforcer.run_task] against backend-specific default models.
 
     {b Gate}: only compiled and executed when [CABAL_E2E_TESTS=1].
 
     Required env vars:
-      - [CABAL_E2E_TESTS=1]   — enables building and running this binary
-      - [CABAL_E2E_MODEL]     — model name to use (e.g. [haiku])
+    - [CABAL_E2E_TESTS=1] — enables building and running this binary
 
-    Per-backend credential env vars (each native backend also requires its own
-    API credential; the test skips the backend if the var is absent):
-      - [ANTHROPIC_API_KEY]   — required by [claude-code]
+    Optional env vars:
+    - [CABAL_E2E_BACKEND] — backend id filter for manual debugging
+    - [CABAL_E2E_MODEL_<BACKEND>] — per-backend model override; Codex omits the
+      model flag by default and lets the CLI choose its configured default
+
+    Backend credentials are owned by the CLIs themselves.  Installed but
+    unauthenticated CLIs fail the E2E call; unavailable binaries are skipped
+    with a diagnostic.
 
     Run with:
     {[
-      CABAL_E2E_TESTS=1 CABAL_E2E_MODEL=haiku dune runtest libs/cabal/test/
+      CABAL_E2E_TESTS=1 dune runtest libs/cabal/test/
     ]}
 
     Or via the named alias (shares the [@e2e] alias with test_demo_627):
     {[
-      CABAL_E2E_TESTS=1 CABAL_E2E_MODEL=haiku dune build @e2e
+      CABAL_E2E_TESTS=1 dune build @e2e
     ]} *)
 
 open Cabal
 
 (* -------------------------------------------------------------------------
-   Credential env var mapping.  When a new backend is added to the registry
-   with [native_json_schema_output = true], add its credential env var here.
+   Harness setup.  Backend-specific model defaults live in
+   [E2e_harness_config]; credentials are left to each CLI's own auth mechanism.
    ------------------------------------------------------------------------- *)
 
-let required_credential_env_var = function
-  | "claude-code" -> Some "ANTHROPIC_API_KEY"
-  | "codex" -> Some "OPENAI_API_KEY"
-  | "gemini-cli" -> Some "GEMINI_API_KEY"
-  | "opencode" -> Some "OPENAI_API_KEY"
-  | "copilot-cli" -> None (* uses system auth; no isolated env var *)
-  | _ -> None
+let emit_ambient_auth_note_if_needed backend_id =
+  match backend_id with
+  | "codex" ->
+      Printf.eprintf
+        "[e2e-628] codex: no API-key pre-gate; relying on an \
+         already-authenticated Codex CLI session. For non-interactive setup, \
+         provide CODEX_ACCESS_TOKEN via: printf '%%s' \"$CODEX_ACCESS_TOKEN\" \
+         | codex login --with-access-token\n\
+         %!"
+  | _ -> ()
 
 let register_host_runtime_backends () =
   Registry.clear () ;
@@ -177,7 +184,6 @@ let init_git_repo proc_mgr dir =
 let answer_schema : Yojson.Safe.t =
   `Assoc
     [
-      ("$schema", `String "https://json-schema.org/draft/2020-12/schema");
       ("type", `String "object");
       ("properties", `Assoc [("answer", `Assoc [("type", `String "string")])]);
       ("required", `List [`String "answer"]);
@@ -195,8 +201,10 @@ let enforcer_prompt =
    The caller already verified the runtime backend is registered and native.
    ------------------------------------------------------------------------- *)
 
-let run_native_e2e_for_backend ~sw ~env ~proc_mgr ~model
+let run_native_e2e_for_backend ~sw ~env ~proc_mgr ?model
     (d : Backend_registry.descriptor) backend =
+  Diagnostics.set_handler (function Log (_, msg) | User_warning msg ->
+      Format.eprintf "%s" msg) ;
   Printf.eprintf "[e2e-628] exercising native path for %s...\n%!" d.id ;
   emit_version_drift_info d.id d.binary_name d ;
   let working_dir = Filename.temp_dir ("cabal_e2e_628_" ^ d.id ^ "_") "" in
@@ -213,7 +221,7 @@ let run_native_e2e_for_backend ~sw ~env ~proc_mgr ~model
               ~working_dir
               ~timeout:120.0
               ~expected_outputs:[]
-              ~model
+              ?model
               ~read_only:true
               ~json_schema:answer_schema
               ()
@@ -265,16 +273,6 @@ let run_native_e2e_for_backend ~sw ~env ~proc_mgr ~model
    ------------------------------------------------------------------------- *)
 
 let test_native_json_schema_backends () =
-  let model =
-    match Sys.getenv_opt "CABAL_E2E_MODEL" with
-    | Some v when v <> "" -> v
-    | _ ->
-        Printf.eprintf
-          "[e2e-628] SKIPPED: CABAL_E2E_MODEL not set (set to a model name \
-           such as 'haiku')\n\
-           %!" ;
-        Alcotest.skip ()
-  in
   register_host_runtime_backends () ;
   let native_backends =
     List.filter
@@ -282,10 +280,24 @@ let test_native_json_schema_backends () =
         d.capabilities.native_json_schema_output)
       (Backend_registry.all ())
   in
+  let selected_ids =
+    E2e_harness_config.selected_backend_ids
+      ~all_backend_ids:
+        (List.map
+           (fun (d : Backend_registry.descriptor) -> d.id)
+           native_backends)
+      ()
+  in
+  let native_backends =
+    List.filter
+      (fun (d : Backend_registry.descriptor) -> List.mem d.id selected_ids)
+      native_backends
+  in
   if native_backends = [] then (
     Printf.eprintf
-      "[e2e-628] No backends with native_json_schema_output = true in \
-       registry; test trivially passes.\n\
+      "[e2e-628] No backends with native_json_schema_output = true in registry \
+       after applying the optional CABAL_E2E_BACKEND filter; test trivially \
+       passes.\n\
        %!" ;
     ())
   else
@@ -300,22 +312,25 @@ let test_native_json_schema_backends () =
     let proc_mgr = Eio.Stdenv.process_mgr env in
     List.iter
       (fun ((d : Backend_registry.descriptor), backend) ->
-        (* Credential gate *)
-        let skip =
-          match required_credential_env_var d.id with
-          | Some env_var -> (
-              match Sys.getenv_opt env_var with
-              | None | Some "" ->
-                  Printf.eprintf
-                    "[e2e-628] skipping %s: required credential %s not set\n%!"
-                    d.id
-                    env_var ;
-                  true
-              | Some _ -> false)
-          | None -> false
-        in
-        if not skip then
-          run_native_e2e_for_backend ~sw ~env ~proc_mgr ~model d backend)
+        if not (Agentic_backend.available ~sw ~env backend) then
+          Printf.eprintf
+            "[e2e-628] skipping %s: backend binary is not available on PATH\n%!"
+            d.id
+        else (
+          emit_ambient_auth_note_if_needed d.id ;
+          let backend_model = E2e_harness_config.model_for_backend d.id in
+          Printf.eprintf
+            "[e2e-628] %s model=%s (override env %s)\n%!"
+            d.id
+            (E2e_harness_config.model_label backend_model)
+            (E2e_harness_config.model_env_var_for_backend d.id) ;
+          run_native_e2e_for_backend
+            ~sw
+            ~env
+            ~proc_mgr
+            ?model:backend_model
+            d
+            backend))
       runtime_backends
 
 (** {1 Suite} *)

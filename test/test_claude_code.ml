@@ -129,6 +129,32 @@ let test_parse_json_output_no_usage () =
   Alcotest.(check string) "result text" "Simple result" text ;
   Alcotest.(check bool) "no cost" true (Option.is_none cost)
 
+let test_parse_json_output_with_structured_output () =
+  let structured = `Assoc [("answer", `String "ok"); ("count", `Int 2)] in
+  let json = `Assoc [("structured_output", structured)] in
+  let text, cost = Claude_code.parse_json_output json in
+  Alcotest.(check string)
+    "structured_output JSON"
+    (Yojson.Safe.to_string structured)
+    text ;
+  Alcotest.(check bool) "no cost" true (Option.is_none cost)
+
+let test_parse_json_output_prefers_structured_output () =
+  let structured = `Assoc [("answer", `String "structured")] in
+  let json =
+    `Assoc
+      [
+        ("structured_output", structured);
+        ("result", `String "legacy result should not win");
+      ]
+  in
+  let text, cost = Claude_code.parse_json_output json in
+  Alcotest.(check string)
+    "structured_output wins"
+    (Yojson.Safe.to_string structured)
+    text ;
+  Alcotest.(check bool) "no cost" true (Option.is_none cost)
+
 let test_parse_json_output_malformed () =
   let json = `Assoc [("foo", `String "bar")] in
   let text, cost = Claude_code.parse_json_output json in
@@ -140,6 +166,12 @@ let json_output_tests =
   [
     ("parse with result and usage", `Quick, test_parse_json_output_with_result);
     ("parse without usage", `Quick, test_parse_json_output_no_usage);
+    ( "parse structured_output as JSON",
+      `Quick,
+      test_parse_json_output_with_structured_output );
+    ( "prefer structured_output over result",
+      `Quick,
+      test_parse_json_output_prefers_structured_output );
     ("parse malformed", `Quick, test_parse_json_output_malformed);
   ]
 
@@ -267,13 +299,13 @@ let test_build_command_with_output_schema () =
       ()
   in
   let cmd, _stdin = Claude_code.build_command ~mcp_config_path:None spec in
-  match find_flag_value "--output-schema" cmd with
+  match find_flag_value "--json-schema" cmd with
   | Some actual ->
       Alcotest.(check string)
-        "--output-schema inline JSON"
+        "--json-schema inline JSON"
         (Yojson.Safe.to_string ~std:true schema)
         actual
-  | None -> Alcotest.fail "--output-schema not found in command"
+  | None -> Alcotest.fail "--json-schema not found in command"
 
 let test_parse_session_id_from_stdout () =
   let stdout =

@@ -80,7 +80,7 @@ let available ~sw:_ ~env =
 let supports_session_resume = true
 
 (* Claude Code CLI v2.1.117+ supports native JSON Schema-constrained output
-   via --output-schema <inline-schema-json>.  The CLI enforces the schema at
+   via --json-schema <inline-schema-json>.  The CLI enforces the schema at
    invocation time using JSON Schema draft 2020-12, returning a non-zero exit
    code when the schema contains unsupported keywords.  Callers using the
    native path must supply a draft-2020-12-compatible schema.
@@ -228,12 +228,16 @@ let write_mcp_config = Backend_process.write_mcp_config
 let parse_json_output json =
   let open Yojson.Safe.Util in
   (* Claude Code JSON output contains a "result" field with the text response,
-     and optionally "usage" with token counts *)
+     or a native-schema "structured_output" value, and optionally "usage" with
+     token counts. *)
   let result_text =
-    try json |> member "result" |> to_string
-    with Type_error _ -> (
-      (* Fallback: try to get raw text if not in expected format *)
-      try Yojson.Safe.to_string json with _ -> "")
+    match json |> member "structured_output" with
+    | `Null -> (
+        try json |> member "result" |> to_string
+        with Type_error _ -> (
+          (* Fallback: try to get raw text if not in expected format *)
+          try Yojson.Safe.to_string json with _ -> ""))
+    | structured -> Yojson.Safe.to_string structured
   in
   let cost =
     try
@@ -374,7 +378,7 @@ let build_command ?(streaming = false) ?(project_config_path = None)
      non-zero exit which the enforcer surfaces as native rejection (D-5). *)
   let schema_args =
     match spec.json_schema with
-    | Some s -> ["--output-schema"; Yojson.Safe.to_string ~std:true s]
+    | Some s -> ["--json-schema"; Yojson.Safe.to_string ~std:true s]
     | None -> []
   in
   (* Combine prompt and instructions into a single task description *)
@@ -390,8 +394,8 @@ let build_command ?(streaming = false) ?(project_config_path = None)
   ( base @ mcp_args @ config_args @ model_args @ max_turns_args @ schema_args,
     full_prompt )
 
-(** Parse a stream-json event line and extract displayable content.
-    Returns Some text if there's something to display, None otherwise. *)
+(** Parse a stream-json event line and extract displayable content. Returns Some
+    text if there's something to display, None otherwise. *)
 let parse_stream_event line =
   try
     let json = Yojson.Safe.from_string line in

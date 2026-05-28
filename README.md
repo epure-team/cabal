@@ -191,58 +191,61 @@ in CI:
 
 | Binary | Purpose |
 |---|---|
-| [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the validate-and-retry enforcer path against a specific backend and model |
+| [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the enforcer path against all default backends, or an optional filtered backend |
 | [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true`, mirrors host registration by loading YAML adapters and then handwritten built-ins, and exercises the native schema path (Story #628) |
 
-Both are built and run via `@e2e`.
+Both are built and run via `@e2e`. With only `CABAL_E2E_TESTS=1`, the alias is
+a multi-backend run: `test_demo_627` iterates the default backend set
+(`claude-code`, `codex`, `opencode`, `copilot-cli`), while
+`test_native_json_schema_backends` iterates every registry backend whose
+`native_json_schema_output = true`. `gemini-cli` has a default model and
+override env var, but is opt-in via `CABAL_E2E_BACKEND=gemini-cli`.
 
-#### Env vars for `test_demo_627`
-
-| Variable | Purpose |
-|---|---|
-| `CABAL_E2E_TESTS=1` | Enables building and running the E2E binaries |
-| `CABAL_E2E_BACKEND` | Backend id to exercise (e.g. `claude-code`, `codex`, `gemini-cli`) |
-| `CABAL_E2E_MODEL` | Model name (e.g. `haiku`, `gpt-4o-mini`, `gemini-2.0-flash`) |
-
-```bash
-CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
-  dune runtest libs/cabal/test/ --force
-```
-
-#### Env vars for `test_native_json_schema_backends`
+#### E2E env vars
 
 | Variable | Purpose |
 |---|---|
 | `CABAL_E2E_TESTS=1` | Enables building and running the E2E binaries |
-| `CABAL_E2E_MODEL` | Model name (e.g. `haiku`, `gpt-4o-mini`, `gemini-2.0-flash`) |
-| `ANTHROPIC_API_KEY` | Required by `claude-code`; backend is skipped if absent |
-
-The test iterates all registry entries with `native_json_schema_output = true`.
-Before any credential skip, it calls `Adapter_loader.register_all ()` and then
-registers the handwritten built-ins (`Claude_code`, `Gemini_cli`, `Codex_cli`,
-`Opencode_cli`, `Copilot_cli`) to mirror host usage; if a descriptor-native
-backend resolves to a runtime backend whose
-`Agentic_backend.native_json_schema_output` is false, the test fails closed.
-After that runtime-capability check, it skips any backend whose required
-credential env var is absent (with a diagnostic naming the missing var) and
-exercises the native schema path for the rest. Version-drift detection is
-advisory: a warning is emitted when the installed binary version is below
-`descriptor.baseline_version`; a debug log is emitted when the installed version
-exceeds `tested_at_version`.
+| `CABAL_E2E_BACKEND` | Optional backend id filter for debugging. Omit it for the default multi-backend run. Comma-separated values are accepted. |
+| `CABAL_E2E_MODEL_CLAUDE_CODE` | Optional `claude-code` model override; default is `haiku` |
+| `CABAL_E2E_MODEL_CODEX` | Optional `codex` model override; unset means omit `-m` and keep the Codex CLI default model |
+| `CABAL_E2E_MODEL_COPILOT_CLI` | Optional `copilot-cli` model override; default is `claude-haiku-4.5` |
+| `CABAL_E2E_MODEL_OPENCODE` | Optional `opencode` model override; default is `openai/gpt-5.4-mini` |
+| `CABAL_E2E_MODEL_GEMINI_CLI` | Optional `gemini-cli` model override; default is `gemini-3-flash-preview` |
 
 ```bash
-CABAL_E2E_TESTS=1 CABAL_E2E_MODEL=haiku \
-  ANTHROPIC_API_KEY=<key> \
-  dune runtest libs/cabal/test/ --force
+CABAL_E2E_TESTS=1 dune build @e2e
 ```
 
-#### Named alias (runs both)
+Filtered run with one override:
 
 ```bash
-CABAL_E2E_TESTS=1 CABAL_E2E_BACKEND=claude-code CABAL_E2E_MODEL=haiku \
-  ANTHROPIC_API_KEY=<key> \
+CABAL_E2E_TESTS=1 \
+  CABAL_E2E_BACKEND=opencode \
+  CABAL_E2E_MODEL_OPENCODE=openai/gpt-5.4-mini \
   dune build @e2e
 ```
+
+`test_native_json_schema_backends` iterates all registry entries with
+`native_json_schema_output = true`. It calls `Adapter_loader.register_all ()`
+and then registers the handwritten built-ins (`Claude_code`, `Gemini_cli`,
+`Codex_cli`, `Opencode_cli`, `Copilot_cli`) to mirror host usage; if a
+descriptor-native backend resolves to a runtime backend whose
+`Agentic_backend.native_json_schema_output` is false, the test fails closed.
+After that runtime-capability check, both E2E binaries skip backends whose CLI
+binary is unavailable on `PATH`; authentication failures from installed CLIs are
+reported as real E2E failures. Codex intentionally omits a model by default: the
+harness invokes `codex exec` without `-m`, letting an already-authenticated
+ChatGPT Codex session use its CLI default model. For non-interactive setup,
+provide a `CODEX_ACCESS_TOKEN` and bootstrap the CLI before the E2E run:
+
+```bash
+printf '%s' "$CODEX_ACCESS_TOKEN" | codex login --with-access-token
+```
+
+Version-drift detection is advisory: a warning is emitted when the installed binary version is below
+`descriptor.baseline_version`; a debug log is emitted when the installed version
+exceeds `tested_at_version`.
 
 If you consume Cabal as a vendored subtree inside a host monorepo, dune sees
 the cabal directory directly as part of the workspace — no `opam pin` is
