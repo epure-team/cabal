@@ -180,6 +180,7 @@ let run_enforcer_schema_compliance_for_backend ~sw ~env ~proc_mgr backend_id =
                 ~working_dir
                 ~timeout:120.0
                 ~expected_outputs:[]
+                ~managed_namespace:E2e_harness_config.managed_namespace
                 ?model
                 ~read_only:true
                 ~json_schema:answer_schema

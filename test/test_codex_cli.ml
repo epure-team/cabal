@@ -348,6 +348,26 @@ let test_demo_627_defaults_to_multi_backend_run () =
     true
     (contains_substring source "all_backend_ids")
 
+let test_e2e_harness_uses_test_managed_namespace () =
+  let ns = E2e_harness_config.managed_namespace in
+  Alcotest.(check string) "namespace id" "cabal-tests" ns.id ;
+  Alcotest.(check string) "namespace display" "Cabal tests" ns.display_name ;
+  Alcotest.(check string)
+    "namespace config dir"
+    ".cabal-tests/backend-config"
+    ns.config_dir ;
+  List.iter
+    (fun (label, source) ->
+      Alcotest.(check bool)
+        (label ^ " threads test managed namespace")
+        true
+        (contains_substring
+           source
+           "~managed_namespace:E2e_harness_config.managed_namespace"))
+    [
+      ("test_demo_627", demo_627_source ()); ("native E2E", native_e2e_source ());
+    ]
+
 let e2e_harness_model_contract_tests =
   [
     ( "E2E harness removes shared model env var",
@@ -362,6 +382,9 @@ let e2e_harness_model_contract_tests =
     ( "test_demo_627 defaults to multi-backend run",
       `Quick,
       test_demo_627_defaults_to_multi_backend_run );
+    ( "E2E harness uses test managed namespace",
+      `Quick,
+      test_e2e_harness_uses_test_managed_namespace );
   ]
 
 (** {1 Backend Interface Compliance Tests} *)

@@ -221,6 +221,7 @@ let run_native_e2e_for_backend ~sw ~env ~proc_mgr ?model
               ~working_dir
               ~timeout:120.0
               ~expected_outputs:[]
+              ~managed_namespace:E2e_harness_config.managed_namespace
               ?model
               ~read_only:true
               ~json_schema:answer_schema

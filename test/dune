@@ -1,6 +1,7 @@
 (library
  (name cabal_e2e_harness_config)
  (wrapped false)
+ (libraries cabal)
  (modules e2e_harness_config))
 
 (test

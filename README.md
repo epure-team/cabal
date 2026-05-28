@@ -200,6 +200,9 @@ a multi-backend run: `test_demo_627` iterates the default backend set
 `test_native_json_schema_backends` iterates every registry backend whose
 `native_json_schema_output = true`. `gemini-cli` has a default model and
 override env var, but is opt-in via `CABAL_E2E_BACKEND=gemini-cli`.
+Managed host-owned artifacts created by these test harnesses use the test-only
+namespace `.cabal-tests/backend-config`; backend-fixed project config paths
+remain backend-owned (for example `.codex/config.toml`).
 
 #### E2E env vars
 

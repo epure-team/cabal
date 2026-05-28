@@ -7,6 +7,13 @@
 
 (** Shared configuration for Cabal's manual E2E test harnesses. *)
 
+let managed_namespace : Cabal.Backend_types.managed_namespace =
+  {
+    id = "cabal-tests";
+    display_name = "Cabal tests";
+    config_dir = ".cabal-tests/backend-config";
+  }
+
 let all_backend_ids = ["claude-code"; "codex"; "opencode"; "copilot-cli"]
 
 let default_model_for_backend = function
