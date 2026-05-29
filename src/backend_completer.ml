@@ -10,11 +10,12 @@ type completion_result = {text : string; backend_session_id : string option}
 type completer =
   system_prompt:string ->
   prompt:string ->
+  json_schema:Yojson.Safe.t option ->
   resume_session_id:string option ->
   (completion_result, string) result
 
 let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
- fun ~system_prompt ~prompt ~resume_session_id ->
+ fun ~system_prompt ~prompt ~json_schema ~resume_session_id ->
   let full_prompt =
     match resume_session_id with
     | Some _ ->
@@ -33,34 +34,37 @@ let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
       ~expected_outputs:[]
       ?mcp_servers
       ?model
+      ?json_schema
       ?resume_session_id
       ()
   in
-  let result = Agentic_backend.run_task ~sw ~env backend spec in
-  let with_stderr msg =
-    let stderr = String.trim result.stderr in
-    if stderr = "" then msg
-    else
-      let max_len = 2000 in
-      let trimmed =
-        if String.length stderr > max_len then
-          String.sub stderr 0 max_len ^ "..."
-        else stderr
+  match Json_schema_enforcer.run_task ~sw ~env ~backend spec with
+  | Error e -> Error e
+  | Ok result -> (
+      let with_stderr msg =
+        let stderr = String.trim result.stderr in
+        if stderr = "" then msg
+        else
+          let max_len = 2000 in
+          let trimmed =
+            if String.length stderr > max_len then
+              String.sub stderr 0 max_len ^ "..."
+            else stderr
+          in
+          Printf.sprintf "%s\nStderr: %s" msg trimmed
       in
-      Printf.sprintf "%s\nStderr: %s" msg trimmed
-  in
-  match result.status with
-  | Backend_types.Success ->
-      (* Prefer the adapter-normalised agent text; fall back to raw stdout for
-         backends or paths that have not yet populated [agent_text]. *)
-      let text =
-        if String.length result.agent_text > 0 then result.agent_text
-        else result.stdout
-      in
-      Ok {text; backend_session_id = result.session_id}
-  | Backend_types.Failed msg -> Error (with_stderr msg)
-  | Backend_types.Timeout -> Error "Backend timeout"
-  | Backend_types.Cancelled -> Error "Backend cancelled"
+      match result.status with
+      | Backend_types.Success ->
+          (* Prefer the adapter-normalised agent text; fall back to raw stdout for
+             backends or paths that have not yet populated [agent_text]. *)
+          let text =
+            if String.length result.agent_text > 0 then result.agent_text
+            else result.stdout
+          in
+          Ok {text; backend_session_id = result.session_id}
+      | Backend_types.Failed msg -> Error (with_stderr msg)
+      | Backend_types.Timeout -> Error "Backend timeout"
+      | Backend_types.Cancelled -> Error "Backend cancelled")
 
 (* Map a built-in backend id to the argv that prints its version.
    Returns [None] for unknown backends — the gate is skipped for those. *)

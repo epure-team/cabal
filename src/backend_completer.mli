@@ -25,10 +25,12 @@ type completion_result = {
 }
 
 (** A text completion callback. Takes a system prompt, user prompt,
-    and optional session ID to resume. *)
+    an optional inline JSON Schema for structured-output enforcement, and
+    optional session ID to resume. *)
 type completer =
   system_prompt:string ->
   prompt:string ->
+  json_schema:Yojson.Safe.t option ->
   resume_session_id:string option ->
   (completion_result, string) result
 
