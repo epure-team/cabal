@@ -99,7 +99,7 @@ let test_no_schema_pass_through () =
       ~native:false
       ~responses:[make_valid_result ()]
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let completer =
     Backend_completer.make ~sw ~env ~backend ~working_dir:"/tmp" ()
@@ -130,7 +130,7 @@ let test_schema_routes_through_enforcer_retry () =
       ~native:false
       ~responses:[make_invalid_result (); make_valid_result ()]
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let completer =
     Backend_completer.make ~sw ~env ~backend ~working_dir:"/tmp" ()
@@ -167,7 +167,7 @@ let test_native_schema_path_is_single_call () =
       ~native:true
       ~responses:[make_valid_result ()]
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let completer =
     Backend_completer.make ~sw ~env ~backend ~working_dir:"/tmp" ()
@@ -194,7 +194,7 @@ let test_native_schema_rejection_returns_error () =
       ~native:true
       ~responses:[make_failed_result "schema rejected by native backend"]
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let completer =
     Backend_completer.make ~sw ~env ~backend ~working_dir:"/tmp" ()

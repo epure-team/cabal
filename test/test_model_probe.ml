@@ -81,7 +81,8 @@ let resolved_pair = Alcotest.(pair string_list models_source)
 
 (** Run [f] under a fresh Eio switch + env.  Probe-firing tests use this so
     [register_all] can dispatch real probes. *)
-let with_eio f = Eio_main.run (fun env -> Eio.Switch.run (fun sw -> f ~sw ~env))
+let with_eio f =
+  Eio_posix.run (fun env -> Eio.Switch.run (fun sw -> f ~sw ~env))
 
 (* --- tests --------------------------------------------------------------- *)
 

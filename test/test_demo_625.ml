@@ -120,7 +120,7 @@ let test_native_no_validation_no_retry () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int)
@@ -145,7 +145,7 @@ let test_native_rejection_fail_fast () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int)
@@ -173,7 +173,7 @@ let test_native_passthrough_no_schema () =
     Backend_types.make_task_spec ~prompt:"do something" ~working_dir:"/tmp" ()
     (* no json_schema *)
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC-N3: exactly one backend call" 1 !call_count ;
@@ -196,7 +196,7 @@ let test_native_session_id_propagated () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   match result with
@@ -224,7 +224,7 @@ let test_native_schema_in_spec () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let _ = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   match !captured_specs with

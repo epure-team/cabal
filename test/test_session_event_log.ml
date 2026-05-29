@@ -44,7 +44,7 @@ let write_one ~fs ~dir ~session_id =
 let test_file_mode_is_user_only () =
   with_tmp_dir (fun dir ->
       let session_id = "mode-test-001" in
-      Eio_main.run (fun env ->
+      Eio_posix.run (fun env ->
           let fs = Eio.Stdenv.fs env in
           write_one ~fs ~dir ~session_id) ;
       let path =
@@ -79,7 +79,7 @@ let test_write_raw_event_warns_on_malformed_json () =
   with_tmp_dir (fun dir ->
       let events =
         with_captured_diagnostics (fun () ->
-            Eio_main.run (fun env ->
+            Eio_posix.run (fun env ->
                 let fs = Eio.Stdenv.fs env in
                 Cabal.Session_event_log.write_raw_event
                   ~fs
@@ -107,7 +107,7 @@ let test_read_events_warns_on_malformed_line () =
       close_out oc ;
       let events =
         with_captured_diagnostics (fun () ->
-            Eio_main.run (fun env ->
+            Eio_posix.run (fun env ->
                 let fs = Eio.Stdenv.fs env in
                 let parsed =
                   Cabal.Session_event_log.read_events
@@ -129,7 +129,7 @@ let test_read_events_warns_on_malformed_line () =
 
 let test_dir_not_world_accessible () =
   with_tmp_dir (fun dir ->
-      Eio_main.run (fun env ->
+      Eio_posix.run (fun env ->
           let fs = Eio.Stdenv.fs env in
           write_one ~fs ~dir ~session_id:"dir-mode-test-001") ;
       let dpath = Filename.concat dir "sessions" in

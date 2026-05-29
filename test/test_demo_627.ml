@@ -233,9 +233,9 @@ let test_enforcer_schema_compliance () =
     "[e2e-627] selected backends: %s\n%!"
     (String.concat ", " backend_ids) ;
   (* All Eio operations (process spawning for git, rm, and the enforcer
-     itself) share a single Eio_main.run + Switch.run scope so that
+     itself) share a single Eio_posix.run + Switch.run scope so that
      proc_mgr is available for both setup and cleanup. *)
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let proc_mgr = Eio.Stdenv.process_mgr env in
   List.iter

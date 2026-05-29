@@ -31,7 +31,7 @@ let contains s needle =
 
 (* AC3: make_validator_by_name fails hard for opencode (read_only_support=false) *)
 let test_ac3_boundary_opencode () =
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result =
     Backend_completer.make_validator_by_name
@@ -48,7 +48,7 @@ let test_ac3_boundary_opencode () =
 
 (* AC3: make_validator_by_name fails hard for gemini-cli (read_only_support=false) *)
 let test_ac3_boundary_gemini () =
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result =
     Backend_completer.make_validator_by_name
@@ -65,7 +65,7 @@ let test_ac3_boundary_gemini () =
 
 (* AC3: make_validator_by_name fails hard for copilot-cli (read_only_support=false) *)
 let test_ac3_boundary_copilot () =
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result =
     Backend_completer.make_validator_by_name
@@ -82,7 +82,7 @@ let test_ac3_boundary_copilot () =
 
 (* AC1: Error message names the requested backend *)
 let test_ac1_error_names_backend () =
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result =
     Backend_completer.make_validator_by_name
@@ -102,7 +102,7 @@ let test_ac1_error_names_backend () =
 
 (* AC1 + AC4: Error message lists available read-only-safe alternatives *)
 let test_ac1_error_lists_alternatives () =
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result =
     Backend_completer.make_validator_by_name
@@ -134,7 +134,7 @@ let test_unknown_backend_supports_read_only_is_false () =
 (* With fail-closed semantics, make_validator_by_name hits the read-only gate
    for unknown backends (not the lookup stage). Error names the backend. *)
 let test_unknown_backend_fails_at_read_only_gate () =
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result =
     Backend_completer.make_validator_by_name

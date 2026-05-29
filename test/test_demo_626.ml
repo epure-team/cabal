@@ -136,7 +136,7 @@ let test_pass_through () =
     Backend_types.make_task_spec ~prompt:"original" ~working_dir:"/tmp" ()
   in
   (* json_schema = None → pass-through *)
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC1: exactly one backend call" 1 !call_count ;
@@ -155,7 +155,7 @@ let test_valid_first_response () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC2: exactly one backend call" 1 !call_count ;
@@ -183,7 +183,7 @@ let test_invalid_with_session_resume () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC3: exactly two backend calls" 2 !call_count ;
@@ -216,7 +216,7 @@ let test_invalid_without_session_resume () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC4: exactly two backend calls" 2 !call_count ;
@@ -246,7 +246,7 @@ let test_both_invalid () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC5: exactly two backend calls" 2 !call_count ;
@@ -288,7 +288,7 @@ let test_session_id_propagated () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   match result with
@@ -322,7 +322,7 @@ let test_failed_backend_result_is_propagated () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC7: exactly one backend call (no retry)" 1 !call_count ;
@@ -355,7 +355,7 @@ let test_timeout_result_is_propagated () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC7b: exactly one backend call (no retry)" 1 !call_count ;
@@ -388,7 +388,7 @@ let test_cancelled_result_is_propagated () =
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int) "AC7c: exactly one backend call (no retry)" 1 !call_count ;
@@ -426,7 +426,7 @@ let check_second_attempt_backend_status_is_reported ~case_label ~second_result
       ~json_schema:object_schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   Alcotest.(check int)
@@ -521,7 +521,7 @@ let test_resume_prompt_matches_template () =
       ~json_schema:schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let _result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   (* The second (most-recent) call prompt is at the head of the captured list. *)
@@ -561,7 +561,7 @@ let test_fresh_prompt_matches_template () =
       ~json_schema:schema
       ()
   in
-  Eio_main.run @@ fun env ->
+  Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let _result = Json_schema_enforcer.run_task ~sw ~env ~backend spec in
   let second_prompt = List.hd !captured_prompts in

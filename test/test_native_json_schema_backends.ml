@@ -308,7 +308,7 @@ let test_native_json_schema_backends () =
           (d, runtime_backend_for_native_descriptor d))
         native_backends
     in
-    Eio_main.run @@ fun env ->
+    Eio_posix.run @@ fun env ->
     Eio.Switch.run @@ fun sw ->
     let proc_mgr = Eio.Stdenv.process_mgr env in
     List.iter
