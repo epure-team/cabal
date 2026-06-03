@@ -11,6 +11,8 @@ let fixtures_env_var = "CABAL_MOCK_AGENT_FIXTURES"
 
 let legacy_fixtures_env_var = "EPURE_MOCK_AGENT_FIXTURES"
 
+let prompt_log_env_var = "CABAL_MOCK_AGENT_PROMPT_LOG"
+
 let id = "mock-agent"
 
 let name = "Mock Agent (integration tests only)"
@@ -125,6 +127,113 @@ let load_rules ~env path =
          path
          (Printexc.to_string exn))
 
+(* ── Prompt capture log ───────────────────────────────────────────────── *)
+
+(** [timestamp_utc ()] formats the current wall-clock time for prompt logs.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns an ISO-8601-like UTC timestamp ending in [Z].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+let timestamp_utc () =
+  let tm = Unix.gmtime (Unix.gettimeofday ()) in
+  Printf.sprintf
+    "%04d-%02d-%02dT%02d:%02d:%02dZ"
+    (tm.Unix.tm_year + 1900)
+    (tm.Unix.tm_mon + 1)
+    tm.Unix.tm_mday
+    tm.Unix.tm_hour
+    tm.Unix.tm_min
+    tm.Unix.tm_sec
+
+(** [option_to_json value] converts optional string metadata to JSON.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns [`Null] for [None] and [`String value] for [Some value].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+let option_to_json = function None -> `Null | Some value -> `String value
+
+(** [prompt_log_line spec] serializes one prompt-capture NDJSON line.
+
+    {pre}
+    [spec] is the task specification passed to [run_task].
+
+    {post}
+    Returns one JSON object encoded as a single-line string with prompt and
+    metadata fields required by [CABAL_MOCK_AGENT_PROMPT_LOG].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+let prompt_log_line (spec : Backend_types.task_spec) =
+  `Assoc
+    [
+      ("prompt", `String spec.prompt);
+      ("working_dir", `String spec.working_dir);
+      ("model", option_to_json spec.model);
+      ("resume_session_id", option_to_json spec.resume_session_id);
+      ("timestamp", `String (timestamp_utc ()));
+    ]
+  |> Yojson.Safe.to_string
+
+(** [try_append_prompt_log spec] appends [spec]'s prompt when env-gated.
+
+    {pre}
+    [spec] is the task specification passed to [run_task].
+
+    {post}
+    If [CABAL_MOCK_AGENT_PROMPT_LOG] names a path, best-effort appends one
+    NDJSON line before fixture matching.  All I/O errors are swallowed.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+let try_append_prompt_log spec =
+  match Sys.getenv_opt prompt_log_env_var with
+  | None | Some "" -> ()
+  | Some path -> (
+      try
+        let line = prompt_log_line spec ^ "\n" in
+        let fd =
+          Unix.openfile
+            path
+            [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND; Unix.O_CLOEXEC]
+            0o600
+        in
+        Fun.protect
+          ~finally:(fun () -> Unix.close fd)
+          (fun () ->
+            let total = String.length line in
+            let rec write_all offset =
+              if offset >= total then ()
+              else
+                let written =
+                  Unix.write_substring fd line offset (total - offset)
+                in
+                if written <= 0 then () else write_all (offset + written)
+            in
+            write_all 0)
+      with _ -> ())
+
 (* ── Matching ────────────────────────────────────────────────────────── *)
 
 let prompt_contains_ci ~needle ~haystack =
@@ -144,6 +253,7 @@ let prompt_contains_ci ~needle ~haystack =
 (* ── Backend implementation ──────────────────────────────────────────── *)
 
 let run_task ~sw:_ ~env ?on_raw_line:_ (spec : Backend_types.task_spec) =
+  try_append_prompt_log spec ;
   match resolve_fixtures_env () with
   | None | Some "" ->
       Backend_types.make_task_result

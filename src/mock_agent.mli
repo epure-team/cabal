@@ -40,7 +40,14 @@
 
     The [status] field must be exactly ["success"] or ["failed"]; any other
     value (including the empty string produced by a missing field) causes an
-    immediate test failure with a diagnostic (QG-5). *)
+    immediate test failure with a diagnostic (QG-5).
+
+    When [CABAL_MOCK_AGENT_PROMPT_LOG] points to a writable path, every
+    [run_task] invocation appends one NDJSON line containing the full incoming
+    prompt plus generic backend metadata ([working_dir], [model],
+    [resume_session_id], and [timestamp]).  This is a backend-test affordance:
+    writes are best-effort, append-only, and happen before fixture matching so
+    unmatched prompts are still observable. *)
 
 (** Registry identifier: ["mock-agent"]. *)
 val id : string
@@ -122,7 +129,22 @@ val check_project_config :
   Agentic_backend.config_check_result
 
 (** Match [task_spec.prompt] against fixture rules and return the canned
-    result.  Fails the task (with a diagnostic) when no rule matches. *)
+    result.  Fails the task (with a diagnostic) when no rule matches.
+
+    {pre}
+    [CABAL_MOCK_AGENT_FIXTURES] (or the legacy alias) points to a JSON fixture
+    file when the caller expects a successful match.
+
+    {post}
+    If [CABAL_MOCK_AGENT_PROMPT_LOG] is set, appends one best-effort NDJSON
+    prompt-capture line before fixture matching.  Returns the first available
+    matching fixture response, or a failed task result with a diagnostic.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
 val run_task :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
