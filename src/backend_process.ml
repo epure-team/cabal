@@ -259,9 +259,9 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
       ~sw
       proc_mgr
       ~cwd:Eio.Path.(fs / working_dir)
-      ?stdin:(Option.map (fun r -> (r :> _ Eio.Flow.source)) stdin_r)
-      ~stdout:(stdout_w :> _ Eio.Flow.sink)
-      ~stderr:(stderr_w :> _ Eio.Flow.sink)
+      ?stdin:(Option.map (fun r -> (r :> Eio.Flow.source)) stdin_r)
+      ~stdout:(stdout_w :> Eio.Flow.sink)
+      ~stderr:(stderr_w :> Eio.Flow.sink)
       cmd
   in
   (* Register PID with resource guardian for memory-pressure killing *)

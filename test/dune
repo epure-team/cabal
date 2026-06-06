@@ -100,6 +100,11 @@
  (modules test_backend_config_writer))
 
 (test
+ (name test_virtual_workspace)
+ (libraries cabal alcotest str)
+ (modules test_virtual_workspace))
+
+(test
  (name test_resource_guardian)
  (libraries cabal alcotest)
  (modules test_resource_guardian))
