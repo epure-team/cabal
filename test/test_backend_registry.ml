@@ -354,11 +354,19 @@ let project_root () =
       walk (Sys.getcwd ())
 
 let investigation_note_path backend_id =
-  Filename.concat
-    (project_root ())
-    (Printf.sprintf
-       "libs/cabal/docs/native-json-schema-investigation/%s.md"
-       backend_id)
+  let root = project_root () in
+  let standalone =
+    Filename.concat
+      root
+      (Printf.sprintf "docs/native-json-schema-investigation/%s.md" backend_id)
+  in
+  if Sys.file_exists standalone then standalone
+  else
+    Filename.concat
+      root
+      (Printf.sprintf
+         "libs/cabal/docs/native-json-schema-investigation/%s.md"
+         backend_id)
 
 let read_note backend_id =
   let path = investigation_note_path backend_id in

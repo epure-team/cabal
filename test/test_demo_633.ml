@@ -55,9 +55,15 @@ let project_root () =
       walk (Sys.getcwd ())
 
 let investigation_note_path () =
-  Filename.concat
-    (project_root ())
-    "libs/cabal/docs/native-json-schema-investigation/copilot-cli.md"
+  let root = project_root () in
+  let standalone =
+    Filename.concat root "docs/native-json-schema-investigation/copilot-cli.md"
+  in
+  if Sys.file_exists standalone then standalone
+  else
+    Filename.concat
+      root
+      "libs/cabal/docs/native-json-schema-investigation/copilot-cli.md"
 
 let read_file path =
   let ic = open_in path in
