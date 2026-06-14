@@ -3,91 +3,43 @@
 > Status: Proposal (branch `feat/prompt-lang`)
 > Author: prompt-lang working group
 > Target: `src/prompt_lang/` in `cabal`, with a companion Rocq development under `formal/`
-> Revision: iteration 4 (addresses third-round adversarial review — see Section 14 for a changelog)
+> Revision: iteration 5 (restructure: portability and reuse lead; formal verification in §7 supplement)
 
-CPL is an OCaml-embedded, typed, composable language for constructing prompts for
-LLM agents. A CPL value is not a `string`; it is a typed value that *compiles* to a
-Cabal `task_spec` (and to other backend targets) under a set of statically enforced
-construction invariants.
+CPL is an OCaml-embedded typed language for building **backend-portable, reusable, typed
+prompts** for LLM agents. A CPL value is not a `string`; it is a structured value that
+*compiles* to a Cabal `task_spec`, a Claude Workflow `agent()` call, or any registered model
+backend — under statically checked construction invariants.
 
-The central guarantee is **construction-time injection containment**, stated precisely
-(and with deliberate restraint) as follows:
+Three properties drive the design:
 
-> In any well-typed CPL prompt, every fragment that originates from an untrusted data
-> source and is placed in the instruction stream has passed through the single `fenced`
-> coercion, and is therefore rendered exclusively inside the backend's `quote_data`
-> escaping function. So long as `fenced` is the only `untrusted → trusted` coercion the
-> `.mli` exposes, there is no other path from the data tier into the instruction stream.
+1. **Backend portability.** Cabal ships five adapters (`claude_code`, `codex_cli`,
+   `gemini_cli`, `opencode_cli`, `copilot_cli`). Model families disagree on prompt format
+   (XML tags vs. plain prose vs. Markdown headers). A CPL prompt *defers rendering* to a
+   backend functor; the same authored value compiles to the appropriate dialect for each
+   target. You maintain one prompt, not five copies.
 
-**What kind of guarantee this is — read this before citing it.** The injection-containment
-property is an **OCaml abstraction-barrier property**, not a theorem about the shipping code.
-Its enforcement rests on two things the Rocq proof does *not* cover, and the document no
-longer implies it does:
+2. **Typed reusable interface.** Prompts are first-class OCaml values. They compose under
+   `<+>` (a monoid with identity and associativity), parameterize over typed bindings, and
+   live in modules that can be shared across agents, skills, and projects. A prompt function
+   declares its inputs; the type system rejects a caller that forgets to supply them or
+   supplies data in the wrong tier. Skills (§9) are a special case: named prompt functions
+   with a declared interface, not a separate mechanism.
 
-1. `('tier, 'comp) prompt` is **abstract** in `cpl_types.mli` (Section 3.3), so clients
-   cannot fabricate a `trusted` prompt around untrusted fragments. This is verified by
-   compiling the laundering attack against both a concrete and an abstract type (Section 12,
-   fact 3).
-2. **Every constructor in the real `cpl_types.ml` must preserve the discipline** — in
-   particular, no constructor may return a `(trusted, _) prompt` built from untrusted
-   fragments except `fenced`, which forces `quote_data`. This is a **per-constructor review
-   obligation** (Section 8.1 checklist). It has **zero proof coverage**: the Rocq model is a
-   *model-level corroboration* of the typing discipline, not a verification of the OCaml. If a
-   future constructor leaks an unfenced untrusted fragment into `trusted` position, the
-   guarantee breaks and neither the proof nor the (unbuilt) harness would catch it today.
+3. **Deterministic lowering.** CPL compilation is a deterministic compiler pass — same
+   source, same output, every time. This is the prerequisite for Cabal's on-disk replay
+   ledger to remain reproducible end-to-end. DSPy-style stochastic search over prompt space
+   is explicitly rejected (§1.2).
 
-So the guarantee is real and is the load-bearing safety property, but it is enforced by an
-abstraction barrier plus human review of a small constructor set — corroborated, not
-verified, by Rocq. We state this rather than letting the headline imply a closed proof of the
-shipping artifact.
+A fourth property falls out of the structural decisions above: **injection containment by
+construction.** Because `Binding` fragments are syntactically distinct from `Prose`
+instructions at the type level, the type system enforces that untrusted data cannot enter the
+instruction stream without being fenced and escaped. This is an OCaml abstraction-barrier
+property, enforced by the abstract type `('tier, 'comp) prompt` in `cpl_types.mli`. Section 7
+contains the Rocq model that corroborates the typing discipline; read the §7 header before
+citing the guarantee.
 
-Read the negative space carefully, because the previous revision of this document
-overstated the guarantee and the correction matters:
-
-- CPL does **not** prove that untrusted data never *appears textually* in the instruction
-  stream. A fenced block is still inside the prompt; the model can still read it. What CPL
-  proves is that such data is always *marked and escaped as data* — never spliced raw into
-  the instruction lexical space.
-- CPL does **not** prove the model honors the code/data boundary (no construction-time
-  system can; see Section 7.6).
-- CPL does **not** prove any particular backend's `quote_data` escaping is itself correct;
-  that is a per-backend test obligation (Section 6.3), not part of the core theorem.
-
-A subset of the type system is mirrored in Rocq and the containment property is proved
-there. **The Rocq proof is complete and machine-checked, not `Admitted`** — committed at
-`formal/Cpl.v`, both `injection_safe` and `injection_safe_list` close with `Qed.` under
-Rocq 9.1.1, and `Print Assumptions` reports "Closed under the global context" (no axioms)
-for each. Two scoping facts must be stated up front so the prose does not exceed the proof:
-
-- **The proof is about an abstract `has_ty` judgment over hand-built trees, not the shipping
-  OCaml.** It corroborates the typing discipline; it does not verify `cpl_types.ml`
-  (see the abstraction-barrier note above). The bridge connecting the two (Section 7.5) is
-  **designed but unbuilt**.
-- **The top-level safety object is a `frag list`, not a single `frag`.** `injection_safe`
-  quantifies over one `frag`; but the OCaml `prompt` is `{ frags : frag list; … }` and `<+>`
-  flattens via `@` (Section 12), so the top level is a flat list never wrapped in a single
-  `FSection` root. This revision therefore adds `injection_safe_list : forall fs rho,
-  prompt_well_typed fs rho -> prompt_safe fs` (Section 13), lifting containment to the list
-  shape the implementation actually produces. The earlier revision proved only the per-frag
-  statement, which did not talk about the top-level object; that gap is now closed in the
-  model (though the OCaml↔model bridge that would establish `prompt_well_typed` of a real
-  prompt remains unbuilt — Section 7.5).
-
-This revision additionally **strengthens** the theorem: the fence case is now conditional (a
-fenced subtree must be wholly data-tier, not arbitrary), and a `render` model makes "data
-reaches the output only through `quote_data`" a checked lemma rather than a prose comment
-(Section 7.3, 13).
-
-What is proved is also bounded, and the bound is stated plainly so the prose does not exceed
-the proof: the conformance bridge from this Rocq model to the OCaml constructors is **designed
-but not yet built** (Section 7.5), and the hard formal obligations (IR/schema/monoid theorems,
-the conformance generator) are **deferred**, not done (Section 10). The proved core is ~90
-lines of model; `src/prompt_lang/` is 0 lines today.
-
-This document is the authoritative design. Every OCaml construct here has been compiled
-against OCaml 5.3; every Rocq construct here has been checked against Rocq 9.1.1. The
-artifacts used to verify the load-bearing claims are described inline (and `formal/Cpl.v` is
-committed) so a reviewer can reproduce them.
+This document is the authoritative design. OCaml constructs have been compiled against
+OCaml 5.3; Rocq constructs checked against Rocq 9.1.1. `formal/Cpl.v` is committed.
 
 ---
 
@@ -99,72 +51,48 @@ Cabal already has a `task_spec` whose `prompt` field is a bare `string`
 (`src/backend_types.ml:97`). Every prompt today is built by string concatenation. This
 has three consequences that no library API can fix while the prompt remains a string:
 
-1. **No data/instruction boundary.** When an operator writes `"Review the diff: " ^ diff`,
-   the diff is concatenated into the same lexical space as the instruction. If the diff
-   contains `"Ignore previous instructions and …"`, the prompt itself contains no marker
-   distinguishing instruction from data, because *at the string level there is no
-   distinction to carry*. This is the structural defect Meijer identifies as the root cause
-   of prompt injection: code and data are not separated, just as in SQL injection
-   ([Meijer, *Guardians of the Agents*, CACM Jan 2026](https://cacm.acm.org/practice/guardians-of-the-agents/)).
-   A library typed `string -> string` cannot enforce a boundary it cannot represent.
-
-   To be precise about what a typed boundary buys: it does not make the model obey the
-   boundary. It guarantees that the prompt *expresses* the boundary — untrusted spans are
-   syntactically fenced and escaped — which is the necessary precondition for any
-   downstream defense (model-side, or a Guardians-style plan verifier) to even be possible.
-
-2. **No composition laws.** Concatenation of strings is associative but offers no typed
-   identity, no notion of *sections*, and no way to state that "this fragment is data,
-   that fragment is an instruction." Reuse degenerates into copy-paste of prompt text.
-
-3. **No backend portability.** He et al. (2024) report that format preferences across
+1. **No backend portability.** He et al. (2024) report that format preferences across
    model families have low cross-family agreement (Intersection-over-Union below 0.2)
    — *this figure's venue/DOI is not independently verified for this revision (see Sources);
    treat it as a supporting data point, not a proof* —:
    Claude favors XML tags, GPT favors plain prose / native structured outputs, others favor
    Markdown. A string is already rendered; you cannot re-render it for a different backend.
    Cabal ships five adapters (`claude_code`, `codex_cli`, `gemini_cli`, `opencode_cli`,
-   `copilot_cli`) and a string prompt is a least-common-denominator artifact for all of
-   them.
+   `copilot_cli`) and a string prompt is a least-common-denominator artifact for all of them.
+
+2. **No typed reusable interface.** Concatenation of strings is associative but offers no
+   typed identity, no notion of *sections*, and no way to declare that "this argument is a
+   diff," "that argument is a task description." Prompt functions cannot declare their
+   inputs; callers cannot be type-checked. Reuse degenerates into copy-paste of prompt text,
+   with no way to guarantee callers supply the right data.
+
+3. **No data/instruction boundary.** When an operator writes `"Review the diff: " ^ diff`,
+   the diff is concatenated into the same lexical space as the instruction. If the diff
+   contains `"Ignore previous instructions and …"`, the prompt itself contains no marker
+   distinguishing instruction from data, because *at the string level there is no
+   distinction to carry*. A library typed `string -> string` cannot enforce a boundary it
+   cannot represent.
 
 A *language* — even an embedded one — gives us a typed intermediate representation that
-carries trust tier, section structure, and output schema as data, and *defers rendering*
-to a backend. That is the irreducible reason this is a language and not a helper module.
+carries section structure, binding types, and output schema as data, and *defers rendering*
+to a backend functor. That is the irreducible reason this is a language and not a helper module.
 
-### 1.2 The injection problem and its scoped formal solution
+### 1.2 Typed, composable, backend-portable interface
 
-We adopt the code/data separation thesis directly, scoped to prompt *construction*. CPL
-fragments are partitioned into two tiers at the type level:
-
-- **Instruction tier** (`Prose`): operator-authored text. Trusted. Unconstrained. This is
-  the model's *reasoning space*.
-- **Data tier** (`Binding`): a typed reference to external or workflow-supplied context.
-  Untrusted by default. Rendered into a syntactically fenced, escaped region that the
-  backend marks as data.
-
-The phantom-type discipline (Section 3.3) makes it a *compile-time type error* to place a
-`Binding` fragment where an instruction is expected, and forces every `Binding` through a
-backend-specific quoting/fencing renderer. The formal counterpart (Section 7, proved in
-Section 13) establishes that a well-typed CPL prompt has no unfenced untrusted data leaf in
-instruction position.
-
-This is deliberately weaker than Meijer's full symbolic-plan-plus-SMT verifier, and that
-is the correct scope. Meijer verifies *tool-call plans*; CPL verifies *prompt
-construction*. The two are complementary: CPL guarantees the prompt handed to the agent
-expresses a clean code/data boundary; a Guardians-style verifier (out of scope here) would
-guarantee the agent's *resulting plan* is safe. Neither, alone, guarantees the model
-behaves — that gap is stated explicitly in Section 7.6 and is not papered over.
-
-### 1.3 The composability payoff (realistic scope)
-
-CPL prompts form a **monoid** under composition (Section 2.3). This buys:
+CPL prompts form a **monoid** under composition (Section 2.3). This delivers:
 
 - Named, reusable prompt fragments (a "code review preamble," a "structured-report
   contract") that compose by `<+>` with associativity and identity.
 - Prompt *functions*: typed `inputs -> prompt` values whose input bindings are declared,
-  so a caller cannot forget to supply the diff, and cannot supply it in the wrong tier.
+  so a caller cannot forget to supply a required argument, and cannot supply it in the
+  wrong tier.
+- **Backend-adaptive rendering**: the same prompt function compiles to Claude XML tags for
+  `claude_code`, plain prose for `codex_cli`, Markdown for `gemini_cli` — the backend
+  functor (Section 6) handles format translation, not the author.
 - Skills (Section 9) as a *special case* of named prompt functions — not a separate
   mechanism.
+- Multi-model strategy as a first-class concern: different phases of a pipeline can use
+  different backends by passing a different functor instance, with zero prompt-level changes.
 
 We explicitly do **not** claim DSPy-style "compilation" — i.e., search over prompt space
 against labeled data ([DSPy, ICLR 2024](https://arxiv.org/abs/2310.03714)). DSPy
@@ -172,6 +100,31 @@ compilation is stochastic optimization requiring a training set. CPL compilation
 deterministic lowering: CPL value → IR → backend artifact. Determinism is a feature here;
 Cabal's runner already persists an on-disk ledger for replay determinism, and a
 nondeterministic prompt compiler would break that.
+
+### 1.3 Injection containment as a structural corollary
+
+We adopt the code/data separation thesis (Meijer, CACM 2026), scoped to prompt
+*construction*. CPL fragments are partitioned into two tiers at the type level:
+
+- **Instruction tier** (`Prose`): operator-authored text. Trusted. Unconstrained. This is
+  the model's *reasoning space*.
+- **Data tier** (`Binding`): a typed reference to external or workflow-supplied context.
+  Untrusted by default. Rendered into a syntactically fenced, escaped region that the
+  backend marks as data.
+
+This partition is structural: it follows from how the monoid and backend functor work, not
+from a separate injection-defense layer. The phantom-type discipline (Section 3.3) makes it
+a *compile-time type error* to place a `Binding` fragment where an instruction is expected,
+and forces every `Binding` through a backend-specific quoting/fencing renderer. The formal
+counterpart (Section 7, proved in Section 13) establishes that a well-typed CPL prompt has
+no unfenced untrusted data leaf in instruction position.
+
+This is deliberately weaker than Meijer's full symbolic-plan-plus-SMT verifier, and that
+is the correct scope. Meijer verifies *tool-call plans*; CPL verifies *prompt
+construction*. The two are complementary: CPL guarantees the prompt handed to the agent
+expresses a clean code/data boundary; a Guardians-style verifier (out of scope here) would
+guarantee the agent's *resulting plan* is safe. Neither, alone, guarantees the model
+behaves — that gap is stated explicitly in Section 7.6 and is not papered over.
 
 ### 1.4 Relationship to existing work
 
@@ -829,7 +782,17 @@ consistent with CRANE's interleaving. Backends without such support ignore the h
 
 ---
 
-## 7. Rocq Verification Plan
+## 7. Formal Model Corroboration (Rocq supplement)
+
+> **Skip note.** This section is supplementary reference material for readers interested
+> in the formal backing of the injection-containment property. If you are primarily
+> interested in CPL's practical typed interface, composition model, or backend portability,
+> skip directly to §8 (Cabal integration). Nothing in §8–§11 depends on reading §7.
+>
+> **Guarantee scope.** The Rocq proof corroborates the typing discipline at the model level.
+> It does not verify `cpl_types.ml` — that guarantee rests on the OCaml abstraction barrier
+> (`('tier, 'comp) prompt` abstract in `.mli`) plus per-constructor review (§8.1 checklist).
+> The conformance bridge connecting Rocq to OCaml is designed but unbuilt (§7.5).
 
 The Rocq development lives in `formal/Cpl.v` (committed on this branch alongside
 `formal/_CoqProject`; the core theorem is done, the remaining lemmas are Phase 6). It mirrors
@@ -1892,6 +1855,246 @@ conformance harness (2b), the IR/schema/monoid Rocq theorems (Phase 6), and the 
 binding-resolution boundary remain designs. Additionally, the model↔OCaml conformance bridge
 remains unbuilt — `injection_safe_list` closes the per-frag-vs-list gap *in the model* but
 does not establish `prompt_well_typed` for a concrete compiled prompt; that is Phase 2b.
+
+---
+
+## 15. Ecosystem Integration: CWR, Roster, Epure
+
+CPL is a Cabal library, but its primary consumers are the three layers of the Epure
+agentic stack. This section describes how CPL fits each layer concretely, what changes
+at each integration boundary, and what remains unchanged.
+
+### 15.1 CWR (cabal-workflow-runner)
+
+CWR is the deterministic workflow engine. It dispatches agent steps by handing a prompt
+string to `Backend.t.run_agent` and recording the result in an append-only NDJSON ledger
+for replay. CPL touches CWR at three points.
+
+**Accurate starting point (what CWR does today).** A CWR agent step carries a required
+`"prompt"` string (`lib/workflow_schema.ml`: `~required:["kind";"id";"prompt"]`,
+`lib/workflow_json.ml`: `req_string "prompt"`) plus optional `protocol`, `brief`, and
+`output_schema` fields:
+
+```json
+{ "kind": "agent", "id": "analyze",
+  "prompt": "Review the diff and report a verdict and risk score.",
+  "output_schema": { "verdict": "string", "risk": "int" } }
+```
+
+There is **no variable-substitution mechanism** in CWR — no `${...}` expansion, no
+`bindings`, no `skill`, no `ref` field anywhere in the engine or schema. At dispatch the
+engine builds the effective prompt by literal concatenation of the (optionally
+file-loaded) `protocol`, `brief`, and `prompt` parts joined with `"\n\n"`
+(`lib/engine.ml`); the result is handed to `Backend.t.run_agent` as a single string.
+Dynamic content reaches a prompt only because an operator has already concatenated it into
+one of those fields by hand before the step runs. The injection surface, today, is
+therefore *authoring-time* string assembly, not a runtime interpolation feature.
+
+**What CPL proposes (a format change, not an additive no-op).** CPL would let a step
+reference a named prompt function and supply its inputs as typed, fenced bindings rather
+than as pre-concatenated prose:
+
+```json
+{ "kind": "agent", "id": "analyze",
+  "skill": "code-review",
+  "bindings": { "diff": { "ref": "outputs.fetch.diff" } } }
+```
+
+This is **not** backward-compatible at the format level and must be scoped honestly:
+
+- The workflow JSON is a human-authored contract. Adding `skill`/`bindings` and relaxing
+  the currently-required `"prompt"` field is a **schema change requiring a version bump**
+  to `lib/workflow_schema.ml` and the parser in `lib/workflow_json.ml`. A step that omits
+  `"prompt"` fails validation today.
+- Folding `output_schema` into the CPL prompt function's type (`('t, complete) prompt`)
+  removes a field that is currently live: it is parsed, round-tripped, and consumed by the
+  lint pass (`missing-output-schema`, `dangling-output-ref`). Removing it from the
+  human-readable format is a **breaking change to that format and to the lint surface**,
+  not a transparent internal retype.
+- A migration path is required: existing `"prompt"`-only steps must continue to parse
+  (treated as a degenerate `Prose`-only prompt with no bindings), and tooling must rewrite
+  or dual-read both forms across the transition. This is **designed, not yet implemented.**
+
+The intended *engine-level* payoff is that `Backend.t.run_agent` would receive a rendered
+string plus an attached schema (a `Cpl.compiled_prompt`) instead of relying on a separate
+`output_schema` field, so the schema travels with the prompt and is returned as part of
+`task_result`. That payoff is real but is gated on the format change above.
+
+**Replay safety.** CPL compilation is deterministic: the same typed prompt value plus the
+same resolved bindings always renders to the same string for a given backend. Crucially,
+**binding resolution happens at live-run time, before the rendered string is recorded.**
+A binding sourced from `ctx` (e.g. `outputs.fetch.diff`) is resolved into a concrete value
+during the live walk; the engine then records the *rendered* string in the ledger (the
+`Agent_ran` trace entry). Replay never re-invokes the CPL compiler or re-resolves
+bindings — it re-feeds the recorded output directly. Replay safety thus holds *because of
+this resolve-then-record ordering*, not merely because "CPL is outside the replay
+boundary." If resolution could happen at replay time, determinism would not be guaranteed;
+it does not, so it is.
+
+**`to-claude-workflow` compiler — correcting the record.** The CWR→JS compiler
+(`lib/compiler.ml`) is **already schema-aware today.** When `output_schema` is present it
+emits `await agent("…", {label: "…", schema: …, agentType: …})` with the reasoning prose
+(protocol, then brief, then prompt) concatenated *before* the schema — the CRANE-style
+ordering described in §4.4. The compiler emits no "missing-schema" notes; its `add_note`
+diagnostics are for unreadable protocol/brief files, unpreserved commit tokens, unpreserved
+run allowlist/replay, and ungoverned loops. CPL therefore does **not** add schema-awareness
+that is missing — it relocates the schema's *source of truth* from a separate JSON field to
+the prompt function's type. The compiler would consume the schema from the
+`Cpl.compiled_prompt` instead of from `output_schema`; the emitted JS shape is unchanged.
+No diagnostic class is eliminated, because none was missing.
+
+**Lint and validate.** CWR's lint pass would gain one new diagnostic: a `"skill"` field
+referencing an unknown CPL prompt function in the Cabal registry. The right severity for
+this is a **`dangling-skill-ref` warning**, matching the existing `dangling-output-ref`,
+which is a `Warning`, **not** an error (`lib/lint.ml`; `lib/lint.mli` documents it as
+"legal + runnable, but a generator likely erred"). This distinction is load-bearing in
+CWR: errors fail the `validate` floor, warnings do not. A dangling skill reference is a
+likely-mistaken-but-not-unrunnable condition, so it belongs at the warning tier. Note also
+that this is not a pure simplification of the lint surface: if `output_schema` moves into
+the prompt type, the existing `missing-output-schema` / `dangling-output-ref` field-checks
+must be re-expressed against the schema carried in the prompt function, not removed.
+
+### 15.2 Roster (agent-roster)
+
+Roster is the multi-phase pipeline that takes a task description and produces a
+CWR-executable workflow through sequential phases: question → research → intake → spec →
+plan → implement → review → qa → ship. Each phase is currently a markdown file with a
+YAML frontmatter header and prose instructions. CPL formalizes the interface every phase
+already has informally.
+
+**Skills as typed prompt functions (designed, not yet implemented).** A Roster skill is
+today a markdown file whose prose body is the instruction text and whose YAML frontmatter
+declares metadata (name, version, phase, model); the pipeline substitutes the task into
+the markdown as a `${TASK}` variable and an LLM reads the resulting document. The proposal
+is to re-express each phase as a CPL value:
+
+- The prose body becomes a sequence of `Prose` fragments — operator-authored, trusted,
+  unconstrained reasoning space.
+- The task description (user-provided input, today the `${TASK}` substitution) becomes a
+  `Binding` at the data tier — rendered as a fenced, escaped data block rather than spliced
+  inline into the instruction text.
+- The brief files that phases produce and consume become the typed output schema of each
+  phase's CPL prompt function.
+
+The target signature for a phase would be:
+
+```ocaml
+val roster_implement : task:string binding -> files:(string list) binding
+                    -> (trusted, complete) prompt
+```
+
+Two honest caveats about scope:
+
+- **This is a migration, not a relabeling.** Today's phases are markdown files invoked by
+  an LLM-driven pipeline, not OCaml call sites. There is no OCaml caller type-checking the
+  arguments yet. Realizing the signature above means porting each markdown skill to a CPL
+  value and introducing an OCaml (or registry-mediated) caller that supplies the bindings —
+  this is part of the Phase 5 skill-registry work, not current behavior.
+- **The isolation benefit is lexical, not enforced by a second parser.** The consumer
+  remains a single LLM reading one merged document: it sees instructions and fenced task
+  data in the same context. Fencing changes the *presentation* (a delimited, escaped data
+  block instead of inline interpolation), which removes structural splicing and forgotten
+  arguments at construction time. It does **not** create a runtime isolation boundary the
+  model enforces — a model can still be induced to treat fenced content as instructions.
+  The type-system wins here are real but bounded: the caller cannot forget to supply
+  `task`, cannot supply it as trusted `Prose`, and the source distinguishes external
+  (Untrusted) task data from the phase's own (Trusted) instructions.
+
+**Multi-model rendering per phase (CPL design construct).** Roster today selects a single
+model/backend per invocation via the CWR-level `CWR_MODEL` / `CWR_BACKEND` environment
+variables (`bin/backend_cabal.ml`) — that part is accurate to current behavior. The
+`ModelBackend` / `HaikuBackend` / `OpusBackend` functors described here have **no presence
+in CWR today**; they are a CPL design proposal. The idea: the same CPL skill lowers through
+a chosen backend functor to a concise Haiku rendering for cheap phases (intake, triage) or
+a verbose Opus rendering for expensive phases (implement, review), with model-specific
+preferences (verbosity, schema encoding, section markers) encoded in the functor rather
+than copied into each skill.
+
+This is not "prompt optimization" in the DSPy sense (no search, no labeled data). It is
+deterministic rendering: the same typed CPL value lowered through a different backend
+functor. The rendering difference is a tunable in the backend, not a learned parameter.
+
+One consequence to flag for the replay boundary discussed in §15.1: per-model rendering
+divergence is only replay-safe because the *rendered* string (the output of the chosen
+functor) is what the ledger records. The backend selection must therefore be fixed before
+the string is recorded; choosing a different functor changes the dispatched string and is,
+by construction, a different run — not something a replay can silently alter.
+
+**Typed pipeline handoffs.** The Roster pipeline's inter-phase handoff is today a file
+path convention: phase N writes `briefs/<task>-intake.md` and phase N+1 reads it. With
+CPL the brief file's *schema* becomes part of the typing: the intake phase's output
+schema declares the fields the plan phase expects as bindings. A future `roster-doctor`
+check can verify that the pipeline's inter-phase types are consistent — catching a
+handoff mismatch at pipeline-definition time rather than at execution time when a brief
+field is missing.
+
+This is a **designed integration, not yet implemented**. The file-path convention
+continues to work during the CPL migration; the typed handoff is an additive improvement
+once Phase 5 (skill registry) is complete.
+
+### 15.3 Epure platform
+
+Epure is the broader platform built on Cabal and CWR. Multiple subsystems (Roster,
+direct Cabal calls, CWR workflows, ad-hoc agent scripts) all construct and dispatch
+prompts today through independent, uncoordinated mechanisms. CPL's platform-level value
+is coordination: a single typed substrate that all subsystems share.
+
+**Shared skill registry.** The Cabal skill registry (§9.2) is a global map from skill
+name to `('t, complete) prompt` function. Any Epure subsystem — Roster phase, CWR agent
+step, direct Cabal dispatch — can reference a named skill. A skill authored once for
+Roster's implement phase is callable from a CWR workflow or from an ad-hoc Cabal script
+without copying its prompt text. The interface is the OCaml type; backward-compatible
+evolution is type-checked.
+
+**Cross-agent composability (designed; the substrate is untyped today).** When agent A
+produces an output that agent B uses as context, agent B today receives that output as
+plain, untyped JSON. In CWR, `Backend.run_agent` returns `bool * Yojson.Safe.t`
+(`backend.mli`, `bin/backend_cabal.ml`), and `report.raw_json` is untyped — there is **no
+typed output value and no trust-tier tagging at the CWR/Cabal boundary today.** Whatever
+incorporates A's output into B's prompt does so by handling that raw JSON.
+
+CPL's proposal is to type this handoff: agent A's `task_result` would carry a typed output
+value (§8.3 of this design — cross-reference unverified, see the caveat at the end of this
+section), and agent B would receive it as a `Binding` carrying an Untrusted trust tier
+(data from an external agent). The fencing discipline would then apply at the inter-agent
+boundary the way it applies at the user-input boundary. This requires the typed
+`task_result` substrate to exist first; it does not today.
+
+The honest scope of the defense this buys: CPL's fencing is a **structural** property of
+prompt *construction* — untrusted content is emitted as a delimited data block rather than
+spliced into instruction space. It prevents structural splicing at each construction site,
+including each inter-agent hop where a CPL prompt is built. It is **not** a transitive,
+end-to-end runtime guarantee that "every piece of data crossing an agent boundary is
+fenced regardless of how many hops it has made": each hop's fencing holds only if that hop
+constructs its prompt through CPL, and fencing does not stop a downstream model from being
+*induced* to treat fenced data as instructions — that is a model-behavior problem, not a
+parsing one (see "What CPL does not solve" below). A Meijer-style plan verifier (out of
+CPL's scope) would operate on the resulting typed plan; CPL's contribution is that, where
+it is used, the plan is *expressed* with clean structural boundaries.
+
+**Multi-model strategy as a first-class concern.** Epure orchestrates agents across
+model tiers: Haiku for cheap/fast classification, Sonnet for standard work, Opus for
+critical reasoning, specialist models (Codex, Gemini) for domain-specific tasks. Today
+this orchestration is ad-hoc (environment variables, adapter selection logic). CPL's
+backend functor would make it structural: a prompt function compiled through `HaikuBackend`
+produces a rendering optimized for Haiku; the same function through `OpusBackend`
+produces a more verbose reasoning-eliciting rendering. The dispatch layer (Cabal registry,
+CWR `agent_type` field) selects the backend; the prompt author does not need to know.
+(As in §15.2, these functors are a CPL design construct, not present in CWR today.)
+
+**What CPL does not solve at the platform level.** Semantic coherence across composed
+agents — whether agent B's instructions are compatible with agent A's output — is not
+captured by the type system. Types prevent structural injection and enforce schema
+contracts; they do not verify that two agents' prose instructions do not contradict each
+other. That is a human review obligation, not a proof obligation, and this document does
+not imply otherwise.
+
+**Cross-reference caveat.** Claims in this section that lean on §8.3 (typed `task_result`),
+§9.2 (skill registry), and §4.4 (CRANE ordering) describe CPL's *intended* substrate. The
+CWR-side facts above (untyped `Yojson.Safe.t` outputs, the already-schema-aware compiler,
+the required `"prompt"` field, the warning-tier lint) are verifiable in this repository and
+are stated as current; the CPL-side internal cross-references are part of the same design
+document and are realized only as those sections are implemented.
 
 ---
 
