@@ -38,6 +38,15 @@ property, enforced by the abstract type `('tier, 'comp) prompt` in `cpl_types.ml
 contains the Rocq model that corroborates the typing discipline; read the §7 header before
 citing the guarantee.
 
+A note on where this document spends its evidence. The two lead properties (portability,
+typed reuse) are argued at the *design* level (§§5, 6, 15); the machine-checked and
+code-backed material — the Rocq corroboration (§7, §13) and the compiled OCaml phantom
+sketch (§12) — is overwhelmingly about injection containment. That asymmetry is intentional
+and disclosed: containment is the property with a falsifiable formal counterpart, whereas
+portability and reuse are substantiated by the existing five-adapter Cabal surface rather
+than by proof. The lead reflects what CPL is *designed around*; it does not claim the lead
+properties carry the most proof.
+
 This document is the authoritative design. OCaml constructs have been compiled against
 OCaml 5.3; Rocq constructs checked against Rocq 9.1.1. `formal/Cpl.v` is committed.
 
@@ -112,8 +121,13 @@ We adopt the code/data separation thesis (Meijer, CACM 2026), scoped to prompt
   Untrusted by default. Rendered into a syntactically fenced, escaped region that the
   backend marks as data.
 
-This partition is structural: it follows from how the monoid and backend functor work, not
-from a separate injection-defense layer. The phantom-type discipline (Section 3.3) makes it
+This partition is structural, but it is *not* a property of the monoid: the monoid `<+>`
+(Section 2.3) only ever combines operands that are already trusted (or incomplete), and
+computes no join — an untrusted value simply has the wrong type to reach it. The containment
+comes from two things the monoid does not provide: (a) the abstract `('tier,'comp) prompt`
+barrier in `cpl_types.mli`, which makes `fenced` the *sole* untrusted→trusted coercion, and
+(b) the per-constructor review obligation on that one chokepoint (Sections 3.3, 7.5, 8.1).
+The phantom-type discipline (Section 3.3) makes it
 a *compile-time type error* to place a `Binding` fragment where an instruction is expected,
 and forces every `Binding` through a backend-specific quoting/fencing renderer. The formal
 counterpart (Section 7, proved in Section 13) establishes that a well-typed CPL prompt has
@@ -1856,6 +1870,33 @@ binding-resolution boundary remain designs. Additionally, the model↔OCaml conf
 remains unbuilt — `injection_safe_list` closes the per-frag-vs-list gap *in the model* but
 does not establish `prompt_well_typed` for a concrete compiled prompt; that is Phase 2b.
 
+### Iteration 5 — restructure (portability and reuse lead)
+
+**No fatal flaws raised.** This iteration is a framing restructure, not a correctness fix:
+the verified material (Sections 7, 12, 13) is unchanged, and no Cabal/CWR source fact was
+revised. The change is *where the document places its lead claims*, so the audit trail below
+records what moved and why, not which proof changed.
+
+**Changes made:**
+
+- *Preamble restructured.* Portability and the typed reusable interface now lead; injection
+  containment is reframed from the primary guarantee to a structural corollary of the
+  abstract-type barrier. The machine-checked evidence (Sections 7/12/13) still substantiates
+  the injection story most heavily — the lead now states the two properties CPL is *designed
+  around*, not the one property it has the most proof for, and this asymmetry is called out
+  rather than hidden.
+- *Section 1.1 problem order.* Reordered to portability first, typed interface second,
+  injection third, matching the new lead.
+- *Sections 1.2 and 1.3 renamed and swapped.* Composability/portability is now §1.2;
+  injection containment is now §1.3. The §1.3 lead was corrected: containment is *not*
+  derivable from the monoid (which never sees an untrusted operand) — it rests on the
+  abstract `prompt` barrier, the `fenced`-only chokepoint, and the per-constructor review
+  obligation (Sections 3.3, 7.5, 8.1).
+- *Section 7 renamed* to mark it as a formal *supplement* (corroboration, not verification of
+  the shipping OCaml), with a skip note for readers who do not need the Rocq corroboration.
+- *Section 15 (Ecosystem Integration: CWR, Roster, Epure) added*, describing how CPL fits
+  each layer of the Epure stack, verified against CWR source.
+
 ---
 
 ## 15. Ecosystem Integration: CWR, Roster, Epure
@@ -1931,13 +1972,24 @@ this resolve-then-record ordering*, not merely because "CPL is outside the repla
 boundary." If resolution could happen at replay time, determinism would not be guaranteed;
 it does not, so it is.
 
+One touch-point this exposes for the `output_schema` migration above: replay is not a
+pure re-feed. On a successful agent step the replay path re-validates the recorded output
+against `output_schema` (`lib/engine.ml`, `Schema.validate schema output`). So if the
+schema moves into the CPL prompt function's type, the replay validator is part of the
+migration's blast radius alongside the parser, lint pass, and compiler — replay must
+obtain the schema from the recorded `Cpl.compiled_prompt` rather than from a separate
+`output_schema` field. This does not weaken replay determinism (the recorded output is
+unchanged); it is an additional consumer of the schema that the migration must rewire.
+
 **`to-claude-workflow` compiler — correcting the record.** The CWR→JS compiler
 (`lib/compiler.ml`) is **already schema-aware today.** When `output_schema` is present it
 emits `await agent("…", {label: "…", schema: …, agentType: …})` with the reasoning prose
 (protocol, then brief, then prompt) concatenated *before* the schema — the CRANE-style
 ordering described in §4.4. The compiler emits no "missing-schema" notes; its `add_note`
-diagnostics are for unreadable protocol/brief files, unpreserved commit tokens, unpreserved
-run allowlist/replay, and ungoverned loops. CPL therefore does **not** add schema-awareness
+diagnostics cover other concerns entirely — e.g. unreadable protocol/brief files,
+unpreserved commit tokens, unpreserved run allowlist/replay, and ungoverned loops (the
+full set of note kinds in `lib/compiler.ml` is agent/commit/loop/run/foreach/shell/evidence;
+none is a missing-schema note). CPL therefore does **not** add schema-awareness
 that is missing — it relocates the schema's *source of truth* from a separate JSON field to
 the prompt function's type. The compiler would consume the schema from the
 `Cpl.compiled_prompt` instead of from `output_schema`; the emitted JS shape is unchanged.
@@ -1964,15 +2016,21 @@ already has informally.
 
 **Skills as typed prompt functions (designed, not yet implemented).** A Roster skill is
 today a markdown file whose prose body is the instruction text and whose YAML frontmatter
-declares metadata (name, version, phase, model); the pipeline substitutes the task into
-the markdown as a `${TASK}` variable and an LLM reads the resulting document. The proposal
-is to re-express each phase as a CPL value:
+declares metadata (name, version, phase — model is *not* a frontmatter field; model and
+backend selection happen at the CWR level via the `CWR_MODEL` / `CWR_BACKEND` environment
+variables, see below). The task is not interpolated into the prose body of the SKILL.md
+file; instead, `${TASK}` interpolation lives in the `prompt` field of the `.cwr.json`
+workflow templates that drive each phase, and as a shell variable consumed by hook
+test-gates (e.g. `briefs/${TASK}-intake.md`). The skill's prose body itself refers to the
+task via a `<task>` path convention rather than inline `${TASK}` substitution. At run time
+an LLM reads the assembled document (the skill prose plus the interpolated `prompt`). The
+proposal is to re-express each phase as a CPL value:
 
 - The prose body becomes a sequence of `Prose` fragments — operator-authored, trusted,
   unconstrained reasoning space.
-- The task description (user-provided input, today the `${TASK}` substitution) becomes a
-  `Binding` at the data tier — rendered as a fenced, escaped data block rather than spliced
-  inline into the instruction text.
+- The task description (user-provided input, today the `${TASK}` interpolation in the
+  `.cwr.json` `prompt` field) becomes a `Binding` at the data tier — rendered as a fenced,
+  escaped data block rather than spliced inline into the prompt string.
 - The brief files that phases produce and consume become the typed output schema of each
   phase's CPL prompt function.
 
@@ -2095,6 +2153,102 @@ CWR-side facts above (untyped `Yojson.Safe.t` outputs, the already-schema-aware 
 the required `"prompt"` field, the warning-tier lint) are verifiable in this repository and
 are stated as current; the CPL-side internal cross-references are part of the same design
 document and are realized only as those sections are implemented.
+
+---
+
+## 16. CPL as Agent Program IR: the structural roadmap
+
+The document so far explains CPL's value in terms of what it prevents (injection, format
+lock-in, copy-paste reuse) and what it enables today (typed composition, backend portability,
+deterministic lowering). This section argues for a different frame: **CPL's IR is
+intentionally richer than strings because future transformations operate on structure, not on
+rendered text.** That is the property that makes CPL potentially foundational rather than
+merely useful.
+
+### 16.1 The current IR is a Prompt Authoring IR
+
+Today's Abstract Prompt IR contains four node shapes:
+
+| Node | Role |
+| --- | --- |
+| `Instruction` | Trusted prose from the operator |
+| `Section` | Named grouping (maps to XML tags, Markdown headers, etc.) |
+| `Data` | Fenced, escaped external content |
+| `OutputSchema` | Typed constraint on the response |
+
+This is sufficient to compile prompts for any backend. It is not sufficient to represent what
+an agent *does* — decisions, artifacts produced, memory consumed, constraints asserted.
+
+### 16.2 The gap: session compaction requires structured state
+
+Cabal's context-window constraint today is managed by prose summarization — a human or an
+LLM reads a conversation and rewrites it as a shorter string. That string is then injected
+back into the next prompt as untyped prose. No structure survives the compaction boundary.
+
+If the session state is an IR instead of a string, compaction becomes a typed transformation:
+
+```
+Execution trace (structured)
+         ↓
+ Compaction pass (drops low-salience nodes, merges redundant decisions)
+         ↓
+ Session IR (smaller, still typed)
+         ↓
+ Prompt IR generation (renders from session state, not from raw transcript)
+```
+
+This is only possible if the execution trace has enough structure to identify what is
+safe to drop, merge, or summarize. A string has no such structure. A typed IR does.
+
+### 16.3 The Agent Program IR: a forward-looking node vocabulary
+
+For a software factory where agents are the primary prompt authors and a framework runner
+(CWR) is the primary consumer, the IR would eventually need to represent:
+
+| Node | What it encodes |
+| --- | --- |
+| `Prompt` | The current authoring-time nodes (§5.1) |
+| `Decision` | A recorded choice point (branch taken, rationale) |
+| `Constraint` | A typed assertion the output must satisfy |
+| `Artifact` | A file, patch, or structured result produced by a prior step |
+| `Evidence` | A verified claim (Rocq proof, test suite passage, lint result) |
+| `Task` | A sub-goal delegation with typed input/output contract |
+| `Memory` | A compacted prior session fragment with provenance |
+
+This is not a claim that CPL will implement all of these. It is an argument that the IR's
+*position* in the stack — between agent authorship and backend dispatch — is the right place
+for them to live when they do. Every one of these node types needs to survive the
+compaction boundary, needs to be portable across backends, and needs typed composition
+semantics. Those are exactly the properties CPL's IR is designed to provide.
+
+### 16.4 The four-phase roadmap
+
+| Phase | What lands | Enables |
+| --- | --- | --- |
+| **1 (current)** | Prompt IR → backend rendering | Backend portability, typed reuse, injection containment |
+| **2** | Prompt registry, versions, diffs, evaluation | Addressable prompts; A/B evaluation; governance audit trail |
+| **3** | Session state as structured IR; compaction passes | Context-window management without information loss; resumable sessions |
+| **4** | Rewrite passes over the IR | Token optimization, model-specific tuning, constraint propagation, safety gates |
+
+Phase 1 is the current proposal. Phases 2–4 are not specified here; they are enabled *only*
+if the IR from Phase 1 is rich enough to extend — which is why the IR design choices in §5
+matter beyond their immediate rendering payoff.
+
+### 16.5 The frame shift: agents as primary authors
+
+If human engineers are the primary prompt authors, CPL looks like "an OCaml DSL for
+prompts." If agents are the primary authors and the framework runner is the primary consumer,
+the frame changes:
+
+- The IR is the **canonical representation of an agent's work**, not a developer convenience.
+- A prompt is not a string a human typed — it is a **typed artifact produced by an upstream
+  agent** and consumed by a downstream one, with provenance, versioning, and evaluation.
+- The framework runner (CWR) is not a "prompt dispatcher" — it is a **typed pipeline over
+  agent task IR**, with compaction, replay, and governance operating on structure.
+
+This is the frame under which CPL becomes foundational: not because it is technically
+impressive, but because it occupies the only position in the stack where structure can be
+preserved across the authorship→execution→compaction→replay cycle.
 
 ---
 
