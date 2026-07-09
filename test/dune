@@ -105,6 +105,31 @@
  (modules test_resource_guardian))
 
 (test
+ (name test_portable_session)
+ (libraries cabal alcotest yojson)
+ (modules test_portable_session))
+
+(test
+ (name test_session_composition)
+ (libraries cabal alcotest)
+ (modules test_session_composition))
+
+(test
+ (name test_session_ingest)
+ (libraries cabal alcotest yojson)
+ (modules test_session_ingest))
+
+(test
+ (name test_session_render)
+ (libraries cabal alcotest yojson)
+ (modules test_session_render))
+
+(test
+ (name test_live_session)
+ (libraries cabal alcotest eio eio_main eio_posix)
+ (modules test_live_session))
+
+(test
  (name test_demo_477)
  (libraries cabal alcotest)
  (modules test_demo_477))
