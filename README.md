@@ -172,6 +172,40 @@ backend ids.
 6. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.
 
 Tracking for ongoing work is available in issue #5.
+## Live sessions and client-neutral composition
+
+Beyond one-shot `run_task`, Cabal provides a client-neutral session layer:
+
+- `Portable_session` — a client-neutral conversation model (`event` = role, text,
+  optional tool ref, provenance, timestamp, tokens). It carries the conversational
+  thread only; working-directory state (git) is already shared across clients.
+- `Session_ingest` / `Session_render` — convert a backend's native transcript to and
+  from the portable model. Claude Code JSONL is implemented (the reference format);
+  other backends are follow-ups. `render` is conversation-only (no synthesized tool
+  calls), so a composed session can be re-seeded into a client via its own `--resume`.
+- `Session_composition` — pure transforms over portable events (`filter`, `dedup`,
+  `reorder`, `merge`, `take`, `drop`) plus a `Compact` stage that carries an injected
+  summarizer. This is how a session is continued in a *different* client or composed
+  from *several* sources: ingest → compose → render → reseed.
+- `Live_session` — keeps an interactive CLI alive inside a detached tmux session and
+  drives it coarsely (open / send a turn / capture / list / close). tmux preserves the
+  real TUI behaviour and lets a human attach (`tmux attach -t`); structured signal is
+  read from the client's own on-disk transcript, not from screen scraping.
+
+### `cabal-mcp` (optional)
+
+`mcp/` builds a stateful MCP server (`cabal-mcp`) that exposes the session primitives as
+MCP tools (`session_open`/`send`/`capture`/`list`/`close`, `session_compose_claude`).
+tmux is the durable store — sessions persist across restarts of the server. It uses the
+[`mcp-kit`](https://github.com/epure-team/mcp-kit) library over the stdio transport.
+
+The executable is marked `(optional)`, so the core Cabal build and CI (which do not
+depend on `mcp-kit`) are unaffected; it builds only when `mcp-kit` is available:
+
+```bash
+opam pin add mcp-kit <path-to-ocaml-mcp> -y
+opam exec -- dune build mcp/cabal_mcp.exe
+```
 
 ## Build and test
 
