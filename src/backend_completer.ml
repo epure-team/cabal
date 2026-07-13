@@ -19,8 +19,11 @@ let complete_with_workspace completer ~workspace ~system_prompt ~prompt
   let prepared =
     Virtual_workspace.prepare_completion workspace ~system_prompt ~prompt
   in
-  completer ~system_prompt:prepared.system_prompt ~prompt:prepared.prompt
-    ~json_schema ~resume_session_id
+  completer
+    ~system_prompt:prepared.system_prompt
+    ~prompt:prepared.prompt
+    ~json_schema
+    ~resume_session_id
 
 let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
  fun ~system_prompt ~prompt ~json_schema ~resume_session_id ->

@@ -14,12 +14,7 @@
 
 type metadata = string * string [@@deriving eq]
 
-type window = {
-  citation_id : string;
-  index : int;
-  total : int;
-  content : string;
-}
+type window = {citation_id : string; index : int; total : int; content : string}
 [@@deriving eq]
 
 type resource = {
@@ -46,10 +41,7 @@ type workspace = {
 }
 [@@deriving eq]
 
-type completion_prompt = {
-  system_prompt : string;
-  prompt : string;
-}
+type completion_prompt = {system_prompt : string; prompt : string}
 [@@deriving eq]
 
 type resource_descriptor = {
