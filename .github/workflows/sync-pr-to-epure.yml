@@ -258,7 +258,7 @@ jobs:
 
           existing_pr="$(gh pr list \
             --repo epure-team/epure \
-            --head "epure-team:${BRANCH}" \
+            --head "${BRANCH}" \
             --base main \
             --state open \
             --json number \
@@ -319,7 +319,7 @@ jobs:
 
           existing_pr="$(gh pr list \
             --repo epure-team/epure \
-            --head "epure-team:${BRANCH}" \
+            --head "${BRANCH}" \
             --base main \
             --state open \
             --json number \
@@ -350,7 +350,7 @@ jobs:
 
           existing_pr="$(gh pr list \
             --repo epure-team/epure \
-            --head "epure-team:${BRANCH}" \
+            --head "${BRANCH}" \
             --base main \
             --state open \
             --json number \
