@@ -38,11 +38,7 @@ val of_name : string -> t
     to [(width, height)] (headless has no real terminal size); [working_dir]
     sets the start directory. *)
 val new_session_argv :
-  name:string ->
-  ?size:int * int ->
-  ?working_dir:string ->
-  string ->
-  string list
+  name:string -> ?size:int * int -> ?working_dir:string -> string -> string list
 
 (** [set_buffer_argv ~name text] loads [text] into a named tmux buffer.  Using
     a named buffer + {!paste_buffer_argv} injects arbitrary multi-line text

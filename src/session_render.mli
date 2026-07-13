@@ -35,5 +35,4 @@
     role/text of the emitted events; empty input yields [""].
     {violators} (none)
     {violates} (none) *)
-val claude_code :
-  ?session_id:string -> Portable_session.event list -> string
+val claude_code : ?session_id:string -> Portable_session.event list -> string
