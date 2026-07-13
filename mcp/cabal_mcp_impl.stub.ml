@@ -13,5 +13,5 @@ let main () =
   prerr_endline
     "cabal-mcp: built without mcp-kit (not available in this workspace); \
      rebuild with mcp-kit installed, e.g. in the Epure monorepo, to run the \
-     MCP server.";
+     MCP server." ;
   exit 1
