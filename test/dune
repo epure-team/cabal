@@ -102,6 +102,7 @@
 (test
  (name test_virtual_workspace)
  (libraries cabal alcotest str)
+ (deps ../docs/virtual-workspace.md ../examples/virtual_workspace_host.ml)
  (modules test_virtual_workspace))
 
 (test
