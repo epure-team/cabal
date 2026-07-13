@@ -1,9 +1,25 @@
 ; cabal-mcp: stateful MCP server over cabal's live sessions + composition.
-; (optional) makes dune silently skip this executable when its library deps
-; (mcp-kit) are not installed, so the standalone cabal build/CI is unaffected;
-; it builds when mcp-kit is available (e.g. pinned, or in the Epure monorepo).
+;
+; mcp-kit isn't a hard dependency of the standalone cabal build: dune's
+; (optional) field is documented to skip an executable when its libraries
+; aren't available, but that skip does not actually happen for executable
+; stanzas (verified empirically; it does work for library stanzas). So the
+; mcp-kit-dependent code lives behind a (select ...) instead: cabal_mcp_impl.ml
+; resolves to cabal_mcp_impl.real.ml when mcp-kit is available (e.g. pinned,
+; or in the Epure monorepo) and to cabal_mcp_impl.stub.ml otherwise, which
+; keeps this executable buildable everywhere.
+
 (executable
  (name cabal_mcp)
- (optional)
- (libraries cabal mcp-kit mcp-kit.stdio eio eio_main eio_posix yojson)
- (modules cabal_mcp))
+ (libraries
+  cabal
+  eio
+  eio_main
+  eio_posix
+  yojson
+  (select
+   cabal_mcp_impl.ml
+   from
+   (mcp-kit mcp-kit.stdio -> cabal_mcp_impl.real.ml)
+   (-> cabal_mcp_impl.stub.ml)))
+ (modules cabal_mcp cabal_mcp_impl))
