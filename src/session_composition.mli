@@ -24,7 +24,8 @@ type transform = event list -> event list
 type stage =
   | Filter of (event -> bool)  (** Keep events satisfying the predicate. *)
   | Dedup  (** Drop later events with a duplicate (role, normalized text). *)
-  | Reorder  (** Stable chronological sort by {!Portable_session.event.timestamp}. *)
+  | Reorder
+      (** Stable chronological sort by {!Portable_session.event.timestamp}. *)
   | Take of int  (** Keep the first [n] events (clamped to [0]). *)
   | Drop of int  (** Drop the first [n] events (clamped to [0]). *)
   | Compact of transform

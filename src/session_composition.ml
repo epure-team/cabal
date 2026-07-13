@@ -27,15 +27,15 @@ let dedup evs =
   let seen = Hashtbl.create 64 in
   let tool_key = function
     | None -> ""
-    | Some { name; input_summary; output_summary } ->
-        String.concat "\x00" [ name; input_summary; output_summary ]
+    | Some {name; input_summary; output_summary} ->
+        String.concat "\x00" [name; input_summary; output_summary]
   in
   List.filter
     (fun e ->
       let key = (show_role e.role, normalized_text e, tool_key e.tool) in
       if Hashtbl.mem seen key then false
       else (
-        Hashtbl.add seen key ();
+        Hashtbl.add seen key () ;
         true))
     evs
 

@@ -32,7 +32,7 @@ let events_of_block ~role ~model ~provenance ~timestamp ~tokens block =
   match block |> U.member "type" |> U.to_string_option with
   | Some "text" ->
       let text = block |> U.member "text" |> U.to_string_option in
-      Option.fold ~none:[] ~some:(fun t -> [ mk role t ]) text
+      Option.fold ~none:[] ~some:(fun t -> [mk role t]) text
   | Some "thinking" -> [] (* dropped: internal reasoning is not portable *)
   | Some "tool_use" ->
       let name = Option.value ~default:"" (string_opt block "name") in
@@ -40,7 +40,7 @@ let events_of_block ~role ~model ~provenance ~timestamp ~tokens block =
       let input_summary =
         match input with `Null -> "" | j -> Yojson.Safe.to_string j
       in
-      [ mk Tool ~tool:{ name; input_summary; output_summary = "" } "" ]
+      [mk Tool ~tool:{name; input_summary; output_summary = ""} ""]
   | Some "tool_result" ->
       let name = Option.value ~default:"" (string_opt block "tool_use_id") in
       let content = block |> U.member "content" in
@@ -50,7 +50,7 @@ let events_of_block ~role ~model ~provenance ~timestamp ~tokens block =
         | `Null -> ""
         | j -> Yojson.Safe.to_string j
       in
-      [ mk Tool ~tool:{ name; input_summary = ""; output_summary } "" ]
+      [mk Tool ~tool:{name; input_summary = ""; output_summary} ""]
   | _ -> []
 
 let events_of_record json =
@@ -60,7 +60,7 @@ let events_of_record json =
       let message = json |> U.member "message" in
       match message with
       | `Null -> []
-      | _ ->
+      | _ -> (
           let model = string_opt message "model" in
           let timestamp = string_opt json "timestamp" in
           let provenance =
@@ -73,15 +73,21 @@ let events_of_record json =
           let mk ?tool text =
             make_event ?tool ?model ~provenance ?timestamp ?tokens role text
           in
-          (match message |> U.member "content" with
-          | `String s -> [ mk s ]
+          match message |> U.member "content" with
+          | `String s -> [mk s]
           | `List blocks ->
               List.concat_map
                 (fun b ->
                   (* A single foreign/non-object block must not sink the whole
                      record; skip it and keep the rest. *)
                   try
-                    events_of_block ~role ~model ~provenance ~timestamp ~tokens b
+                    events_of_block
+                      ~role
+                      ~model
+                      ~provenance
+                      ~timestamp
+                      ~tokens
+                      b
                   with _ -> [])
                 blocks
           | _ -> []))
@@ -90,16 +96,16 @@ let events_of_record json =
 let claude_code content =
   String.split_on_char '\n' content
   |> List.concat_map (fun line ->
-         let line = String.trim line in
-         if line = "" then []
-         else
-           match Yojson.Safe.from_string line with
-           (* Guard record processing too: a line can be valid JSON but a
+      let line = String.trim line in
+      if line = "" then []
+      else
+        match Yojson.Safe.from_string line with
+        (* Guard record processing too: a line can be valid JSON but a
               scalar/array (or carry a non-object [message]), where the Yojson
               [member] accessors would raise [Type_error].  Honor the "never
               raises, malformed lines skipped" contract. *)
-           | json -> ( try events_of_record json with _ -> [])
-           | exception _ -> [] (* skip non-JSON lines *))
+        | json -> ( try events_of_record json with _ -> [])
+        | exception _ -> [] (* skip non-JSON lines *))
 
 let load_claude_code_session ~working_dir ~session_id =
   match Session_trimmer.find_session_file ~working_dir ~session_id with
