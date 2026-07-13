@@ -1,3 +1,10 @@
+(******************************************************************************)
+(*                                                                            *)
+(* Copyright (c) 2026 Epure Team                                              *)
+(* All rights reserved.                                                       *)
+(*                                                                            *)
+(******************************************************************************)
+
 let read_window_from_authorized_texts authorized_texts request =
   match List.assoc_opt request.Cabal.Virtual_workspace.resource_id authorized_texts with
   | None -> Error "resource_not_found"
