@@ -1,3 +1,10 @@
+(******************************************************************************)
+(*                                                                            *)
+(* Copyright (c) 2026 Epure Team                                              *)
+(* All rights reserved.                                                       *)
+(*                                                                            *)
+(******************************************************************************)
+
 let contains haystack needle =
   try
     ignore (Str.search_forward (Str.regexp_string needle) haystack 0);
