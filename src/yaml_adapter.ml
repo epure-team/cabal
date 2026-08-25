@@ -49,6 +49,21 @@ let parse_pi_json_events stdout =
       with Yojson.Json_error _ -> None)
   |> String.concat "\n"
 
+(* Pi emits a session header as the first NDJSON record. Preserve that stable
+   identifier in [task_result] so an orchestrator can attest the association
+   between its run ledger and Pi's independently stored transcript. *)
+let parse_pi_session_id stdout =
+  String.split_on_char '\n' stdout
+  |> List.find_map (fun line ->
+      try
+        match Yojson.Safe.from_string line with
+        | `Assoc fields -> (
+            match List.assoc_opt "type" fields, List.assoc_opt "id" fields with
+            | Some (`String "session"), Some (`String id) -> Some id
+            | _ -> None)
+        | _ -> None
+      with Yojson.Json_error _ -> None)
+
 let make_backend (cfg : config) : Agentic_backend.t =
   let module M = struct
     let id = cfg.name
@@ -125,6 +140,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
         ~spec:{spec with timeout = cfg.timeout_seconds}
         ~build_command
         ?parse_stdout:parse_stdout_for_id
+        ?parse_session_id:(if cfg.name = "pi" then Some parse_pi_session_id else None)
         ()
   end in
   Hashtbl.replace config_table cfg.name cfg ;
