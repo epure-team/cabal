@@ -21,6 +21,34 @@ type config = {
 (* Maps backend id → config for config_of lookup. *)
 let config_table : (string, config) Hashtbl.t = Hashtbl.create 8
 
+(* Pi's [--mode json] is NDJSON.  The terminal assistant message contains a
+   content array; retain only text blocks so callers receive the model answer,
+   never its reasoning/event stream.  Malformed events are ignored and the
+   empty result fails closed in the host's structured-output boundary. *)
+let parse_pi_json_events stdout =
+  String.split_on_char '\n' stdout
+  |> List.filter_map (fun line ->
+      try
+        match Yojson.Safe.from_string line with
+        | `Assoc fields -> (
+            match List.assoc_opt "type" fields, List.assoc_opt "message" fields with
+            | Some (`String "message_end"), Some (`Assoc message) -> (
+                match List.assoc_opt "role" message, List.assoc_opt "content" message with
+                | Some (`String "assistant"), Some (`List blocks) ->
+                    blocks
+                    |> List.filter_map (function
+                        | `Assoc block -> (
+                            match List.assoc_opt "type" block, List.assoc_opt "text" block with
+                            | Some (`String "text"), Some (`String text) -> Some text
+                            | _ -> None)
+                        | _ -> None)
+                    |> fun parts -> Some (String.concat "" parts)
+                | _ -> None)
+            | _ -> None)
+        | _ -> None
+      with Yojson.Json_error _ -> None)
+  |> String.concat "\n"
+
 let make_backend (cfg : config) : Agentic_backend.t =
   let module M = struct
     let id = cfg.name
@@ -71,6 +99,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
       | "gemini-cli" -> Some Gemini_cli.parse_stdout_text
       | "copilot-cli" -> Some Copilot_cli.parse_stdout_text
       | "opencode" -> Some Opencode_cli.parse_stdout_text
+      | "pi" -> Some parse_pi_json_events
       | _ -> None
 
     let run_task ~sw ~env ?on_raw_line:_ (spec : task_spec) =
@@ -84,7 +113,12 @@ let make_backend (cfg : config) : Agentic_backend.t =
           spec.prompt ^ "\n\n---\nProject Instructions:\n" ^ spec.instructions
         else spec.prompt
       in
-      let build_command ~mcp_config_path:_ _s = (args, full_prompt) in
+      let build_command ~mcp_config_path:_ s =
+        if cfg.name = "pi" then
+          let model_args = match s.model with None -> [] | Some m -> ["--model"; m] in
+          (args @ ["--print"; "--mode"; "json"; "--approve"] @ model_args, full_prompt)
+        else (args, full_prompt)
+      in
       Backend_process.run_task_with
         ~sw
         ~env

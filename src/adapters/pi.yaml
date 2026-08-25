@@ -1,0 +1,8 @@
+name: pi
+display_name: Pi Coding Agent
+invocation_command: "pi"
+template_set: default
+timeout_seconds: 900.0
+models:
+  - ollama/qwen3.8:27b-mlx
+  - ollama/gemma4:26b-mlx
