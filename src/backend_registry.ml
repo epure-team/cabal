@@ -123,6 +123,26 @@ let builtin_backends =
         };
     };
     {
+      id = "pi";
+      display_name = "Pi Coding Agent";
+      binary_name = "pi";
+      baseline_version = "0.84.3";
+      capabilities =
+        {
+          structured_output = true;
+          streaming_output = true;
+          session_resume = true;
+          mcp_support = Mcp_none;
+          read_only_support = false;
+          project_config_surface = Config_none;
+          precedence_confidence = High;
+          generated_lsp_config = false;
+          file_reading = true;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
+        };
+    };
+    {
       id = "gemini-cli";
       display_name = "Gemini CLI";
       binary_name = "gemini";
