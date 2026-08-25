@@ -2,7 +2,10 @@ name: pi
 display_name: Pi Coding Agent
 invocation_command: "pi"
 template_set: default
-timeout_seconds: 900.0
+# Long-lived implementation sessions are deliberately bounded, but a 27B local
+# coding model can legitimately spend more than 15 minutes reading, testing and
+# compiling a task. CWR remains the outer governor and persistent ledger.
+timeout_seconds: 7200.0
 models:
   - ollama/qwen3.8:27b-mlx
   - ollama/gemma4:26b-mlx
