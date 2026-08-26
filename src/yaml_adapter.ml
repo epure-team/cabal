@@ -64,6 +64,31 @@ let parse_pi_session_id stdout =
         | _ -> None
       with Yojson.Json_error _ -> None)
 
+(* Ollama occasionally closes an OpenAI-compatible streamed response from a
+   local coding model without a terminal [finish_reason].  Pi retries a turn
+   internally, but ultimately exits non-zero and Cabal would otherwise turn a
+   transient transport defect into a permanent CWR block.  Retrying the whole
+   one-shot Pi invocation once is safe at this boundary: the agent works in
+   the same directory, so any completed edit is visible to the retry, and CWR
+   still owns the final schema check and all verification gates. *)
+let pi_stream_ended_without_finish_reason (result : task_result) =
+  match result.status with
+  | Failed _ ->
+      let needle = "stream ended without finish_reason" in
+      let contains haystack =
+        let haystack = String.lowercase_ascii haystack in
+        let needle = String.lowercase_ascii needle in
+        let hlen = String.length haystack and nlen = String.length needle in
+        let rec loop i =
+          if i + nlen > hlen then false
+          else if String.sub haystack i nlen = needle then true
+          else loop (i + 1)
+        in
+        loop 0
+      in
+      contains result.stdout || contains result.stderr
+  | Success | Timeout | Cancelled -> false
+
 let make_backend (cfg : config) : Agentic_backend.t =
   let module M = struct
     let id = cfg.name
@@ -134,14 +159,20 @@ let make_backend (cfg : config) : Agentic_backend.t =
           (args @ ["--print"; "--mode"; "json"; "--approve"] @ model_args, full_prompt)
         else (args, full_prompt)
       in
-      Backend_process.run_task_with
-        ~sw
-        ~env
-        ~spec:{spec with timeout = cfg.timeout_seconds}
-        ~build_command
-        ?parse_stdout:parse_stdout_for_id
-        ?parse_session_id:(if cfg.name = "pi" then Some parse_pi_session_id else None)
-        ()
+      let run_once () =
+        Backend_process.run_task_with
+          ~sw
+          ~env
+          ~spec:{spec with timeout = cfg.timeout_seconds}
+          ~build_command
+          ?parse_stdout:parse_stdout_for_id
+          ?parse_session_id:(if cfg.name = "pi" then Some parse_pi_session_id else None)
+          ()
+      in
+      let first = run_once () in
+      if cfg.name = "pi" && pi_stream_ended_without_finish_reason first then
+        run_once ()
+      else first
   end in
   Hashtbl.replace config_table cfg.name cfg ;
   (module M : Agentic_backend.S)
