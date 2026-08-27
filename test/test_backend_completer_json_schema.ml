@@ -89,8 +89,8 @@ let make_invalid_result ?(session_id = "test-session-1") () =
     ~session_id
     ()
 
-let make_failed_result msg =
-  Backend_types.make_task_result ~status:(Backend_types.Failed msg) ()
+let make_failed_result ?(stderr = "") msg =
+  Backend_types.make_task_result ~status:(Backend_types.Failed msg) ~stderr ()
 
 let test_no_schema_pass_through () =
   let backend, call_count, _, captured_schemas =
@@ -192,7 +192,12 @@ let test_native_schema_rejection_returns_error () =
     make_mock
       ~supports_resume:false
       ~native:true
-      ~responses:[make_failed_result "schema rejected by native backend"]
+      ~responses:
+        [
+          make_failed_result
+            ~stderr:"Error: rate limit exceeded, retry after 60s"
+            "Process exited with code 1";
+        ]
   in
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -209,10 +214,25 @@ let test_native_schema_rejection_returns_error () =
   | Ok _ -> Alcotest.fail "expected Error on native schema rejection"
   | Error msg ->
       Alcotest.(check int) "native rejection is single-call" 1 !call_count ;
+      (* The message must NOT claim the schema was at fault: this path is
+         reached for any non-zero exit while a schema was in force. Asserting
+         the cause sends a diagnosis after the schema when the real failure was
+         a rate limit or a dead socket. *)
       Alcotest.(check bool)
-        "error surfaces native rejection"
+        "error does not assert the schema was rejected"
+        false
+        (contains msg "schema rejection") ;
+      Alcotest.(check bool)
+        "error says a call failed with a schema in force"
         true
-        (contains msg "native-backend schema rejection")
+        (contains msg "failed with a schema in force") ;
+      (* The backend's stderr is the only part of this that says what went
+         wrong. It was on the result and unused; a failure whose cause is
+         unreadable costs more than one whose cause is ugly. *)
+      Alcotest.(check bool)
+        "backend stderr reaches the caller"
+        true
+        (contains msg "rate limit exceeded")
 
 let () =
   Alcotest.run
