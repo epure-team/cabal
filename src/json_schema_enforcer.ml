@@ -78,14 +78,36 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
         (* Native path (Story #625): the schema is in spec.json_schema and the
            backend's run_task wires it to the CLI flag (e.g. --output-schema).
            The validate-and-retry loop is NOT executed on this path.
-           Any Failed result is treated as a native-backend schema rejection and
-           returned as Error immediately — no fallback, no retry (D-5). *)
+           Any Failed result is returned as Error immediately — no fallback,
+           no retry (D-5). What the failure WAS is not asserted: this path is
+           reached for any non-zero exit while a schema was in force, which
+           includes a rejected schema but equally a rate limit, a network
+           failure, a bad flag, or the process being killed. *)
         let result =
           Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
         in
         match result.Backend_types.status with
         | Backend_types.Failed msg ->
-            Error ("native-backend schema rejection: " ^ msg)
+            (* The backend's own stderr is the only thing here that says what
+               actually went wrong, and it was already on the result -- unused.
+               Two separate diagnoses of a live failure were spent chasing the
+               schema, because the message named the schema, while the schema
+               replayed clean standalone. Bounded because a backend can emit an
+               arbitrary amount on the way down. *)
+            let detail =
+              match String.trim result.Backend_types.stderr with
+              | "" -> ""
+              | stderr ->
+                  let cap = 2000 in
+                  let stderr =
+                    if String.length stderr <= cap then stderr
+                    else String.sub stderr 0 cap ^ "… (truncated)"
+                  in
+                  "\nbackend stderr: " ^ stderr
+            in
+            Error
+              ("native-backend call failed with a schema in force: " ^ msg
+             ^ detail)
         | Backend_types.Success | Backend_types.Timeout
         | Backend_types.Cancelled ->
             Ok result
