@@ -276,3 +276,8 @@
  (name test_demo_633)
  (libraries cabal alcotest)
  (modules test_demo_633))
+
+(test
+ (name test_live_session_names)
+ (libraries cabal alcotest)
+ (modules test_live_session_names))

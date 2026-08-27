@@ -26,6 +26,30 @@ type t
 (** [of_name name] is a handle to the tmux session called [name], whether or
     not it currently exists.  Use it to address a session opened elsewhere
     (e.g. by a previous process); pair with {!has_session} to check liveness. *)
+(** [is_valid_name n] is [true] when [n] is safe to hand to tmux as a session
+    name: 1-64 characters from [A-Za-z0-9_-] only.
+
+    Callers that accept a name from an untrusted source (an MCP client, a
+    model) MUST check this before doing anything else. tmux reads a [-t]
+    argument as a target SPEC — prefix match, fnmatch, session id [$0],
+    window/pane syntax — so an unchecked name reaches sessions it does not
+    name. The library additionally pins every [-t] to exact matching, so this
+    check is defence in depth rather than the only guard.
+
+    {pre}
+    (none)
+
+    {post}
+    Returns [true] iff [n] is non-empty, at most 64 characters, and contains
+    only ASCII letters, digits, underscore and hyphen.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val is_valid_name : string -> bool
+
 val of_name : string -> t
 
 (** {1 Pure command builders}
