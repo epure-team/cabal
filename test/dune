@@ -35,6 +35,11 @@
  (modules test_backend_process))
 
 (test
+ (name test_pi_adapter)
+ (libraries cabal alcotest)
+ (modules test_pi_adapter))
+
+(test
  (name test_adapter_loader)
  (libraries cabal alcotest unix)
  (modules test_adapter_loader))
