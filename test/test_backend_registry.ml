@@ -8,7 +8,7 @@
 (** Tests for Backend_registry — Story #476.
 
     Covers:
-    - AC1: All 5 built-in backends have a descriptor
+    - AC1: All 6 built-in backends have a descriptor
     - AC2: Exact baseline versions match the reference table
     - AC3: All required capability flags are present on each descriptor
     - AC4: backend_supports_file_reading is routed through the registry *)
@@ -17,7 +17,8 @@ open Cabal
 
 (** {1 Helpers} *)
 
-let all_ids = ["claude-code"; "codex"; "opencode"; "gemini-cli"; "copilot-cli"]
+let all_ids =
+  ["claude-code"; "codex"; "opencode"; "gemini-cli"; "copilot-cli"; "pi"]
 
 let find_desc id =
   match Backend_registry.find id with
@@ -52,7 +53,7 @@ let test_all_backends_have_descriptor () =
 
 let test_five_descriptors_total () =
   let all = Backend_registry.all () in
-  Alcotest.(check int) "exactly 5 built-in descriptors" 5 (List.length all)
+  Alcotest.(check int) "exactly 6 built-in descriptors" 6 (List.length all)
 
 let test_display_names_non_empty () =
   List.iter
