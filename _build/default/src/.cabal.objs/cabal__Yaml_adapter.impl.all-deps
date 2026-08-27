@@ -1,0 +1,10 @@
+cabal__Agentic_backend
+cabal__Backend_config_writer
+cabal__Backend_process
+cabal__Backend_types
+cabal__Claude_code
+cabal__Codex_cli
+cabal__Copilot_cli
+cabal__Gemini_cli
+cabal__Opencode_cli
+cabal__Resource_guardian

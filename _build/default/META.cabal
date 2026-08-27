@@ -1,0 +1,14 @@
+description = ""
+requires =
+"eio
+ eio_posix
+ jsonschema
+ ppx_deriving.runtime
+ ppx_deriving_yojson.runtime
+ unix
+ yaml
+ yojson"
+archive(byte) = "cabal.cma"
+archive(native) = "cabal.cmxa"
+plugin(byte) = "cabal.cma"
+plugin(native) = "cabal.cmxs"

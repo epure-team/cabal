@@ -1,0 +1,9 @@
+name: gemini-cli
+display_name: Gemini CLI
+invocation_command: "gemini --output-format json -y -p -"
+template_set: default
+timeout_seconds: 300.0
+models:
+  - gemini-2.5-pro
+  - gemini-2.5-flash
+  - gemini-2.0-flash

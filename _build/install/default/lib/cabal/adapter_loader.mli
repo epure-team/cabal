@@ -1,0 +1,1 @@
+../../../../default/src/adapter_loader.mli
