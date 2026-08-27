@@ -35,6 +35,11 @@
  (modules test_backend_process))
 
 (test
+ (name test_pi_adapter)
+ (libraries cabal alcotest)
+ (modules test_pi_adapter))
+
+(test
  (name test_adapter_loader)
  (libraries cabal alcotest unix)
  (modules test_adapter_loader))
@@ -100,9 +105,40 @@
  (modules test_backend_config_writer))
 
 (test
+ (name test_virtual_workspace)
+ (libraries cabal alcotest str)
+ (deps ../docs/virtual-workspace.md ../examples/virtual_workspace_host.ml)
+ (modules test_virtual_workspace))
+
+(test
  (name test_resource_guardian)
  (libraries cabal alcotest)
  (modules test_resource_guardian))
+
+(test
+ (name test_portable_session)
+ (libraries cabal alcotest yojson)
+ (modules test_portable_session))
+
+(test
+ (name test_session_composition)
+ (libraries cabal alcotest)
+ (modules test_session_composition))
+
+(test
+ (name test_session_ingest)
+ (libraries cabal alcotest yojson)
+ (modules test_session_ingest))
+
+(test
+ (name test_session_render)
+ (libraries cabal alcotest yojson)
+ (modules test_session_render))
+
+(test
+ (name test_live_session)
+ (libraries cabal alcotest eio eio_main eio_posix)
+ (modules test_live_session))
 
 (test
  (name test_demo_477)
@@ -251,3 +287,8 @@
  (name test_demo_633)
  (libraries cabal alcotest)
  (modules test_demo_633))
+
+(test
+ (name test_live_session_names)
+ (libraries cabal alcotest)
+ (modules test_live_session_names))

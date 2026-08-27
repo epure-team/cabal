@@ -68,3 +68,64 @@ val make_backend : config -> Agentic_backend.t
     {violates}
     (none) *)
 val config_of : Agentic_backend.t -> config option
+
+(** [parse_pi_json_events stdout] extracts the assistant's answer from Pi's
+    NDJSON [--mode json] stream, keeping text blocks only so a caller never
+    receives the reasoning or event stream.
+
+    Exposed for testing: it parses untrusted model output, and a silent parse
+    failure here is indistinguishable from a model that answered with nothing.
+
+    {pre}
+    [stdout] is arbitrary text. Non-JSON lines and unexpected shapes are
+    tolerated, not an error.
+
+    {post}
+    Returns the concatenation of every terminal assistant message's text
+    blocks, newline-separated across messages. Returns [""] when no such block
+    is present -- including when the stream is malformed. Callers must treat
+    [""] as absence of an answer; this function does not distinguish it from a
+    genuinely empty one.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val parse_pi_json_events : string -> string
+
+(** [parse_pi_session_id stdout] returns the identifier from Pi's session
+    header, so an orchestrator can attest the association between its own run
+    ledger and Pi's independently stored transcript.
+
+    {pre}
+    [stdout] is arbitrary text.
+
+    {post}
+    Returns [Some id] for the first [{"type":"session","id":...}] record, or
+    [None] when absent or malformed.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val parse_pi_session_id : string -> string option
+
+(** [pi_stream_ended_without_finish_reason result] recognises the transient
+    Ollama transport defect that Pi surfaces as a hard failure.
+
+    {pre}
+    [result] is a completed [task_result].
+
+    {post}
+    True only for a [Failed] result whose output mentions the defect. Any other
+    status is false, so a successful run is never retried. The match is on
+    output text, so it is sensitive to upstream wording.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val pi_stream_ended_without_finish_reason : Backend_types.task_result -> bool

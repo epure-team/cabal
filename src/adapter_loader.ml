@@ -24,6 +24,8 @@ module Builtin = struct
 
   let opencode = [%blob "adapters/opencode.yaml"]
 
+  let pi = [%blob "adapters/pi.yaml"]
+
   let all =
     [
       ("claude-code", claude_code);
@@ -31,6 +33,7 @@ module Builtin = struct
       ("copilot", copilot);
       ("codex", codex);
       ("opencode", opencode);
+      ("pi", pi);
     ]
 end
 

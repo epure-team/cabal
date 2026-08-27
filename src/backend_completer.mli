@@ -34,6 +34,15 @@ type completer =
   resume_session_id:string option ->
   (completion_result, string) result
 
+val complete_with_workspace :
+  completer ->
+  workspace:Virtual_workspace.workspace ->
+  system_prompt:string ->
+  prompt:string ->
+  json_schema:Yojson.Safe.t option ->
+  resume_session_id:string option ->
+  (completion_result, string) result
+
 (** [make ~sw ~env ~backend ~working_dir] creates a completer that
     delegates to the given agentic backend.
 

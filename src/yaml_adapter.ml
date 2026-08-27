@@ -21,6 +21,85 @@ type config = {
 (* Maps backend id → config for config_of lookup. *)
 let config_table : (string, config) Hashtbl.t = Hashtbl.create 8
 
+(* Pi's [--mode json] is NDJSON.  The terminal assistant message contains a
+   content array; retain only text blocks so callers receive the model answer,
+   never its reasoning/event stream.  Malformed events are ignored and the
+   empty result fails closed in the host's structured-output boundary. *)
+let parse_pi_json_events stdout =
+  String.split_on_char '\n' stdout
+  |> List.filter_map (fun line ->
+      try
+        match Yojson.Safe.from_string line with
+        | `Assoc fields -> (
+            match
+              (List.assoc_opt "type" fields, List.assoc_opt "message" fields)
+            with
+            | Some (`String "message_end"), Some (`Assoc message) -> (
+                match
+                  ( List.assoc_opt "role" message,
+                    List.assoc_opt "content" message )
+                with
+                | Some (`String "assistant"), Some (`List blocks) ->
+                    blocks
+                    |> List.filter_map (function
+                      | `Assoc block -> (
+                          match
+                            ( List.assoc_opt "type" block,
+                              List.assoc_opt "text" block )
+                          with
+                          | Some (`String "text"), Some (`String text) ->
+                              Some text
+                          | _ -> None)
+                      | _ -> None)
+                    |> fun parts -> Some (String.concat "" parts)
+                | _ -> None)
+            | _ -> None)
+        | _ -> None
+      with Yojson.Json_error _ -> None)
+  |> String.concat "\n"
+
+(* Pi emits a session header as the first NDJSON record. Preserve that stable
+   identifier in [task_result] so an orchestrator can attest the association
+   between its run ledger and Pi's independently stored transcript. *)
+let parse_pi_session_id stdout =
+  String.split_on_char '\n' stdout
+  |> List.find_map (fun line ->
+      try
+        match Yojson.Safe.from_string line with
+        | `Assoc fields -> (
+            match
+              (List.assoc_opt "type" fields, List.assoc_opt "id" fields)
+            with
+            | Some (`String "session"), Some (`String id) -> Some id
+            | _ -> None)
+        | _ -> None
+      with Yojson.Json_error _ -> None)
+
+(* Ollama occasionally closes an OpenAI-compatible streamed response from a
+   local coding model without a terminal [finish_reason].  Pi retries a turn
+   internally, but ultimately exits non-zero and Cabal would otherwise turn a
+   transient transport defect into a permanent CWR block.  Retrying the whole
+   one-shot Pi invocation once is safe at this boundary: the agent works in
+   the same directory, so any completed edit is visible to the retry, and CWR
+   still owns the final schema check and all verification gates. *)
+let pi_stream_ended_without_finish_reason (result : task_result) =
+  match result.status with
+  | Failed _ ->
+      let needle = "stream ended without finish_reason" in
+      let contains haystack =
+        let haystack = String.lowercase_ascii haystack in
+        let needle = String.lowercase_ascii needle in
+        let hlen = String.length haystack and nlen = String.length needle in
+        let rec loop i =
+          if i + nlen > hlen then false
+          else if String.sub haystack i nlen = needle then true
+          else loop (i + 1)
+        in
+        loop 0
+      in
+      contains result.stdout || contains result.stderr
+  | Success | Timeout | Cancelled -> false
+
 let make_backend (cfg : config) : Agentic_backend.t =
   let module M = struct
     let id = cfg.name
@@ -71,6 +150,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
       | "gemini-cli" -> Some Gemini_cli.parse_stdout_text
       | "copilot-cli" -> Some Copilot_cli.parse_stdout_text
       | "opencode" -> Some Opencode_cli.parse_stdout_text
+      | "pi" -> Some parse_pi_json_events
       | _ -> None
 
     let run_task ~sw ~env ?on_raw_line:_ (spec : task_spec) =
@@ -84,14 +164,30 @@ let make_backend (cfg : config) : Agentic_backend.t =
           spec.prompt ^ "\n\n---\nProject Instructions:\n" ^ spec.instructions
         else spec.prompt
       in
-      let build_command ~mcp_config_path:_ _s = (args, full_prompt) in
-      Backend_process.run_task_with
-        ~sw
-        ~env
-        ~spec:{spec with timeout = cfg.timeout_seconds}
-        ~build_command
-        ?parse_stdout:parse_stdout_for_id
-        ()
+      let build_command ~mcp_config_path:_ s =
+        if cfg.name = "pi" then
+          let model_args =
+            match s.model with None -> [] | Some m -> ["--model"; m]
+          in
+          ( args @ ["--print"; "--mode"; "json"; "--approve"] @ model_args,
+            full_prompt )
+        else (args, full_prompt)
+      in
+      let run_once () =
+        Backend_process.run_task_with
+          ~sw
+          ~env
+          ~spec:{spec with timeout = cfg.timeout_seconds}
+          ~build_command
+          ?parse_stdout:parse_stdout_for_id
+          ?parse_session_id:
+            (if cfg.name = "pi" then Some parse_pi_session_id else None)
+          ()
+      in
+      let first = run_once () in
+      if cfg.name = "pi" && pi_stream_ended_without_finish_reason first then
+        run_once ()
+      else first
   end in
   Hashtbl.replace config_table cfg.name cfg ;
   (module M : Agentic_backend.S)

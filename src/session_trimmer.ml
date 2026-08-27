@@ -87,11 +87,31 @@ let claude_projects_dir () =
 
 (* --- Session file location ------------------------------------------------ *)
 
+(* [working_dir] is neutralised by [encode_working_dir], which maps every
+   character outside [A-Za-z0-9-] to '-'. [session_id] had no such treatment,
+   and it is concatenated straight into the path: a session id of
+   "../-home-user-otherproject/<uuid>" therefore reads another project's whole
+   transcript. That was harmless while callers were local code choosing their
+   own ids; this file is now reachable from an MCP tool, so the id arrives from
+   a model. Confine it to the shape Claude Code actually writes. *)
+let is_safe_session_id id =
+  let n = String.length id in
+  n > 0 && n <= 128
+  && String.for_all
+       (fun c ->
+         (c >= 'a' && c <= 'z')
+         || (c >= 'A' && c <= 'Z')
+         || (c >= '0' && c <= '9')
+         || c = '-' || c = '_')
+       id
+
 let find_session_file ~working_dir ~session_id =
-  let encoded = encode_working_dir working_dir in
-  let dir = Filename.concat (claude_projects_dir ()) encoded in
-  let path = Filename.concat dir (session_id ^ ".jsonl") in
-  if Sys.file_exists path then Some path else None
+  if not (is_safe_session_id session_id) then None
+  else
+    let encoded = encode_working_dir working_dir in
+    let dir = Filename.concat (claude_projects_dir ()) encoded in
+    let path = Filename.concat dir (session_id ^ ".jsonl") in
+    if Sys.file_exists path then Some path else None
 
 (* --- UUID generation ------------------------------------------------------ *)
 
