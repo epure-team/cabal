@@ -18,6 +18,7 @@ let with_tmpdir f =
 
 let register_builtin_runtime_backends () =
   Registry.clear () ;
+  Adapter_loader.register_all () ;
   Registry.register (module Claude_code) ;
   Registry.register (module Codex_cli) ;
   Registry.register (module Opencode_cli) ;
