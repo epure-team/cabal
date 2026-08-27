@@ -13,6 +13,8 @@ let test_new_session_argv () =
     "full form"
     [
       "tmux";
+      "-L";
+      "cabal-mcp";
       "new-session";
       "-d";
       "-s";
@@ -28,39 +30,39 @@ let test_new_session_argv () =
     (new_session_argv ~name:"s" ~size:(200, 50) ~working_dir:"/tmp" "claude") ;
   Alcotest.(check (list string))
     "minimal form"
-    ["tmux"; "new-session"; "-d"; "-s"; "s"; "claude"]
+    ["tmux"; "-L"; "cabal-mcp"; "new-session"; "-d"; "-s"; "s"; "claude"]
     (new_session_argv ~name:"s" "claude")
 
 let test_send_argv () =
   Alcotest.(check (list string))
     "set-buffer (named, -- guards text)"
-    ["tmux"; "set-buffer"; "-b"; "s"; "--"; "multi\nline"]
+    ["tmux"; "-L"; "cabal-mcp"; "set-buffer"; "-b"; "s"; "--"; "multi\nline"]
     (set_buffer_argv ~name:"s" "multi\nline") ;
   Alcotest.(check (list string))
     "paste-buffer (delete after)"
-    ["tmux"; "paste-buffer"; "-d"; "-b"; "s"; "-t"; "s"]
+    ["tmux"; "-L"; "cabal-mcp"; "paste-buffer"; "-d"; "-b"; "s"; "-t"; "=s"]
     (paste_buffer_argv ~name:"s") ;
   Alcotest.(check (list string))
     "enter"
-    ["tmux"; "send-keys"; "-t"; "s"; "Enter"]
+    ["tmux"; "-L"; "cabal-mcp"; "send-keys"; "-t"; "=s"; "Enter"]
     (enter_argv ~name:"s")
 
 let test_query_argv () =
   Alcotest.(check (list string))
     "capture"
-    ["tmux"; "capture-pane"; "-t"; "s"; "-p"]
+    ["tmux"; "-L"; "cabal-mcp"; "capture-pane"; "-t"; "=s"; "-p"]
     (capture_argv ~name:"s") ;
   Alcotest.(check (list string))
     "has-session"
-    ["tmux"; "has-session"; "-t"; "s"]
+    ["tmux"; "-L"; "cabal-mcp"; "has-session"; "-t"; "=s"]
     (has_session_argv ~name:"s") ;
   Alcotest.(check (list string))
     "kill-session"
-    ["tmux"; "kill-session"; "-t"; "s"]
+    ["tmux"; "-L"; "cabal-mcp"; "kill-session"; "-t"; "=s"]
     (kill_session_argv ~name:"s") ;
   Alcotest.(check (list string))
     "list-sessions"
-    ["tmux"; "list-sessions"; "-F"; "#{session_name}"]
+    ["tmux"; "-L"; "cabal-mcp"; "list-sessions"; "-F"; "#{session_name}"]
     (list_sessions_argv ())
 
 (* Integration: exercised only when tmux is present; a no-op skip otherwise so
