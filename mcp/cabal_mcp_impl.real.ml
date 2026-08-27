@@ -54,6 +54,24 @@ let tools env =
              else String.concat "\n" names)
           (`Assoc [("sessions", `List (List.map (fun n -> `String n) names))]))
   in
+  (* Reject a session name before ANY tmux argv is built. tmux reads a [-t]
+     argument as a target spec — prefix, fnmatch, session id [$0], window/pane
+     syntax — so an unchecked name from a model reaches sessions it does not
+     name: measured, [-t human] captured and killed a session called
+     "humanshell". The library now also pins every [-t] to exact matching and
+     runs on its own socket; this boundary check is the first of the three. *)
+  let checked_name args k =
+    let* name = K.Tool.Arg.string "name" args in
+    if Live_session.is_valid_name name then k name
+    else
+      Ok
+        (K.Tool.error_text
+           (Printf.sprintf
+              "invalid session name %S: expected 1-64 characters from \
+               [A-Za-z0-9_-]. tmux would read anything else as a target spec, \
+               which can reach sessions you did not name."
+              name))
+  in
   let session_open =
     K.Tool.make
       ~description:
@@ -71,7 +89,7 @@ let tools env =
            ())
       "session_open"
       (fun args ->
-        let* name = K.Tool.Arg.string "name" args in
+        checked_name args @@ fun name ->
         let* command = K.Tool.Arg.string "command" args in
         let* working_dir = K.Tool.Arg.(optional string) "working_dir" args in
         let s = Live_session.open_ ~env ?working_dir ~name command in
@@ -96,7 +114,7 @@ let tools env =
            ())
       "session_send"
       (fun args ->
-        let* name = K.Tool.Arg.string "name" args in
+        checked_name args @@ fun name ->
         let* text = K.Tool.Arg.string "text" args in
         let s = Live_session.of_name name in
         if Live_session.has_session ~env s then (
@@ -111,7 +129,7 @@ let tools env =
       ~input_schema:(obj ~properties:[("name", sstr ())] ~required:["name"] ())
       "session_capture"
       (fun args ->
-        let* name = K.Tool.Arg.string "name" args in
+        checked_name args @@ fun name ->
         ok_text (Live_session.capture ~env (Live_session.of_name name)))
   in
   let session_close =
@@ -120,7 +138,7 @@ let tools env =
       ~input_schema:(obj ~properties:[("name", sstr ())] ~required:["name"] ())
       "session_close"
       (fun args ->
-        let* name = K.Tool.Arg.string "name" args in
+        checked_name args @@ fun name ->
         Live_session.close ~env (Live_session.of_name name) ;
         ok_text (Printf.sprintf "closed '%s'" name))
   in
