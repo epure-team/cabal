@@ -1,1 +1,0 @@
-../../../../default/src/gemini_cli.mli

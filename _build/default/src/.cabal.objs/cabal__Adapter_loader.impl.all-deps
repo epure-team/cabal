@@ -1,6 +1,0 @@
-cabal__Agentic_backend
-cabal__Backend_config_writer
-cabal__Backend_types
-cabal__Diagnostics
-cabal__Registry
-cabal__Yaml_adapter
