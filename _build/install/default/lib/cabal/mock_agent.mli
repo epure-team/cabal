@@ -1,1 +1,0 @@
-../../../../default/src/mock_agent.mli
