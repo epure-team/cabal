@@ -298,13 +298,71 @@ let test_build_command_with_output_schema () =
       ~json_schema:schema
       ()
   in
+  (* The "$schema" key is deliberately absent from what reaches the CLI: the
+     Claude Code binary cannot resolve the 2020-12 meta-schema URI and refuses
+     the flag outright (epure #283).  Everything else must survive verbatim. *)
+  let expected : Yojson.Safe.t =
+    `Assoc
+      [
+        ("type", `String "object");
+        ("properties", `Assoc [("answer", `Assoc [("type", `String "string")])]);
+        ("required", `List [`String "answer"]);
+        ("additionalProperties", `Bool false);
+      ]
+  in
   let cmd, _stdin = Claude_code.build_command ~mcp_config_path:None spec in
   match find_flag_value "--json-schema" cmd with
   | Some actual ->
       Alcotest.(check string)
-        "--json-schema inline JSON"
-        (Yojson.Safe.to_string ~std:true schema)
+        "--json-schema inline JSON, meta-schema stripped"
+        (Yojson.Safe.to_string ~std:true expected)
         actual
+  | None -> Alcotest.fail "--json-schema not found in command"
+
+(* A schema that never carried "$schema" must pass through untouched — the
+   stripping must not be an excuse to rewrite the caller's schema. *)
+let test_build_command_schema_without_meta_is_verbatim () =
+  let schema : Yojson.Safe.t =
+    `Assoc
+      [
+        ("type", `String "object");
+        ( "properties",
+          `Assoc
+            [
+              ( "inner",
+                `Assoc
+                  [
+                    ("type", `String "object");
+                    ("oneOf", `List [`Assoc [("required", `List [`String "a"])]]);
+                  ] );
+            ] );
+      ]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"x"
+      ~working_dir:"/tmp/test"
+      ~json_schema:schema
+      ()
+  in
+  let cmd, _stdin = Claude_code.build_command ~mcp_config_path:None spec in
+  match find_flag_value "--json-schema" cmd with
+  | Some actual ->
+      Alcotest.(check string)
+        "schema without $schema is unchanged"
+        (Yojson.Safe.to_string ~std:true schema)
+        actual ;
+      let contains hay needle =
+        let nh = String.length hay and nn = String.length needle in
+        let rec go i =
+          i + nn <= nh && (String.sub hay i nn = needle || go (i + 1))
+        in
+        nn = 0 || go 0
+      in
+      Alcotest.(check bool)
+        "no $schema key leaked in"
+        false
+        (contains actual "$schema")
   | None -> Alcotest.fail "--json-schema not found in command"
 
 let test_parse_session_id_from_stdout () =
@@ -381,7 +439,10 @@ let session_reuse_tests =
   [
     ("build_command without resume", `Quick, test_build_command_no_resume);
     ("build_command with resume", `Quick, test_build_command_with_resume);
-    ( "build_command with output schema",
+    ( "build_command leaves a meta-schema-free schema verbatim (#283)",
+      `Quick,
+      test_build_command_schema_without_meta_is_verbatim );
+    ( "build_command with output schema, meta-schema stripped (#283)",
       `Quick,
       test_build_command_with_output_schema );
     ("parse session_id from stdout", `Quick, test_parse_session_id_from_stdout);

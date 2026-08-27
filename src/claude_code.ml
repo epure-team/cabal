@@ -309,6 +309,26 @@ let parse_cost_from_stdout stdout =
    [project_config_path]: when [Some path], pass [--settings path] so
    the Épure-owned settings.json is injected explicitly at invocation
    (AC5 of story #478). *)
+(* The Claude Code CLI validates [--json-schema] against its own registry of
+   meta-schemas before any request is made, and it cannot resolve the
+   2020-12 meta-schema URI: a schema carrying
+   ["$schema": "https://json-schema.org/draft/2020-12/schema"] is refused with
+   "no schema with key or ref ...", exit 1, before the API is reached.
+
+   Every schema Epure emits carries that key (25 agent modules; the value is
+   fixed by AGENTS.md decision D-2), so stripping it here — at the one boundary
+   that talks to this CLI — fixes them all without touching the agents. The
+   draft a schema is validated against is a concern of
+   [Json_schema_validator] on our side; the CLI supplies its own. Only the
+   top-level key is removed: Epure never declares a per-subschema draft, and
+   removing a nested one could change that subschema's meaning.
+
+   See epure issue #283. *)
+let strip_meta_schema (schema : Yojson.Safe.t) : Yojson.Safe.t =
+  match schema with
+  | `Assoc fields -> `Assoc (List.filter (fun (k, _) -> k <> "$schema") fields)
+  | other -> other
+
 let build_command ?(streaming = false) ?(project_config_path = None)
     ~mcp_config_path (spec : task_spec) =
   let output_format = if streaming then "stream-json" else "json" in
@@ -378,7 +398,8 @@ let build_command ?(streaming = false) ?(project_config_path = None)
      non-zero exit which the enforcer surfaces as native rejection (D-5). *)
   let schema_args =
     match spec.json_schema with
-    | Some s -> ["--json-schema"; Yojson.Safe.to_string ~std:true s]
+    | Some s ->
+        ["--json-schema"; Yojson.Safe.to_string ~std:true (strip_meta_schema s)]
     | None -> []
   in
   (* Combine prompt and instructions into a single task description *)
