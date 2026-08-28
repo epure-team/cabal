@@ -8,8 +8,10 @@
 (** Lightweight Linux memory and CPU monitor.
 
     Runs as an Eio background fiber, polling [/proc/meminfo] and [/proc/stat].
-    Tracks child PIDs spawned by the build system and can SIGTERM/SIGKILL them
-    when memory usage exceeds a configurable threshold.
+    Tracks child process targets spawned by the build system and can terminate
+    their complete process groups when memory usage exceeds a configurable
+    threshold. Legacy PID helpers remain available for callers that do not own
+     a {!Cabal.Process_group.t}; those helpers never reap a process.
 
     {2 Usage}
 
@@ -17,10 +19,10 @@
       let guardian = Resource_guardian.create Resource_guardian.default_config in
       Eio.Fiber.fork ~sw (fun () ->
           Resource_guardian.run guardian ~clock:(Eio.Stdenv.clock env)) ;
-      (* ... later, when spawning a child process: *)
-      Resource_guardian.register_pid guardian (Eio.Process.pid proc) ;
-      (* ... on process exit: *)
-      Resource_guardian.unregister_pid guardian (Eio.Process.pid proc)
+       (* ... later, when spawning a child process: *)
+       Resource_guardian.register_target guardian process_group ;
+       (* ... on process exit: *)
+       Resource_guardian.unregister_target guardian process_group
     ]} *)
 
 (** Guardian configuration. *)
@@ -73,15 +75,33 @@ val default_config : config
     (none) *)
 val create : config -> t
 
-(** [register_pid t pid] starts tracking a child PID for potential killing
-    under memory pressure.
+(** [register_target t target] starts tracking an owned process-group target.
+    Under memory pressure the guardian delegates termination to
+    {!Cabal.Process_group.terminate}, which signals the confirmed process group and
+    reaps only its direct child. A pressure event terminates all registered
+    owned targets concurrently, in the same grace window as legacy-PID cleanup.
+    Registering the same target repeatedly is idempotent and safe across
+    domains. *)
+val register_target : t -> Process_group.t -> unit
+
+(** [unregister_target t target] stops tracking [target]. It is safe to call
+    when the target is not registered. *)
+val unregister_target : t -> Process_group.t -> unit
+
+(** [registered_targets t] returns a snapshot of owned process-group targets.
+    The snapshot is safe under concurrent registration and removal. *)
+val registered_targets : t -> Process_group.t list
+
+(** [register_pid t pid] starts tracking a legacy child PID for potential
+    signalling under memory pressure.
 
     {pre}
     [pid] must be a valid, running process ID.
 
     {post}
     Adds [pid] to the set of tracked PIDs; subsequent memory-pressure events
-    may send SIGTERM/SIGKILL to this PID.
+    may send SIGTERM/SIGKILL to this PID. The guardian never waits for or reaps
+    this PID because it does not own its process handle.
 
     {violators}
     (none)
@@ -125,7 +145,8 @@ val unregister_pid : t -> int -> unit
 
 (** [run t ~clock] starts the background polling loop. Reads [/proc/meminfo]
     and [/proc/stat] every [config.poll_interval_s] seconds. Logs warnings at
-    [warn_percent] and kills registered children at [kill_percent].
+    [warn_percent] and terminates registered targets (or signals legacy PIDs)
+    at [kill_percent].
     Runs until the switch is cancelled.
 
     {pre}
