@@ -69,6 +69,8 @@ Cabal does not embed their product logic.
 - `src/agentic_backend.*` and `src/registry.*` — backend module signature and
   runtime backend registry.
 - `src/backend_registry.*` — static backend descriptors and capability metadata.
+- `src/task_preflight.*` — attachment integrity/workspace checks and requested
+  capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
   validator-safe backend routing.
 - `src/backend_process.*` and `src/backend_version.*` — process execution and
@@ -131,6 +133,28 @@ let () =
     (Backend_types.show_result_status result.status)
     (List.length result.files_changed)
 ```
+
+### Media and web preflight
+
+`Backend_types.task_spec` can carry workspace-relative PNG/JPEG attachment
+metadata and an explicit web policy. Existing callers default to no attachments
+and `Web_disabled`. Before dispatch, hosts can apply their own size/count policy
+and validate both the files and the selected static descriptor:
+
+```ocaml
+let limits : Task_preflight.limits =
+  {max_attachments = 4; max_file_size_bytes = 10_000_000; max_total_size_bytes = 20_000_000}
+in
+let ( let* ) = Result.bind in
+let* () = Task_preflight.validate_inputs ~limits spec in
+Task_preflight.validate_capabilities ~descriptor spec
+```
+
+Preflight is host-neutral and does not invoke a backend, access the network, or
+choose limits. Render failures with `Task_preflight.render_error`; its messages
+exclude attachment paths and bytes. CBL-01 does not centrally wire preflight
+into `run_task`, and all built-in descriptors currently declare no media support
+and `Web_disabled` pending backend-specific transport evidence.
 
 ### Redaction contract for hosts logging backend output
 

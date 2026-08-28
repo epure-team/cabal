@@ -19,6 +19,16 @@ type project_config_surface =
 
 type precedence_confidence = High | Medium | Low
 
+type media_support = {
+  media_types : Backend_types.media_type list;
+  evidence : Backend_types.feature_evidence option;
+}
+
+type web_support = {
+  maximum : Backend_types.web_access;
+  evidence : Backend_types.feature_evidence option;
+}
+
 type capabilities = {
   structured_output : bool;
   streaming_output : bool;
@@ -29,6 +39,8 @@ type capabilities = {
   precedence_confidence : precedence_confidence;
   generated_lsp_config : bool;
   file_reading : bool;
+  media_support : media_support;
+  web_support : web_support;
   native_json_schema_output : bool;
   native_json_schema_output_evidence : Backend_types.capability_evidence option;
 }
@@ -66,6 +78,9 @@ let builtin_backends =
           precedence_confidence = High;
           generated_lsp_config = true;
           file_reading = true;
+          media_support = {media_types = []; evidence = None};
+          web_support =
+            {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = true;
           native_json_schema_output_evidence =
             Some
@@ -92,6 +107,9 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = false;
           file_reading = false;
+          media_support = {media_types = []; evidence = None};
+          web_support =
+            {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = true;
           native_json_schema_output_evidence =
             Some
@@ -118,6 +136,9 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = true;
           file_reading = true;
+          media_support = {media_types = []; evidence = None};
+          web_support =
+            {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = false;
           native_json_schema_output_evidence = None;
         };
@@ -138,6 +159,9 @@ let builtin_backends =
           precedence_confidence = High;
           generated_lsp_config = false;
           file_reading = true;
+          media_support = {media_types = []; evidence = None};
+          web_support =
+            {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = false;
           native_json_schema_output_evidence = None;
         };
@@ -164,6 +188,9 @@ let builtin_backends =
           precedence_confidence = Low;
           generated_lsp_config = false;
           file_reading = false;
+          media_support = {media_types = []; evidence = None};
+          web_support =
+            {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = false;
           native_json_schema_output_evidence = None;
         };
@@ -184,6 +211,9 @@ let builtin_backends =
           precedence_confidence = Low;
           generated_lsp_config = true;
           file_reading = false;
+          media_support = {media_types = []; evidence = None};
+          web_support =
+            {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = false;
           native_json_schema_output_evidence = None;
         };

@@ -171,23 +171,39 @@ type lsp_server_config = {
 
 (** {1 Capability Evidence} *)
 
-(** Verification method for a [capability_evidence] record.
+(** Verification method for a backend capability evidence record.
 
     Two constructors:
-    - [E2e_test] — the capability was verified by running
-      [test_native_json_schema_backends] with [CABAL_E2E_TESTS=1].
-      Self-documenting: the test file is the audit trail.
+    - [E2e_test] — the capability was verified by a reproducible end-to-end
+      test. The corresponding evidence record identifies that test.
     - [Manual_probe of string] — the capability was verified by a manual CLI
       probe.  The string payload MUST document the exact invocation used
       (e.g. [claude --version && printf '...' | claude --output-schema ...])
       so the evidence is reproducible and reviewable in PRs. *)
 type test_method =
   | E2e_test
-      (** Verified by running [test_native_json_schema_backends] with
-          [CABAL_E2E_TESTS=1]. *)
+      (** Verified by a reproducible end-to-end test identified by the
+          corresponding evidence record. *)
   | Manual_probe of string
       (** Verified by a manual CLI probe; the string documents the exact
           invocation. *)
+[@@deriving show, eq, yojson]
+
+(** Versioned evidence for a media or web capability claim.
+
+    Positive feature claims use [Some evidence]. For [E2e_test], [notes]
+    identifies the reproducible test. For [Manual_probe command], [command]
+    records the exact invocation. [evidence_url] may point to supporting
+    upstream documentation. *)
+type feature_evidence = {
+  tested_at_version : string;
+      (** Backend binary version at which the feature was verified. *)
+  test_method : test_method;  (** Reproducible verification method. *)
+  evidence_url : string option;
+      (** Optional public documentation or evidence URL. *)
+  notes : string;  (** Audit notes, including the E2E test reference. *)
+}
+[@@deriving show, eq, yojson]
 
 (** Evidence record documenting the basis for a backend capability claim.
 
@@ -203,7 +219,10 @@ type test_method =
       (e.g. ["2020-12"]).  Callers using the native path are responsible for
       supplying a conforming schema.
     - [test_method] — how the capability was verified; prevents bare-string
-      guessing and creates a reviewable paper trail.
+      guessing and creates a reviewable paper trail. For native JSON schema
+      evidence, [E2e_test] specifically denotes
+      [test_native_json_schema_backends] with [CABAL_E2E_TESTS=1];
+      [Manual_probe command] retains the exact invocation.
 
     Defined here (not in [Backend_registry]) so it is available without a
     dependency cycle. *)
@@ -219,6 +238,30 @@ type capability_evidence = {
 }
 
 (** {1 Task Specification} *)
+
+(** Supported media encodings for task attachments. *)
+type media_type = Png | Jpeg [@@deriving show, eq, yojson]
+
+(** Caller-declared metadata for one workspace-relative media file.
+
+    The file itself is not serialized into the task. Hosts should validate the
+    metadata and workspace confinement with [Task_preflight.validate_inputs]
+    before invoking a backend. *)
+type media_attachment = {
+  id : string;  (** Opaque, non-empty identifier unique within the task. *)
+  path : string;  (** Workspace-relative file path. *)
+  media_type : media_type;  (** Declared media encoding. *)
+  sha256 : string;  (** Canonical lowercase SHA-256 digest. *)
+  size_bytes : int;  (** Declared file size in bytes. *)
+}
+[@@deriving show, eq, yojson]
+
+(** Maximum web access requested for a task. *)
+type web_access =
+  | Web_disabled  (** No web access requested. *)
+  | Web_search  (** Search is allowed, but fetching result pages is not. *)
+  | Web_search_and_fetch  (** Search and result-page fetching are allowed. *)
+[@@deriving show, eq, yojson]
 
 (** Expected output specification. *)
 type output_spec =
@@ -245,6 +288,10 @@ type task_spec = {
   timeout : duration;  (** Maximum execution time (circuit breaker). *)
   expected_outputs : output_spec list;
       (** What the host application expects back. *)
+  attachments : media_attachment list; [@default []]
+      (** Workspace-relative media inputs. Legacy JSON defaults to [[]]. *)
+  web_access : web_access; [@default Web_disabled]
+      (** Requested web policy. Legacy JSON defaults to [Web_disabled]. *)
   managed_namespace : managed_namespace; [@default default_managed_namespace]
       (** Namespace for managed config markers, sidecars, temp files, and owned
           backend config directories. *)
@@ -356,7 +403,8 @@ type 'ctxt task_response = {
 
     {post}
     Returns a [task_spec] with [prompt] and [working_dir] set and all
-    optional fields at their documented defaults.
+    optional fields at their documented defaults, including no attachments and
+    [Web_disabled].
 
     {violators}
     (none)
@@ -371,6 +419,8 @@ val make_task_spec :
   working_dir:string ->
   ?timeout:duration ->
   ?expected_outputs:output_spec list ->
+  ?attachments:media_attachment list ->
+  ?web_access:web_access ->
   ?model:string ->
   ?resume_session_id:string ->
   ?max_turns:int ->
@@ -384,8 +434,10 @@ val make_task_spec :
     role-neutral task specification for resuming an interrupted backend
     session. The returned spec copies runtime fields from [base] (including
     [working_dir], [timeout], [expected_outputs], [mcp_servers], [model],
-    [max_turns], and [read_only]), replaces the prompt with the generic resume
-    instruction, clears [instructions], and sets [resume_session_id].
+    [max_turns], [read_only], [attachments], and [web_access]), replaces the
+    prompt with the generic resume instruction, clears [instructions], and sets
+    [resume_session_id]. Attachments and web policy are deliberately copied so
+    a resumed invocation retains the same caller-approved inputs.
 
     {pre}
     [resume_session_id] identifies a backend session compatible with

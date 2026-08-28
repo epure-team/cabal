@@ -21,7 +21,8 @@
     semantics should register handwritten modules after the loader, matching the
     runtime order used by the generic native E2E.
 
-    {b Built-in backends:} claude-code, codex, opencode, gemini-cli, copilot-cli. *)
+    {b Built-in backends (6):} claude-code, codex, opencode, pi, gemini-cli,
+    and copilot-cli. *)
 
 (** {1 Types} *)
 
@@ -64,6 +65,27 @@ type precedence_confidence =
       (** Limited or no reliable precedence; user config may shadow
           project config silently. *)
 
+(** Evidence-backed media encodings supported by a backend transport.
+
+    [media_types] must be empty when [evidence = None]. Positive claims require
+    versioned {!Backend_types.feature_evidence}. *)
+type media_support = {
+  media_types : Backend_types.media_type list;  (** Supported encodings. *)
+  evidence : Backend_types.feature_evidence option;
+      (** Reproducible evidence for every positive media claim. *)
+}
+
+(** Evidence-backed maximum web access supported by a backend transport.
+
+    [maximum] is hierarchical: [Web_disabled] < [Web_search] <
+    [Web_search_and_fetch]. A maximum other than [Web_disabled] requires
+    [evidence = Some _]. *)
+type web_support = {
+  maximum : Backend_types.web_access;  (** Highest supported web policy. *)
+  evidence : Backend_types.feature_evidence option;
+      (** Reproducible evidence for a positive web claim. *)
+}
+
 (** Static capability flags for a backend at its stable baseline version.
 
     These are build-time facts about what Épure supports for each backend,
@@ -97,6 +119,10 @@ type capabilities = {
       (** True when the backend can read arbitrary file paths supplied as
            references in the prompt (file-reading/tool classification).
            Claude Code and OpenCode currently expose this capability. *)
+  media_support : media_support;
+      (** Evidence-backed media types accepted by the backend transport. *)
+  web_support : web_support;
+      (** Evidence-backed maximum web access accepted by the backend. *)
   native_json_schema_output : bool;
       (** True when the backend supports native JSON schema enforcement via a
           CLI flag at invocation time (e.g. [--output-schema <schema-json>]).
@@ -158,8 +184,8 @@ val register_descriptor : descriptor -> unit
     (none)
 
     {post}
-    Returns exactly 5 descriptors (claude-code, codex, opencode, gemini-cli,
-    copilot-cli) in that order.
+    Returns exactly 6 descriptors in canonical order: claude-code, codex,
+    opencode, pi, gemini-cli, copilot-cli.
 
     {violators}
     (none)
