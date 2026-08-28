@@ -171,23 +171,39 @@ type lsp_server_config = {
 
 (** {1 Capability Evidence} *)
 
-(** Verification method for a [capability_evidence] record.
+(** Verification method for a backend capability evidence record.
 
     Two constructors:
-    - [E2e_test] — the capability was verified by running
-      [test_native_json_schema_backends] with [CABAL_E2E_TESTS=1].
-      Self-documenting: the test file is the audit trail.
+    - [E2e_test] — the capability was verified by a reproducible end-to-end
+      test. The corresponding evidence record identifies that test.
     - [Manual_probe of string] — the capability was verified by a manual CLI
       probe.  The string payload MUST document the exact invocation used
       (e.g. [claude --version && printf '...' | claude --output-schema ...])
       so the evidence is reproducible and reviewable in PRs. *)
 type test_method =
   | E2e_test
-      (** Verified by running [test_native_json_schema_backends] with
-          [CABAL_E2E_TESTS=1]. *)
+      (** Verified by a reproducible end-to-end test identified by the
+          corresponding evidence record. *)
   | Manual_probe of string
       (** Verified by a manual CLI probe; the string documents the exact
           invocation. *)
+[@@deriving show, eq, yojson]
+
+(** Versioned evidence for a media or web capability claim.
+
+    Positive feature claims use [Some evidence]. For [E2e_test], [notes]
+    identifies the reproducible test. For [Manual_probe command], [command]
+    records the exact invocation. [evidence_url] may point to supporting
+    upstream documentation. *)
+type feature_evidence = {
+  tested_at_version : string;
+      (** Backend binary version at which the feature was verified. *)
+  test_method : test_method;  (** Reproducible verification method. *)
+  evidence_url : string option;
+      (** Optional public documentation or evidence URL. *)
+  notes : string;  (** Audit notes, including the E2E test reference. *)
+}
+[@@deriving show, eq, yojson]
 
 (** Evidence record documenting the basis for a backend capability claim.
 
@@ -203,7 +219,10 @@ type test_method =
       (e.g. ["2020-12"]).  Callers using the native path are responsible for
       supplying a conforming schema.
     - [test_method] — how the capability was verified; prevents bare-string
-      guessing and creates a reviewable paper trail.
+      guessing and creates a reviewable paper trail. For native JSON schema
+      evidence, [E2e_test] specifically denotes
+      [test_native_json_schema_backends] with [CABAL_E2E_TESTS=1];
+      [Manual_probe command] retains the exact invocation.
 
     Defined here (not in [Backend_registry]) so it is available without a
     dependency cycle. *)
