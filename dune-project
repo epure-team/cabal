@@ -12,6 +12,7 @@
   (dune (>= 3.13))
   yojson
   (jsonschema (>= 0.1.0))
+  digestif
   (eio (>= 1.0))
   (eio_posix (>= 1.0))
   (eio_main (and :with-test (>= 1.0)))

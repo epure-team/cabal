@@ -15,6 +15,11 @@
  (modules test_backend_registry))
 
 (test
+ (name test_task_preflight)
+ (libraries cabal alcotest digestif unix)
+ (modules test_task_preflight))
+
+(test
  (name test_backend_version)
  (libraries cabal alcotest eio eio_posix unix)
  (modules test_backend_version))
