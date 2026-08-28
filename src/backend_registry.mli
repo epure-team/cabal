@@ -21,8 +21,8 @@
     semantics should register handwritten modules after the loader, matching the
     runtime order used by the generic native E2E.
 
-    {b Built-in backends (6):} claude-code, codex, opencode, gemini-cli,
-    copilot-cli, and pi. *)
+    {b Built-in backends (6):} claude-code, codex, opencode, pi, gemini-cli,
+    and copilot-cli. *)
 
 (** {1 Types} *)
 
