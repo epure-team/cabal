@@ -33,66 +33,6 @@ let validate_task_namespace (spec : task_spec) =
    This is the version-detection primitive: callers should never crash on
    a non-zero exit from a --version command. *)
 
-(** Default cap for version / availability probes. Five seconds is long enough
-    for cold-start CLIs (large Node binaries on slow disks) but short enough
-    that a hung backend cannot freeze registry initialisation for the whole
-    host. *)
-let default_probe_timeout_seconds = 5.0
-
-let capture_version_output ~env
-    ?(timeout_seconds = default_probe_timeout_seconds) cmd =
-  let proc_mgr = Eio.Stdenv.process_mgr env in
-  let clock = Eio.Stdenv.clock env in
-  let stdout_buf = Buffer.create 256 in
-  let stderr_buf = Buffer.create 64 in
-  let outcome =
-    Eio.Time.with_timeout clock timeout_seconds (fun () ->
-        (try
-           Eio.Process.run
-             proc_mgr
-             ~stdout:(Eio.Flow.buffer_sink stdout_buf)
-             ~stderr:(Eio.Flow.buffer_sink stderr_buf)
-             cmd
-         with _ -> ()) ;
-        Ok ())
-  in
-  match outcome with
-  | Error `Timeout ->
-      Error
-        (Printf.sprintf
-           "timeout after %.1fs running %s"
-           timeout_seconds
-           (String.concat " " cmd))
-  | Ok () ->
-      let out = Buffer.contents stdout_buf in
-      if out <> "" then Ok out
-      else
-        let err = Buffer.contents stderr_buf in
-        if err <> "" then Ok err
-        else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
-
-(* Check if a command is available by running it.
-   Distinguishes three outcomes: clean exit, process error (missing binary
-   or non-zero exit raising Eio.Io), and timeout. *)
-let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
-    =
-  let proc_mgr = Eio.Stdenv.process_mgr env in
-  let clock = Eio.Stdenv.clock env in
-  let stdout_buf = Buffer.create 64 in
-  let stderr_buf = Buffer.create 64 in
-  let outcome =
-    Eio.Time.with_timeout clock timeout_seconds (fun () ->
-        try
-          Eio.Process.run
-            proc_mgr
-            ~stdout:(Eio.Flow.buffer_sink stdout_buf)
-            ~stderr:(Eio.Flow.buffer_sink stderr_buf)
-            cmd ;
-          Ok true
-        with Eio.Io _ -> Ok false)
-  in
-  match outcome with Error `Timeout -> false | Ok ok -> ok
-
 (* Write MCP server configuration to a JSON file *)
 let write_mcp_config ~env ~path configs =
   let fs = Eio.Stdenv.fs env in
@@ -232,119 +172,226 @@ let get_git_diff_content ~sw:_ ~env ~working_dir =
     in
     String.concat "\n" parts
 
-(* Run a subprocess and capture output with timeout.
-   Stderr is captured and returned in process_result for the caller
-   to display appropriately (toast in TUI, print in CLI).
-   If on_stdout is provided, it's called for each line of stdout as it arrives. *)
+let close_noerr flow = try Eio.Flow.close flow with _ -> ()
+
+let without_trailing_cr line =
+  let length = String.length line in
+  if length > 0 && line.[length - 1] = '\r' then String.sub line 0 (length - 1)
+  else line
+
+(* Read a flow in chunks so timeout/cancellation never discards bytes that were
+   already delivered by Eio. Streaming callbacks retain the existing line-based
+   contract while the captured buffer retains the original bytes verbatim. *)
+let read_output ?on_stdout ~max_bytes flow output =
+  let pending_line = Buffer.create 128 in
+  let emit_completed_lines chunk =
+    match on_stdout with
+    | None -> ()
+    | Some callback ->
+        let start = ref 0 in
+        let length = String.length chunk in
+        for index = 0 to length - 1 do
+          if chunk.[index] = '\n' then begin
+            Buffer.add_substring pending_line chunk !start (index - !start) ;
+            callback (without_trailing_cr (Buffer.contents pending_line)) ;
+            Buffer.clear pending_line ;
+            start := index + 1
+          end
+        done ;
+        if !start < length then
+          Buffer.add_substring pending_line chunk !start (length - !start)
+  in
+  let chunk_buffer = Cstruct.create 4096 in
+  let rec loop () =
+    match Eio.Flow.single_read flow chunk_buffer with
+    | count ->
+        if Buffer.length output + count > max_bytes then
+          raise Eio.Buf_read.Buffer_limit_exceeded ;
+        let chunk = Cstruct.to_string (Cstruct.sub chunk_buffer 0 count) in
+        Buffer.add_string output chunk ;
+        emit_completed_lines chunk ;
+        loop ()
+    | exception End_of_file -> (
+        match on_stdout with
+        | Some callback when Buffer.length pending_line > 0 ->
+            callback (without_trailing_cr (Buffer.contents pending_line))
+        | _ -> ())
+  in
+  loop ()
+
+let cleanup_drain_timeout_seconds = 3.0
+
+let handshake_failure_message = function
+  | Process_group.Established _ -> None
+  | Process_group.Timed_out ->
+      Some "Backend launch handshake timed out before EXEC confirmation"
+  | Process_group.Invalid message ->
+      Some ("Backend launch handshake invalid before EXEC confirmation: " ^ message)
+  | Process_group.Launcher_failed {message; _} ->
+      Some ("Backend launcher failed before EXEC confirmation: " ^ message)
+
+let drain_output ~clock ~max_bytes flow output =
+  Eio.Cancel.protect (fun () ->
+      try
+        ignore
+          (Eio.Time.with_timeout clock cleanup_drain_timeout_seconds (fun () ->
+               read_output ~max_bytes flow output ;
+               Ok ()))
+      with _ -> ())
+
+(* Run a subprocess and capture output with timeout. Stderr is captured and
+   returned in process_result for the caller to display appropriately (toast in
+   TUI, print in CLI). If on_stdout is provided, it is called for each line of
+   stdout as it arrives. *)
 let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
     ~timeout_seconds ?parse_cost ?on_stdout ?guardian () =
   let proc_mgr = Eio.Stdenv.process_mgr env in
   let fs = Eio.Stdenv.fs env in
   let clock = Eio.Stdenv.clock env in
   let start_time = Eio.Time.now clock in
-  (* Create pipes for stdout/stderr *)
-  let stdout_r, stdout_w = Eio.Process.pipe ~sw proc_mgr in
-  let stderr_r, stderr_w = Eio.Process.pipe ~sw proc_mgr in
-  (* Create stdin pipe if we have content to write *)
+  let stdout_r, stdout_w = Eio_unix.pipe sw in
+  let stderr_r, stderr_w = Eio_unix.pipe sw in
   let stdin_r, stdin_w =
     match stdin_content with
     | Some _ ->
-        let r, w = Eio.Process.pipe ~sw proc_mgr in
-        (Some r, Some w)
+        let reader, writer = Eio_unix.pipe sw in
+        (Some reader, Some writer)
     | None -> (None, None)
   in
-  (* Spawn the process *)
-  let proc =
-    Eio.Process.spawn
-      ~sw
-      proc_mgr
-      ~cwd:Eio.Path.(fs / working_dir)
-      ?stdin:(Option.map (fun r -> (r :> _ Eio.Flow.source)) stdin_r)
-      ~stdout:(stdout_w :> _ Eio.Flow.sink)
-      ~stderr:(stderr_w :> _ Eio.Flow.sink)
-      cmd
-  in
-  (* Register PID with resource guardian for memory-pressure killing *)
-  let pid = Eio.Process.pid proc in
-  Option.iter (fun g -> Resource_guardian.register_pid g pid) guardian ;
-  (* Close write ends - we only read from stdout/stderr *)
-  Eio.Flow.close stdout_w ;
-  Eio.Flow.close stderr_w ;
-  (* Write stdin content and close *)
-  (match (stdin_content, stdin_w) with
-  | Some content, Some w ->
-      Eio.Flow.copy_string content w ;
-      Eio.Flow.close w
-  | _ -> ()) ;
-  (* Close read end of stdin pipe if we created one *)
-  Option.iter Eio.Flow.close stdin_r ;
-  (* Read output with timeout *)
   let stdout_buf = Buffer.create 4096 in
   let stderr_buf = Buffer.create 1024 in
+  let target = ref None in
+  let guardian_registered = ref false in
+  let released = ref false in
+  let cleanup () =
+    Option.iter
+      (fun process_group ->
+        if !guardian_registered then
+          Option.iter
+            (fun g -> Resource_guardian.unregister_target g process_group)
+            guardian ;
+        guardian_registered := false ;
+        if not !released then begin
+          (* Start draining before TERM so a handler that emits a full pipe can
+             finish and exit during the launcher's bounded grace period. The
+             three fibres are cancel-protected and each pipe has exactly one
+             reader: the timeout's I/O fibres have already been cancelled. *)
+          Eio.Cancel.protect (fun () ->
+              Eio.Fiber.all
+                [
+                  (fun () ->
+                    try Process_group.terminate ~clock process_group
+                    with _ -> ());
+                  (fun () ->
+                    drain_output
+                      ~clock
+                      ~max_bytes:(128 * 1024 * 1024)
+                      stdout_r
+                      stdout_buf);
+                  (fun () ->
+                    drain_output
+                      ~clock
+                      ~max_bytes:(16 * 1024 * 1024)
+                      stderr_r
+                      stderr_buf);
+                ])
+        end)
+      !target ;
+    close_noerr stdout_r ;
+    close_noerr stdout_w ;
+    close_noerr stderr_r ;
+    close_noerr stderr_w ;
+    Option.iter close_noerr stdin_r ;
+    Option.iter close_noerr stdin_w
+  in
   let result = ref None in
   let timeout_result =
-    Eio.Time.with_timeout clock timeout_seconds (fun () ->
-        (* Read stdout and stderr concurrently *)
-        Eio.Fiber.both
-          (fun () ->
-            let buf =
-              Eio.Buf_read.of_flow ~max_size:(128 * 1024 * 1024) stdout_r
+    Fun.protect ~finally:cleanup (fun () ->
+        let process_group =
+          Process_group.spawn
+            ~sw
+            ~clock
+            ~mgr:proc_mgr
+            ~cwd:Eio.Path.(fs / working_dir)
+            ?stdin:stdin_r
+            ~stdout:stdout_w
+            ~stderr:stderr_w
+            cmd
+        in
+        target := Some process_group ;
+        (* The child owns these ends after spawn. *)
+        close_noerr stdout_w ;
+        close_noerr stderr_w ;
+        Option.iter close_noerr stdin_r ;
+        match handshake_failure_message (Process_group.handshake process_group) with
+        | Some message -> Error (`Handshake_failed message)
+        | None ->
+            Option.iter
+              (fun g ->
+                Resource_guardian.register_target g process_group ;
+                guardian_registered := true)
+              guardian ;
+            let io_result =
+              Eio.Time.with_timeout clock timeout_seconds (fun () ->
+                  Eio.Fiber.all
+                    [
+                      (fun () ->
+                        match (stdin_content, stdin_w) with
+                        | Some content, Some writer ->
+                            Fun.protect
+                              ~finally:(fun () -> close_noerr writer)
+                              (fun () ->
+                                try Eio.Flow.copy_string content writer
+                                with Eio.Io _ -> ())
+                        | _ -> ());
+                      (fun () ->
+                        read_output
+                          ?on_stdout
+                          ~max_bytes:(128 * 1024 * 1024)
+                          stdout_r
+                          stdout_buf);
+                      (fun () ->
+                        (* Stderr is deliberately not streamed to avoid corrupting a
+                            TUI. The captured bytes are returned to the caller. *)
+                        read_output
+                          ~max_bytes:(16 * 1024 * 1024)
+                          stderr_r
+                          stderr_buf);
+                      (fun () ->
+                        result := Some (Process_group.await_backend process_group));
+                    ] ;
+                  Ok ())
             in
-            (* If streaming callback provided, read line by line *)
-            match on_stdout with
-            | Some callback -> (
-                try
-                  while true do
-                    let line = Eio.Buf_read.line buf in
-                    Buffer.add_string stdout_buf line ;
-                    Buffer.add_char stdout_buf '\n' ;
-                    callback line
-                  done
-                with End_of_file -> ())
-            | None ->
-                (* No streaming, read all at once *)
-                Buffer.add_string stdout_buf (Eio.Buf_read.take_all buf))
-          (fun () ->
-            (* Capture stderr silently - no live streaming to avoid TUI corruption.
-               The full stderr is returned in process_result.stderr for callers
-               to display appropriately (toast for TUI, print for CLI). *)
-            let buf =
-              Eio.Buf_read.of_flow ~max_size:(16 * 1024 * 1024) stderr_r
-            in
-            try
-              while true do
-                let line = Eio.Buf_read.line buf in
-                Buffer.add_string stderr_buf line ;
-                Buffer.add_char stderr_buf '\n'
-              done
-            with End_of_file -> ()) ;
-        (* Wait for process to complete *)
-        let status = Eio.Process.await proc in
-        result := Some status ;
-        Ok ())
+            match io_result with
+            | Error `Timeout -> Error `Timeout
+            | Ok () ->
+                (* This is the normal-completion commit boundary. Once all I/O and
+                   backend status have completed, RELEASE and supervisor reaping are
+                   cancel-protected and cannot be reclassified as a task timeout. *)
+                Eio.Cancel.protect (fun () ->
+                    Process_group.release process_group ;
+                    ignore (Process_group.await process_group) ;
+                    released := true ;
+                    Ok ()))
   in
-  (* Unregister PID from resource guardian — process is done *)
-  Option.iter (fun g -> Resource_guardian.unregister_pid g pid) guardian ;
   let elapsed_seconds = Eio.Time.now clock -. start_time in
   let stdout_str = Buffer.contents stdout_buf in
   let stderr_str = Buffer.contents stderr_buf in
   let elapsed = duration_of_seconds elapsed_seconds in
   match timeout_result with
   | Error `Timeout ->
-      (* On timeout, try graceful termination first, then force kill. *)
-      (try
-         Eio.Process.signal proc Sys.sigterm ;
-         match
-           Eio.Time.with_timeout clock 2.0 (fun () ->
-               Ok (Eio.Process.await proc))
-         with
-         | Ok _ -> ()
-         | Error `Timeout ->
-             Eio.Process.signal proc Sys.sigkill ;
-             ignore (Eio.Process.await proc)
-       with _ -> ()) ;
       {
         status = Timeout;
+        stdout = stdout_str;
+        stderr = stderr_str;
+        exit_code = -1;
+        elapsed;
+        cost = None;
+        session_id = None;
+      }
+  | Error (`Handshake_failed message) ->
+      {
+        status = Failed message;
         stdout = stdout_str;
         stderr = stderr_str;
         exit_code = -1;
@@ -397,6 +444,41 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             cost = None;
             session_id = None;
           })
+
+(** Default cap for version / availability probes. Five seconds is long enough
+    for cold-start CLIs (large Node binaries on slow disks) but short enough
+    that a hung backend cannot freeze registry initialisation for the whole
+    host. *)
+let default_probe_timeout_seconds = 5.0
+
+let run_probe ~env ~timeout_seconds cmd =
+  Eio.Switch.run @@ fun sw ->
+  run_process ~sw ~env ~cmd ~working_dir:(Sys.getcwd ()) ~timeout_seconds ()
+
+let capture_version_output ~env
+    ?(timeout_seconds = default_probe_timeout_seconds) cmd =
+  try
+    let result = run_probe ~env ~timeout_seconds cmd in
+    match result.status with
+    | Timeout ->
+        Error
+          (Printf.sprintf
+             "timeout after %.1fs running %s"
+             timeout_seconds
+             (String.concat " " cmd))
+    | _ ->
+        if result.stdout <> "" then Ok result.stdout
+        else if result.stderr <> "" then Ok result.stderr
+        else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
+  with _ -> Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
+
+let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
+    =
+  try
+    match (run_probe ~env ~timeout_seconds cmd).status with
+    | Success -> true
+    | Failed _ | Timeout | Cancelled -> false
+  with _ -> false
 
 (* Standard task execution flow shared by all backends.
    Uses Fun.protect to ensure MCP config cleanup even on exception. *)

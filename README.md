@@ -63,6 +63,43 @@ prepares backend-owned or Cabal-owned configuration, runs the CLI process, and
 normalizes results and session log events. Backend CLIs remain external tools;
 Cabal does not embed their product logic.
 
+### Process-tree termination
+
+`Backend_process` starts every backend through the installed
+`cabal-process-group-launcher` executable. On POSIX hosts (including the Linux
+and macOS CI targets), this launcher is a small supervisor: it creates a new
+session/process group, starts the backend child, and remains the group leader.
+Cabal confirms setup over a dedicated, bounded handshake FD: it receives the
+PGID immediately after `setsid` and before the backend is forked. The parent
+acknowledges that ownership before a fork is permitted; after the child `exec`
+succeeds, the launcher writes an explicit `EXEC` record before FD EOF. EOF
+alone never confirms `exec`, so a bare PGID after launcher death is not a
+successful handshake. If that PGID cannot be delivered, no backend exists. A
+launcher-side pre-exec failure is reported separately. A second
+bounded status FD reports the backend child's actual `EXIT` or `SIGNAL` result;
+the parent sends `TERM` or `RELEASE` over a separate control FD.
+
+Timeout, cancellation, and exceptional cleanup terminate the confirmed group
+with TERM, a full grace period, then KILL. The supervisor stays alive after
+TERM, preventing PGID reuse before KILL and ensuring descendants cannot outlive
+the command when the backend leader exits first. Unexpected supervisor death is
+catastrophic: Cabal immediately attempts group TERM and KILL back-to-back and
+may forfeit the remaining grace period before retiring ownership, avoiding a
+later stale negative-PGID signal after the group is no longer anchored. Normal
+completion is also two-phase: Cabal observes the backend status, drains
+stdout/stderr, then sends `RELEASE` and reaps the supervisor. If RELEASE delivery
+fails, Cabal clears the cached PGID and signals only its direct supervisor; a
+live official supervisor performs bounded group cleanup itself, avoiding a
+stale negative-PID signal.
+Captured bytes are retained through either path. If the handshake never
+establishes a group, Cabal falls back only to signalling its direct child; it
+never sends a negative-PID signal for an unconfirmed group.
+`Resource_guardian` registers these owned targets and uses
+the same group-aware termination path under memory pressure. The launcher is
+included in `@install`; installations must retain `cabal-process-group-launcher`
+on `PATH` (or set
+`CABAL_PROCESS_GROUP_LAUNCHER` to its path).
+
 ## Layout
 
 - `src/backend_types.*` — shared result, usage, cost, and streaming event types.
@@ -73,8 +110,9 @@ Cabal does not embed their product logic.
   capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
   validator-safe backend routing.
-- `src/backend_process.*` and `src/backend_version.*` — process execution and
-  version probing.
+- `src/backend_process.*`, `src/process_group.*`, and `src/backend_version.*`
+  — process execution, process-tree ownership, and version probing.
+- `bin/process_group_launcher.ml` — installed pre-exec session/group launcher.
 - `src/backend_config_gen.*` and `src/backend_config_writer.*` — project config
   ownership, generation, and write safety.
 - `src/adapter_loader.*`, `src/yaml_adapter.*`, and `src/adapters/*.yaml` —
