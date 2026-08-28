@@ -242,6 +242,27 @@ let test_precedence_confidence_values () =
   check "gemini-cli" Low ;
   check "copilot-cli" Low
 
+let test_media_and_web_capabilities_disabled_by_default () =
+  List.iter
+    (fun (d : Backend_registry.descriptor) ->
+      Alcotest.(check int)
+        (d.id ^ " has no supported media types")
+        0
+        (List.length d.capabilities.media_support.media_types) ;
+      Alcotest.(check bool)
+        (d.id ^ " has no media evidence")
+        true
+        (d.capabilities.media_support.evidence = None) ;
+      Alcotest.(check bool)
+        (d.id ^ " has web access disabled")
+        true
+        (d.capabilities.web_support.maximum = Backend_types.Web_disabled) ;
+      Alcotest.(check bool)
+        (d.id ^ " has no web evidence")
+        true
+        (d.capabilities.web_support.evidence = None))
+    (Backend_registry.all ())
+
 (** {1 AC4 — backend_supports_file_reading routed through registry} *)
 
 let test_registry_based_file_reading () =
@@ -614,6 +635,10 @@ let () =
             "precedence_confidence: exact values per backend"
             `Quick
             test_precedence_confidence_values;
+          Alcotest.test_case
+            "media and web support disabled for all built-ins"
+            `Quick
+            test_media_and_web_capabilities_disabled_by_default;
         ] );
       ( "AC4 registry routing",
         [

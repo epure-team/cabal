@@ -98,6 +98,15 @@ type lsp_server_config = {
 (* Capability Evidence *)
 
 type test_method = E2e_test | Manual_probe of string
+[@@deriving show, eq, yojson]
+
+type feature_evidence = {
+  tested_at_version : string;
+  test_method : test_method;
+  evidence_url : string option;
+  notes : string;
+}
+[@@deriving show, eq, yojson]
 
 type capability_evidence = {
   tested_at_version : string;
