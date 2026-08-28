@@ -107,6 +107,20 @@ type capability_evidence = {
 
 (* Task Specification *)
 
+type media_type = Png | Jpeg [@@deriving show, eq, yojson]
+
+type media_attachment = {
+  id : string;
+  path : string;
+  media_type : media_type;
+  sha256 : string;
+  size_bytes : int;
+}
+[@@deriving show, eq, yojson]
+
+type web_access = Web_disabled | Web_search | Web_search_and_fetch
+[@@deriving show, eq, yojson]
+
 type output_spec = Files_changed | Structured_report
 [@@deriving show, eq, yojson]
 
@@ -118,6 +132,8 @@ type task_spec = {
   working_dir : string;
   timeout : duration;
   expected_outputs : output_spec list;
+  attachments : media_attachment list; [@default []]
+  web_access : web_access; [@default Web_disabled]
   managed_namespace : managed_namespace; [@default default_managed_namespace]
   model : string option; [@default None]
       (** Optional model to use (e.g., "opus", "sonnet", "haiku"). Backend-specific. *)
@@ -189,9 +205,9 @@ type 'ctxt task_response = {result : task_result; ctxt : 'ctxt}
 (* Constructors *)
 
 let make_task_spec ~prompt ?(instructions = "") ?(mcp_servers = [])
-    ?(lsp_servers = []) ~working_dir ?(timeout = max_float)
-    ?(expected_outputs = [Files_changed; Structured_report]) ?model
-    ?resume_session_id ?max_turns
+    ?(lsp_servers = []) ~working_dir ?(timeout = 300.0)
+    ?(expected_outputs = [Files_changed; Structured_report]) ?(attachments = [])
+    ?(web_access = Web_disabled) ?model ?resume_session_id ?max_turns
     ?(managed_namespace = default_managed_namespace) ?(read_only = false)
     ?json_schema () =
   (match validate_managed_namespace managed_namespace with
@@ -205,6 +221,8 @@ let make_task_spec ~prompt ?(instructions = "") ?(mcp_servers = [])
     working_dir;
     timeout;
     expected_outputs;
+    attachments;
+    web_access;
     managed_namespace;
     model;
     resume_session_id;
@@ -223,6 +241,8 @@ let make_resume_task_spec ~base ~resume_session_id () =
     prompt = generic_resume_prompt;
     instructions = "";
     resume_session_id = Some resume_session_id;
+    attachments = base.attachments;
+    web_access = base.web_access;
   }
 
 let make_mcp_server_config ~name ~command ?(args = []) ?(env = []) () =

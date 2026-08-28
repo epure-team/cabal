@@ -32,6 +32,8 @@ let minimal_spec ?resume_session_id () : Backend_types.task_spec =
     working_dir = "/tmp";
     timeout = 60.0;
     expected_outputs = [];
+    attachments = [];
+    web_access = Backend_types.Web_disabled;
     model = None;
     resume_session_id;
     max_turns = None;
