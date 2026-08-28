@@ -220,6 +220,30 @@ type capability_evidence = {
 
 (** {1 Task Specification} *)
 
+(** Supported media encodings for task attachments. *)
+type media_type = Png | Jpeg [@@deriving show, eq, yojson]
+
+(** Caller-declared metadata for one workspace-relative media file.
+
+    The file itself is not serialized into the task. Hosts should validate the
+    metadata and workspace confinement with [Task_preflight.validate_inputs]
+    before invoking a backend. *)
+type media_attachment = {
+  id : string;  (** Opaque, non-empty identifier unique within the task. *)
+  path : string;  (** Workspace-relative file path. *)
+  media_type : media_type;  (** Declared media encoding. *)
+  sha256 : string;  (** Canonical lowercase SHA-256 digest. *)
+  size_bytes : int;  (** Declared file size in bytes. *)
+}
+[@@deriving show, eq, yojson]
+
+(** Maximum web access requested for a task. *)
+type web_access =
+  | Web_disabled  (** No web access requested. *)
+  | Web_search  (** Search is allowed, but fetching result pages is not. *)
+  | Web_search_and_fetch  (** Search and result-page fetching are allowed. *)
+[@@deriving show, eq, yojson]
+
 (** Expected output specification. *)
 type output_spec =
   | Files_changed  (** Expect file modifications (detected via git diff) *)
@@ -245,6 +269,10 @@ type task_spec = {
   timeout : duration;  (** Maximum execution time (circuit breaker). *)
   expected_outputs : output_spec list;
       (** What the host application expects back. *)
+  attachments : media_attachment list; [@default []]
+      (** Workspace-relative media inputs. Legacy JSON defaults to [[]]. *)
+  web_access : web_access; [@default Web_disabled]
+      (** Requested web policy. Legacy JSON defaults to [Web_disabled]. *)
   managed_namespace : managed_namespace; [@default default_managed_namespace]
       (** Namespace for managed config markers, sidecars, temp files, and owned
           backend config directories. *)
@@ -356,7 +384,8 @@ type 'ctxt task_response = {
 
     {post}
     Returns a [task_spec] with [prompt] and [working_dir] set and all
-    optional fields at their documented defaults.
+    optional fields at their documented defaults, including no attachments and
+    [Web_disabled].
 
     {violators}
     (none)
@@ -371,6 +400,8 @@ val make_task_spec :
   working_dir:string ->
   ?timeout:duration ->
   ?expected_outputs:output_spec list ->
+  ?attachments:media_attachment list ->
+  ?web_access:web_access ->
   ?model:string ->
   ?resume_session_id:string ->
   ?max_turns:int ->
@@ -384,8 +415,10 @@ val make_task_spec :
     role-neutral task specification for resuming an interrupted backend
     session. The returned spec copies runtime fields from [base] (including
     [working_dir], [timeout], [expected_outputs], [mcp_servers], [model],
-    [max_turns], and [read_only]), replaces the prompt with the generic resume
-    instruction, clears [instructions], and sets [resume_session_id].
+    [max_turns], [read_only], [attachments], and [web_access]), replaces the
+    prompt with the generic resume instruction, clears [instructions], and sets
+    [resume_session_id]. Attachments and web policy are deliberately copied so
+    a resumed invocation retains the same caller-approved inputs.
 
     {pre}
     [resume_session_id] identifies a backend session compatible with
