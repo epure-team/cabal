@@ -152,7 +152,7 @@ let builtin_backends =
         {
           structured_output = true;
           streaming_output = true;
-          session_resume = true;
+          session_resume = false;
           mcp_support = Mcp_none;
           read_only_support = false;
           project_config_surface = Config_none;

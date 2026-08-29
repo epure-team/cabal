@@ -433,30 +433,53 @@ let restore_path = function
   | Some path -> Unix.putenv "PATH" path
   | None -> Unix.putenv "PATH" ""
 
+let restore_env name = function
+  | Some value -> Unix.putenv name value
+  | None -> Unix.putenv name ""
+
+let process_group_launcher_path () =
+  let test_dir = Filename.dirname (Unix.realpath Sys.executable_name) in
+  let build_dir = Filename.dirname test_dir in
+  Filename.concat build_dir "bin/process_group_launcher.exe"
+
 let test_gate_wired_uses_copilot_binary_directly () =
   let dir = Filename.temp_dir "epure-copilot-version-" "" in
   write_executable
     (Filename.concat dir "copilot")
-    "#!/bin/sh\nprintf '%s\n' '1.0.34'\n" ;
+    "#!/bin/sh\nprintf '%s\n' '1.0.33'\n" ;
   write_executable
     (Filename.concat dir "gh")
-    "#!/bin/sh\nprintf '%s\n' 'gh copilot version 1.0.33'\n" ;
+    "#!/bin/sh\nprintf '%s\n' 'gh copilot version 1.0.34'\n" ;
+  let launcher = process_group_launcher_path () in
+  Alcotest.(check bool)
+    "process-group launcher dependency exists"
+    true
+    (Sys.file_exists launcher) ;
   let old_path = Sys.getenv_opt "PATH" in
+  let old_launcher = Sys.getenv_opt "CABAL_PROCESS_GROUP_LAUNCHER" in
   Fun.protect
     ~finally:(fun () ->
       restore_path old_path ;
+      restore_env "CABAL_PROCESS_GROUP_LAUNCHER" old_launcher ;
       cleanup_temp_bin dir ["copilot"; "gh"])
     (fun () ->
       Unix.putenv "PATH" dir ;
+      Unix.putenv "CABAL_PROCESS_GROUP_LAUNCHER" launcher ;
       Eio_posix.run @@ fun env ->
       match
         Cabal.Backend_completer.run_version_gate
           ~env
           ~backend_name:"copilot-cli"
-      with
-      | Ok () -> ()
-      | Error msg ->
-          Alcotest.failf "expected copilot --version gate to pass: %s" msg)
+       with
+       | Ok () ->
+           Alcotest.fail
+             "expected direct copilot 1.0.33 to be rejected; the probe was \
+              skipped or gh was used"
+       | Error msg ->
+           Alcotest.(check bool)
+             "error carries the direct copilot version"
+             true
+             (contains_string msg "1.0.33"))
 
 (** {1 Story #519 — AC1: Prerelease detection} *)
 

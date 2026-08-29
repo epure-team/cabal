@@ -28,6 +28,7 @@
 (test
  (name test_backend_version)
  (libraries cabal alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_backend_version))
 
 (test
