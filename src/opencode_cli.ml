@@ -68,19 +68,15 @@ let config_applied setup_result =
   | Some result -> Backend_config_writer.write_result_was_applied result
   | None -> false
 
-let invalid_process_result cmd (result : Backend_process.process_result) =
-  Agentic_backend.Config_invalid
-    (Printf.sprintf
-       "native config validation failed: %s\n\
-        status: %s\n\
-        stdout:\n\
-        %s\n\
-        stderr:\n\
-        %s"
-       (String.concat " " cmd)
-       (status_text result.status)
-       result.stdout
-       result.stderr)
+(* Formats what the CLI actually did. Kept whole -- it is the only evidence a
+   reader gets about why no verdict came back. *)
+let process_result_detail cmd (result : Backend_process.process_result) =
+  Printf.sprintf
+    "%s\nstatus: %s\nstdout:\n%s\nstderr:\n%s"
+    (String.concat " " cmd)
+    (status_text result.status)
+    result.stdout
+    result.stderr
 
 let check_project_config ~sw ~env ~project_dir ~setup_result =
   if not (config_applied setup_result) then
@@ -105,7 +101,18 @@ let check_project_config ~sw ~env ~project_dir ~setup_result =
       in
       match result.status with
       | Success -> Agentic_backend.Config_valid
-      | Failed _ | Timeout | Cancelled -> invalid_process_result cmd result
+      | Failed _ | Timeout | Cancelled ->
+          (* Same reasoning as Claude_code.check_project_config: anything but
+             success is evidence about the machine -- an unauthenticated CLI, a
+             rate limit, a flag that moved -- and Config_invalid asserts the
+             settings file is wrong, which none of those support. The process
+             output is kept so a genuine rejection stays readable. *)
+          Agentic_backend.Config_check_unsupported
+            (Printf.sprintf
+               "OpenCode native config validation returned no verdict; \
+                treating the config as unchecked.\n\
+                %s"
+               (process_result_detail cmd result))
     with e ->
       Agentic_backend.Config_check_unsupported
         (Printf.sprintf

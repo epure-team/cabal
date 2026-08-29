@@ -8,6 +8,25 @@ by the date a change merged to `main`.
 
 ## Unreleased
 
+### Changed
+- **`Claude_code.check_project_config` no longer reports `Config_invalid`
+  when the CLI returns no verdict.** A non-zero exit, a timeout or a
+  cancellation previously all became `Config_invalid`, which asserts the
+  settings file is wrong. None of them supports that: an unauthenticated
+  CLI, a rate limit, and `--init-only` disappearing from a self-updating
+  binary (it is absent from `claude --help` as of 2.1.251) each exit
+  non-zero without saying anything about the settings. They now yield
+  `Config_check_unsupported`, carrying the full process output so a real
+  rejection stays legible. Only a clean `Success` still means
+  `Config_valid`.
+
+  Callers that treated `Config_invalid` as "the config is bad" keep
+  working; callers that treated it as "something went wrong" must now
+  also handle `Config_check_unsupported`. The visible effect in épure is
+  that `test_backend_project_config_validation`, which has no PATH gate,
+  no longer fails on a machine where `claude` is installed but cannot
+  answer.
+
 ### Added
 - **Per-backend `models` enumeration** (non-breaking, additive).
   Every adapter implementing `Agentic_backend.S` now exposes a
