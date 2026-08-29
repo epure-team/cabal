@@ -214,7 +214,7 @@ type 'ctxt task_response = {result : task_result; ctxt : 'ctxt}
 (* Constructors *)
 
 let make_task_spec ~prompt ?(instructions = "") ?(mcp_servers = [])
-    ?(lsp_servers = []) ~working_dir ?(timeout = 300.0)
+    ?(lsp_servers = []) ~working_dir ?(timeout = max_float)
     ?(expected_outputs = [Files_changed; Structured_report]) ?(attachments = [])
     ?(web_access = Web_disabled) ?model ?resume_session_id ?max_turns
     ?(managed_namespace = default_managed_namespace) ?(read_only = false)

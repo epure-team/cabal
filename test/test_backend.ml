@@ -108,7 +108,7 @@ let test_make_task_spec () =
   Alcotest.(check string) "prompt" "Test prompt" spec.prompt ;
   Alcotest.(check string) "instructions default" "" spec.instructions ;
   Alcotest.(check string) "working_dir" "/tmp/test" spec.working_dir ;
-  Alcotest.(check (float 0.01)) "default timeout" 300.0 spec.timeout ;
+  Alcotest.(check (float 0.01)) "default timeout" max_float spec.timeout ;
   Alcotest.(check bool)
     "expected_outputs default"
     true
