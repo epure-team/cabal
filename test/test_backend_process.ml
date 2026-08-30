@@ -725,6 +725,65 @@ let test_release_commit_boundary_survives_elapsed_timeout () =
             true
             (result.Backend_process.status = Backend_types.Success)))
 
+let test_missing_release_gate_expires_and_preserves_success () =
+  let marker = fresh_marker () in
+  let release_started = marker ^ ".release-started" in
+  let missing_gate = marker ^ ".missing-release-gate" in
+  let emergency_unblock_used = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [release_started; missing_gate])
+    (fun () ->
+      with_env
+        "CABAL_PROCESS_GROUP_TEST_RELEASE_STARTED_MARKER"
+        release_started
+      @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE" missing_gate @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE_TIMEOUT_SECONDS" "0.2"
+      @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let clock = Eio.Stdenv.clock env in
+      let pending =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+            Backend_process.run_process
+              ~sw
+              ~env
+              ~cmd:[helper_path (); "--process-descendant-helper"; "success"]
+              ~working_dir:"/tmp"
+              ~timeout_seconds:1.0
+              ())
+      in
+      Eio.Fiber.fork_daemon ~sw (fun () ->
+          Eio.Time.sleep clock 1.0 ;
+          if Option.is_none (Eio.Promise.peek pending) then begin
+            emergency_unblock_used := true ;
+            Process_test_helper.write_file missing_gate "emergency-unblock\n"
+          end ;
+          `Stop_daemon) ;
+      wait_for_file ~clock release_started ;
+      let outcome =
+        Eio.Time.with_timeout clock 2.0 (fun () ->
+            Ok (Eio.Promise.await_exn pending))
+      in
+      match outcome with
+      | Error `Timeout -> Alcotest.fail "missing RELEASE gate did not expire"
+      | Ok result ->
+          Alcotest.(check bool)
+            "bounded gate expires before the emergency unblock"
+            false
+            !emergency_unblock_used ;
+          Alcotest.(check bool)
+            "missing gate path is never created"
+            false
+            (Sys.file_exists missing_gate) ;
+          Alcotest.(check bool)
+            "gate expiry preserves completed backend success"
+            true
+            (result.Backend_process.status = Backend_types.Success))
+
 let test_backend_process_preserves_child_signal_semantics () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -929,6 +988,9 @@ let process_tree_tests =
     ( "release commit boundary survives elapsed timeout",
       `Quick,
       test_release_commit_boundary_survives_elapsed_timeout );
+    ( "missing release gate expires with success",
+      `Quick,
+      test_missing_release_gate_expires_and_preserves_success );
     ( "backend child signal semantics are preserved",
       `Quick,
       test_backend_process_preserves_child_signal_semantics );

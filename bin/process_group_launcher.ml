@@ -344,15 +344,39 @@ let delay_with_control ~control ~on_tick seconds =
   in
   loop ()
 
+(* A test gate may only shorten this hard maximum; inherited test environment
+   can never turn normal RELEASE into an unbounded wait. *)
+let default_test_release_gate_timeout_seconds = 2.0
+
+let test_release_gate_timeout_seconds () =
+  match
+    Sys.getenv_opt "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE_TIMEOUT_SECONDS"
+  with
+  | Some value -> (
+      match float_of_string_opt value with
+      | Some seconds
+        when finite_non_negative seconds
+             && seconds > 0.0
+             && seconds <= default_test_release_gate_timeout_seconds ->
+          seconds
+      | Some _ | None -> default_test_release_gate_timeout_seconds)
+  | None -> default_test_release_gate_timeout_seconds
+
 let wait_for_test_gate ~control ~on_tick variable =
   match Sys.getenv_opt variable with
   | None | Some "" -> ()
   | Some path ->
+      let deadline =
+        monotonic_now () +. test_release_gate_timeout_seconds ()
+      in
       let rec loop () =
-        if not (Sys.file_exists path) then begin
-          delay_with_control ~control ~on_tick 0.01 ;
-          loop ()
-        end
+        on_tick () ;
+        if not (Sys.file_exists path) then
+          let remaining = deadline -. monotonic_now () in
+          if remaining > 0.0 then begin
+            wait_for_control ~on_tick control (min remaining 0.05) ;
+            loop ()
+          end
       in
       loop ()
 
