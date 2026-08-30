@@ -53,7 +53,7 @@ standalone OCaml library and as the backend abstraction layer vendored under
   truth remains `epure/libs/cabal`; direct Cabal PR changes should land through
   the mirrored Épure PR and then flow back to Cabal `main` via mirror sync.
 
-## Capability evidence convention (Story #622 / #628)
+## Capability evidence conventions (Story #622 / #628)
 
 - `capabilities.native_json_schema_output = true` MUST be accompanied by
   `native_json_schema_output_evidence = Some _`; setting it to `true` with
@@ -62,8 +62,9 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `libs/cabal/test/test_demo_622.ml:test_native_json_schema_evidence_required_when_true`,
   which iterates `Backend_registry.all ()` — not a hardcoded list — so every
   backend added in the future is automatically checked.
-- Claude Code (`claude-code`) is the first backend with `native_json_schema_output = true`
-  (Story #625).  All other built-in backends remain `false`.
+- Claude Code (`claude-code`, Story #625) and Codex (`codex`, Story #630) have
+  `native_json_schema_output = true`. All other built-in backends remain
+  `false`.
 - The `capability_evidence` type is defined in `backend_types.mli` (not
   `backend_registry.mli`) to avoid import cycles and to keep it available
   wherever types are referenced.
@@ -71,6 +72,33 @@ standalone OCaml library and as the backend abstraction layer vendored under
   record literal (instead of using a built-in descriptor), add
   `native_json_schema_output = false; native_json_schema_output_evidence = None`
   to avoid record-field exhaustiveness errors as the type evolves.
+
+## Task media/web preflight — CBL-01
+
+- `task_spec.attachments` defaults to `[]`, `task_spec.web_access` defaults to
+  `Web_disabled`, and legacy Yojson documents must retain those defaults.
+- Attachment paths are workspace-relative. `Task_preflight.validate_inputs`
+  opens the workspace first, opens attachments relative to that exact directory
+  descriptor, and authorizes the opened attachment descriptor with
+  separator-safe containment before reading. Relative and absolute symlinks are
+  accepted only when that descriptor resolves to a readable regular file inside
+  the opened workspace.
+- Attachment size, SHA-256, and magic bytes come from one opened file. SHA-256
+  is canonical lowercase hex and computed in process with `digestif`; do not
+  replace this with a subprocess or add base64 before a transport needs it.
+- Rendered preflight errors must never include raw attachment paths, digests, or
+  bytes. Callers provide count/per-file/total limits; Cabal owns no product
+  defaults.
+- `make_resume_task_spec` intentionally copies attachments and web policy so a
+  resumed invocation retains the same caller-approved inputs.
+- Positive `media_support` and `web_support` claims require versioned
+  `feature_evidence`. `E2e_test` evidence names its reproducible test in
+  `notes`; `Manual_probe` stores the exact command in its payload.
+- All built-in descriptors remain media-disabled and `Web_disabled` until a
+  backend transport and reproducible evidence land together. Native JSON schema
+  evidence remains independently mandatory and must not be weakened.
+- CBL-01 exposes validation only. Central runtime wiring belongs to CBL-03 and
+  backend media/web transports belong to CBL-07.
 
 ## Json_schema_validator — Story #623
 

@@ -4,6 +4,12 @@
  (libraries cabal)
  (modules e2e_harness_config))
 
+(library
+ (name cabal_process_test_helper)
+ (wrapped false)
+ (libraries unix)
+ (modules process_test_helper))
+
 (test
  (name test_backend)
  (libraries cabal alcotest eio eio_posix yojson unix)
@@ -15,8 +21,14 @@
  (modules test_backend_registry))
 
 (test
+ (name test_task_preflight)
+ (libraries cabal alcotest digestif unix)
+ (modules test_task_preflight))
+
+(test
  (name test_backend_version)
  (libraries cabal alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_backend_version))
 
 (test
@@ -31,13 +43,20 @@
 
 (test
  (name test_backend_process)
- (libraries cabal alcotest eio eio_posix yojson)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix yojson)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_backend_process))
 
 (test
  (name test_pi_adapter)
  (libraries cabal alcotest)
  (modules test_pi_adapter))
+
+(test
+ (name test_process_group)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
+ (modules test_process_group))
 
 (test
  (name test_adapter_loader)
@@ -71,7 +90,15 @@
 
 (test
  (name test_real_backend_smoke)
- (libraries cabal alcotest eio eio_posix yojson unix)
+ (libraries
+  cabal
+  cabal_process_test_helper
+  alcotest
+  eio
+  eio_posix
+  yojson
+  unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_real_backend_smoke))
 
 (test
@@ -112,7 +139,8 @@
 
 (test
  (name test_resource_guardian)
- (libraries cabal alcotest)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_resource_guardian))
 
 (test
@@ -157,7 +185,8 @@
 
 (test
  (name test_demo_481)
- (libraries cabal alcotest eio eio_posix unix)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_demo_481))
 
 (test
@@ -230,11 +259,13 @@
  (libraries
   cabal
   cabal_e2e_harness_config
+  cabal_process_test_helper
   alcotest
   eio
   eio_posix
   yojson
   unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_demo_627)
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1)))
@@ -249,11 +280,13 @@
  (libraries
   cabal
   cabal_e2e_harness_config
+  cabal_process_test_helper
   alcotest
   eio
   eio_posix
   yojson
   unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_native_json_schema_backends)
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1)))
@@ -262,7 +295,10 @@
  (alias e2e)
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1))
- (deps test_demo_627.exe test_native_json_schema_backends.exe)
+ (deps
+  ../bin/process_group_launcher.exe
+  test_demo_627.exe
+  test_native_json_schema_backends.exe)
  (action
   (progn
    (run ./test_demo_627.exe)

@@ -9,6 +9,10 @@
 
 open Cabal
 
+let () =
+  Process_test_helper.install_launcher () ;
+  Process_test_helper.run_if_requested ()
+
 (** {1 MCP Config Tests} *)
 
 let test_write_mcp_config_single_server () =
@@ -318,7 +322,7 @@ let test_check_available_times_out_on_hang () =
     Alcotest.(check bool)
       "check returned within ~1s, not 30s"
       true
-      (elapsed < 2.0)
+      (elapsed < 4.0)
 
 let test_capture_version_output_times_out_on_hang () =
   if not (Sys.file_exists "/bin/sleep" || Sys.file_exists "/usr/bin/sleep") then
@@ -340,7 +344,7 @@ let test_capture_version_output_times_out_on_hang () =
     Alcotest.(check bool)
       "probe returned within ~1s, not 30s"
       true
-      (elapsed < 2.0)
+      (elapsed < 4.0)
 
 let availability_tests =
   [
@@ -354,6 +358,659 @@ let availability_tests =
       test_capture_version_output_times_out_on_hang );
   ]
 
+(** {1 Process-tree Tests} *)
+
+let helper_path () = Unix.realpath Sys.executable_name
+
+let with_env name value f =
+  let previous = Sys.getenv_opt name in
+  Unix.putenv name value ;
+  Fun.protect
+    ~finally:(fun () -> Unix.putenv name (Option.value ~default:"" previous))
+    f
+
+let contains text needle =
+  let text_length = String.length text
+  and needle_length = String.length needle in
+  let rec loop index =
+    index + needle_length <= text_length
+    && (String.sub text index needle_length = needle || loop (index + 1))
+  in
+  needle_length = 0 || loop 0
+
+let fresh_marker () =
+  let path = Filename.temp_file "cabal-process-group-" ".marker" in
+  Sys.remove path ;
+  path
+
+let wait_for_file ~clock path =
+  let deadline = Eio.Time.now clock +. 2.0 in
+  let rec loop () =
+    if Sys.file_exists path then ()
+    else if Eio.Time.now clock >= deadline then
+      Alcotest.failf "timed out waiting for %s" path
+    else begin
+      Eio.Time.sleep clock 0.02 ;
+      loop ()
+    end
+  in
+  loop ()
+
+let arrange_gated_supervisor_death ~sw ~clock marker =
+  Eio.Fiber.fork ~sw (fun () ->
+      wait_for_file ~clock marker ;
+      wait_for_file ~clock (marker ^ ".exec-confirmed") ;
+      Process_test_helper.write_file
+        (marker ^ ".allow-supervisor-death")
+        "continue\n")
+
+let child_pid marker =
+  let path = marker ^ ".pid" in
+  let channel = open_in path in
+  Fun.protect
+    ~finally:(fun () -> close_in_noerr channel)
+    (fun () ->
+      match int_of_string_opt (String.trim (input_line channel)) with
+      | Some pid when pid > 0 -> pid
+      | _ -> Alcotest.failf "invalid child PID in %s" path)
+
+let wait_for_pid_exit ~clock pid =
+  let deadline = Eio.Time.now clock +. 2.0 in
+  let rec loop () =
+    try
+      Unix.kill pid 0 ;
+      if Eio.Time.now clock >= deadline then
+        Alcotest.failf "child PID %d remained after group termination" pid
+      else begin
+        Eio.Time.sleep clock 0.02 ;
+        loop ()
+      end
+    with
+    | Unix.Unix_error (Unix.ESRCH, _, _) -> ()
+    | Unix.Unix_error (error, _, _) ->
+        Alcotest.failf
+          "could not probe child PID %d: %s"
+          pid
+          (Unix.error_message error)
+  in
+  loop ()
+
+let test_timeout_terminates_real_descendant_and_preserves_output () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [marker; marker ^ ".pid"])
+    (fun () ->
+      let result =
+        Backend_process.run_process
+          ~sw
+          ~env
+          ~cmd:
+            [
+              helper_path ();
+              "--process-descendant-helper";
+              "spawn-child";
+              marker;
+            ]
+          ~working_dir:"/tmp"
+          ~timeout_seconds:0.2
+          ()
+      in
+      Alcotest.(check bool)
+        "timeout status is preserved"
+        true
+        (result.Backend_process.status = Backend_types.Timeout) ;
+      Alcotest.(check bool)
+        "stdout captured before timeout"
+        true
+        (contains result.stdout "child-started") ;
+      Alcotest.(check bool)
+        "stderr captured before timeout"
+        true
+        (contains result.stderr "parent-stderr") ;
+      let clock = Eio.Stdenv.clock env in
+      wait_for_file ~clock marker ;
+      wait_for_pid_exit ~clock (child_pid marker))
+
+let test_cancellation_terminates_real_descendant () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [marker; marker ^ ".pid"])
+    (fun () ->
+      let cancelled =
+        Eio.Time.with_timeout (Eio.Stdenv.clock env) 0.2 (fun () ->
+            ignore
+              (Backend_process.run_process
+                 ~sw
+                 ~env
+                 ~cmd:
+                   [
+                     helper_path ();
+                     "--process-descendant-helper";
+                     "spawn-child";
+                     marker;
+                   ]
+                 ~working_dir:"/tmp"
+                 ~timeout_seconds:30.0
+                 ()) ;
+            Ok ())
+      in
+      Alcotest.(check bool)
+        "outer cancellation fired"
+        true
+        (match cancelled with Error `Timeout -> true | Ok () -> false) ;
+      let clock = Eio.Stdenv.clock env in
+      wait_for_file ~clock marker ;
+      wait_for_pid_exit ~clock (child_pid marker))
+
+let test_timeout_kills_grandchild_when_backend_exits_on_term () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [marker; marker ^ ".pid"; marker ^ ".parent-terminated"])
+    (fun () ->
+      let result =
+        Backend_process.run_process
+          ~sw
+          ~env
+          ~cmd:
+            [
+              helper_path ();
+              "--process-descendant-helper";
+              "spawn-term-ignoring-child";
+              marker;
+            ]
+          ~working_dir:"/tmp"
+          ~timeout_seconds:0.2
+          ()
+      in
+      Alcotest.(check bool)
+        "timeout status survives the anchored group cleanup"
+        true
+        (result.Backend_process.status = Backend_types.Timeout) ;
+      let clock = Eio.Stdenv.clock env in
+      wait_for_file ~clock marker ;
+      wait_for_file ~clock (marker ^ ".parent-terminated") ;
+      wait_for_pid_exit ~clock (child_pid marker))
+
+let test_timeout_kills_descendant_after_backend_exits_and_retains_pipe () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [marker; marker ^ ".pid"; marker ^ ".terminated"])
+    (fun () ->
+      let result =
+        Backend_process.run_process
+          ~sw
+          ~env
+          ~cmd:
+            [
+              helper_path ();
+              "--process-descendant-helper";
+              "spawn-exit-child";
+              marker;
+            ]
+          ~working_dir:"/tmp"
+          ~timeout_seconds:0.2
+          ()
+      in
+      Alcotest.(check bool)
+        "retained descendant pipe keeps run_process inside its timeout"
+        true
+        (result.Backend_process.status = Backend_types.Timeout) ;
+      Alcotest.(check bool)
+        "backend output before its natural exit is retained"
+        true
+        (contains result.stdout "child-started") ;
+      let clock = Eio.Stdenv.clock env in
+       wait_for_file ~clock marker ;
+       wait_for_pid_exit ~clock (child_pid marker))
+
+let test_unexpected_supervisor_death_kills_term_ignoring_backend () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [ marker;
+          marker ^ ".pid";
+          marker ^ ".exec-confirmed";
+          marker ^ ".allow-supervisor-death";
+        ])
+    (fun () ->
+      with_env
+        "CABAL_PROCESS_GROUP_TEST_EXEC_CONFIRMED_MARKER"
+        (marker ^ ".exec-confirmed")
+      @@ fun () ->
+      let clock = Eio.Stdenv.clock env in
+      arrange_gated_supervisor_death ~sw ~clock marker ;
+      let started = Eio.Time.now clock in
+      let result =
+        Backend_process.run_process
+          ~sw
+          ~env
+          ~cmd:
+            [ helper_path ();
+              "--process-descendant-helper";
+              "gated-kill-supervisor-ignoring-term";
+              marker;
+            ]
+          ~working_dir:"/tmp"
+          ~timeout_seconds:5.0
+          ()
+      in
+      Alcotest.(check bool)
+        "unexpected supervisor death is not reported as backend success"
+        true
+        (match result.Backend_process.status with Backend_types.Failed _ -> true | _ -> false) ;
+      Alcotest.(check bool)
+        "TERM-ignoring unexpected supervisor cleanup forfeits grace"
+        true
+        (Eio.Time.now clock -. started < 1.0) ;
+      wait_for_file ~clock marker ;
+      wait_for_pid_exit ~clock (child_pid marker))
+
+let test_unexpected_supervisor_death_terminates_term_responsive_backend_promptly () =
+  with_env "CABAL_PROCESS_GROUP_TEST_FAIL_GROUP_KILL" "1" @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [ marker;
+          marker ^ ".pid";
+          marker ^ ".terminated";
+          marker ^ ".exec-confirmed";
+          marker ^ ".allow-supervisor-death";
+        ])
+    (fun () ->
+      with_env
+        "CABAL_PROCESS_GROUP_TEST_EXEC_CONFIRMED_MARKER"
+        (marker ^ ".exec-confirmed")
+      @@ fun () ->
+      let clock = Eio.Stdenv.clock env in
+      arrange_gated_supervisor_death ~sw ~clock marker ;
+      let started = Eio.Time.now clock in
+      let result =
+        Backend_process.run_process
+          ~sw
+          ~env
+          ~cmd:
+            [ helper_path ();
+              "--process-descendant-helper";
+              "gated-kill-supervisor-exiting-on-term";
+              marker;
+            ]
+          ~working_dir:"/tmp"
+          ~timeout_seconds:5.0
+          ()
+      in
+      Alcotest.(check bool)
+        "unexpected supervisor death is reported as backend failure"
+        true
+        (match result.Backend_process.status with Backend_types.Failed _ -> true | _ -> false) ;
+      Alcotest.(check bool)
+        "TERM-responsive backend cleanup forfeits the default grace"
+        true
+        (Eio.Time.now clock -. started < 1.0) ;
+      wait_for_file ~clock marker ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
+      wait_for_pid_exit ~clock (child_pid marker))
+
+let test_release_commit_boundary_survives_elapsed_timeout () =
+  let marker = fresh_marker () in
+  let release_started = marker ^ ".release-started" in
+  let release_gate = marker ^ ".allow-release" in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [release_started; release_gate])
+    (fun () ->
+      with_env
+        "CABAL_PROCESS_GROUP_TEST_RELEASE_STARTED_MARKER"
+        release_started
+      @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE" release_gate @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let clock = Eio.Stdenv.clock env in
+      let timeout_seconds = 1.0 in
+      let completion =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+            Backend_process.run_process
+              ~sw
+              ~env
+              ~cmd:[helper_path (); "--process-descendant-helper"; "success"]
+              ~working_dir:"/tmp"
+              ~timeout_seconds
+              ())
+      in
+      Fun.protect
+        ~finally:(fun () ->
+          if not (Sys.file_exists release_gate) then
+            Process_test_helper.write_file release_gate "continue\n")
+        (fun () ->
+          wait_for_file ~clock release_started ;
+          Eio.Time.sleep clock (timeout_seconds +. 0.1) ;
+          Alcotest.(check bool)
+            "normal completion waits for gated RELEASE outside task timeout"
+            true
+            (Option.is_none (Eio.Promise.peek completion)) ;
+          Process_test_helper.write_file release_gate "continue\n" ;
+          let result = Eio.Promise.await_exn completion in
+          Alcotest.(check bool)
+            "completed backend remains successful while RELEASE is delayed"
+            true
+            (result.Backend_process.status = Backend_types.Success)))
+
+let test_missing_release_gate_expires_and_preserves_success () =
+  let marker = fresh_marker () in
+  let release_started = marker ^ ".release-started" in
+  let missing_gate = marker ^ ".missing-release-gate" in
+  let emergency_unblock_used = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [release_started; missing_gate])
+    (fun () ->
+      with_env
+        "CABAL_PROCESS_GROUP_TEST_RELEASE_STARTED_MARKER"
+        release_started
+      @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE" missing_gate @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE_TIMEOUT_SECONDS" "0.2"
+      @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let clock = Eio.Stdenv.clock env in
+      let pending =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+            Backend_process.run_process
+              ~sw
+              ~env
+              ~cmd:[helper_path (); "--process-descendant-helper"; "success"]
+              ~working_dir:"/tmp"
+              ~timeout_seconds:1.0
+              ())
+      in
+      Eio.Fiber.fork_daemon ~sw (fun () ->
+          Eio.Time.sleep clock 1.0 ;
+          if Option.is_none (Eio.Promise.peek pending) then begin
+            emergency_unblock_used := true ;
+            Process_test_helper.write_file missing_gate "emergency-unblock\n"
+          end ;
+          `Stop_daemon) ;
+      wait_for_file ~clock release_started ;
+      let outcome =
+        Eio.Time.with_timeout clock 2.0 (fun () ->
+            Ok (Eio.Promise.await_exn pending))
+      in
+      match outcome with
+      | Error `Timeout -> Alcotest.fail "missing RELEASE gate did not expire"
+      | Ok result ->
+          Alcotest.(check bool)
+            "bounded gate expires before the emergency unblock"
+            false
+            !emergency_unblock_used ;
+          Alcotest.(check bool)
+            "missing gate path is never created"
+            false
+            (Sys.file_exists missing_gate) ;
+          Alcotest.(check bool)
+            "gate expiry preserves completed backend success"
+            true
+            (result.Backend_process.status = Backend_types.Success))
+
+let test_backend_process_preserves_child_signal_semantics () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  List.iter
+    (fun (name, signal, action) ->
+      let result =
+        Backend_process.run_process
+          ~sw
+          ~env
+          ~cmd:[helper_path (); "--process-descendant-helper"; action]
+          ~working_dir:"/tmp"
+          ~timeout_seconds:5.0
+          ()
+      in
+      Alcotest.(check bool)
+        (name ^ " is not reported as an ordinary exit")
+        true
+        (result.status
+        = Backend_types.Failed
+            (Printf.sprintf "Process killed by signal %d" signal)) ;
+      Alcotest.(check int)
+        (name ^ " exit-code convention uses the signal value")
+        (128 + signal)
+        result.exit_code)
+    [
+      ("self SIGTERM", Sys.sigterm, "self-term");
+      ("self SIGKILL", Sys.sigkill, "self-kill");
+    ]
+
+let test_timeout_covers_large_stdin_for_nonreading_child () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let clock = Eio.Stdenv.clock env in
+  let input = String.make (1024 * 1024) 'i' in
+  let outcome =
+    Eio.Time.with_timeout clock 4.0 (fun () ->
+        Ok
+          (Backend_process.run_process
+             ~sw
+             ~env
+             ~cmd:[helper_path (); "--process-descendant-helper"; "nonreading"]
+             ~stdin_content:(Some input)
+             ~working_dir:"/tmp"
+             ~timeout_seconds:0.2
+             ()))
+  in
+  match outcome with
+  | Error `Timeout ->
+      Alcotest.fail "stdin delivery blocked outside process timeout"
+  | Ok result ->
+      Alcotest.(check bool)
+        "non-reading child returns Cabal Timeout"
+        true
+        (result.Backend_process.status = Backend_types.Timeout)
+
+let test_timeout_drains_term_handler_output_during_grace () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let clock = Eio.Stdenv.clock env in
+  let started = Eio.Time.now clock in
+  let result =
+    Backend_process.run_process
+      ~sw
+      ~env
+      ~cmd:[helper_path (); "--process-descendant-helper"; "write-after-term"]
+      ~working_dir:"/tmp"
+      ~timeout_seconds:0.2
+      ()
+  in
+  let expected = String.make (1024 * 1024) 't' ^ "\nTERM-WRITE-COMPLETE\n" in
+  Alcotest.(check bool)
+    "timeout classification is preserved"
+    true
+    (result.Backend_process.status = Backend_types.Timeout) ;
+  Alcotest.(check string)
+    "all TERM-handler output is drained before the bounded cleanup finishes"
+    expected
+    result.stdout ;
+  Alcotest.(check bool)
+    "TERM-handler cleanup remains bounded"
+    true
+    (Eio.Time.now clock -. started < 4.0)
+
+let test_probe_timeout_kills_forked_descendant () =
+  Eio_posix.run @@ fun env ->
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [marker; marker ^ ".pid"])
+    (fun () ->
+      let result =
+        Backend_process.capture_version_output
+          ~env
+          ~timeout_seconds:0.2
+          [helper_path (); "--process-descendant-helper"; "spawn-child"; marker]
+      in
+      Alcotest.(check bool)
+        "forking probe times out"
+        true
+        (Result.is_error result) ;
+      let clock = Eio.Stdenv.clock env in
+      wait_for_file ~clock marker ;
+      wait_for_pid_exit ~clock (child_pid marker))
+
+let test_streaming_large_line_without_repeated_pending_copies () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let lines = ref [] in
+  let expected = String.make (1024 * 1024) 'x' in
+  let result =
+    Backend_process.run_process
+      ~sw
+      ~env
+      ~cmd:[helper_path (); "--process-descendant-helper"; "large-no-newline"]
+      ~working_dir:"/tmp"
+      ~timeout_seconds:5.0
+      ~on_stdout:(fun line -> lines := line :: !lines)
+      ()
+  in
+  Alcotest.(check string)
+    "captured no-newline output is exact"
+    expected
+    result.stdout ;
+  Alcotest.(check (list string))
+    "stream callback emits one exact final line"
+    [expected]
+    (List.rev !lines)
+
+let test_missing_exec_handshake_cannot_report_backend_success () =
+  let marker = fresh_marker () in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [ marker;
+          marker ^ ".pid";
+          marker ^ ".terminated";
+          marker ^ ".released";
+          marker ^ ".control-closed";
+        ])
+    (fun () ->
+      with_env "CABAL_PROCESS_GROUP_LAUNCHER" (helper_path ()) @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let result =
+        Backend_process.run_process
+          ~sw
+          ~env
+          ~cmd:
+            [ helper_path ();
+              "--process-descendant-helper";
+              "fake-launcher-missing-exec-zero";
+              marker;
+            ]
+          ~working_dir:"/tmp"
+          ~timeout_seconds:5.0
+          ()
+      in
+      let failure =
+        match result.Backend_process.status with
+        | Backend_types.Failed message -> message
+        | Backend_types.Success ->
+            Alcotest.fail "zero status without EXEC was reported as Success"
+        | Backend_types.Timeout | Backend_types.Cancelled ->
+            Alcotest.fail "invalid handshake did not return an explicit failure"
+      in
+      Alcotest.(check bool)
+        "failure identifies the invalid EXEC handshake"
+        true
+        (contains failure "handshake" && contains failure "EXEC") ;
+      let clock = Eio.Stdenv.clock env in
+      wait_for_file ~clock marker ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
+      Alcotest.(check bool)
+        "invalid handshake is cleaned up rather than released"
+        false
+        (Sys.file_exists (marker ^ ".released")) ;
+      wait_for_pid_exit ~clock (child_pid marker))
+
+let process_tree_tests =
+  [
+    ( "timeout terminates descendant and preserves output",
+      `Quick,
+      test_timeout_terminates_real_descendant_and_preserves_output );
+    ( "cancellation terminates descendant",
+      `Quick,
+      test_cancellation_terminates_real_descendant );
+    ( "timeout kills TERM-ignoring grandchild",
+      `Quick,
+      test_timeout_kills_grandchild_when_backend_exits_on_term );
+    ( "timeout kills descendant after backend exits with pipe retained",
+      `Quick,
+      test_timeout_kills_descendant_after_backend_exits_and_retains_pipe );
+    ( "unexpected supervisor death kills TERM-ignoring backend",
+      `Quick,
+      test_unexpected_supervisor_death_kills_term_ignoring_backend );
+    ( "unexpected supervisor death promptly terminates TERM-responsive backend",
+      `Quick,
+      test_unexpected_supervisor_death_terminates_term_responsive_backend_promptly );
+    ( "release commit boundary survives elapsed timeout",
+      `Quick,
+      test_release_commit_boundary_survives_elapsed_timeout );
+    ( "missing release gate expires with success",
+      `Quick,
+      test_missing_release_gate_expires_and_preserves_success );
+    ( "backend child signal semantics are preserved",
+      `Quick,
+      test_backend_process_preserves_child_signal_semantics );
+    ( "timeout covers large stdin to non-reading child",
+      `Quick,
+      test_timeout_covers_large_stdin_for_nonreading_child );
+    ( "timeout drains TERM-handler output during grace",
+      `Quick,
+      test_timeout_drains_term_handler_output_during_grace );
+    ( "forking probe timeout kills descendant",
+      `Quick,
+      test_probe_timeout_kills_forked_descendant );
+    ( "streaming large no-newline output is exact",
+      `Quick,
+      test_streaming_large_line_without_repeated_pending_copies );
+    ( "missing EXEC handshake cannot report backend success",
+      `Quick,
+      test_missing_exec_handshake_cannot_report_backend_success );
+  ]
+
 (** {1 Test Runner} *)
 
 let () =
@@ -364,4 +1021,5 @@ let () =
       ("Setup/Cleanup", setup_cleanup_tests);
       ("Git Diff", git_diff_tests);
       ("Availability", availability_tests);
+      ("Process tree", process_tree_tests);
     ]

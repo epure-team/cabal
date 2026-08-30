@@ -1,0 +1,7 @@
+(executable
+ (name process_group_launcher)
+ (public_name cabal-process-group-launcher)
+ (foreign_stubs
+  (language c)
+  (names monotonic_clock_stubs))
+ (libraries unix))

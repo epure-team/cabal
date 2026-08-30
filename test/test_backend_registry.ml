@@ -157,7 +157,7 @@ let test_session_resume_capabilities () =
         (id ^ " has no session_resume")
         false
         d.Backend_registry.capabilities.Backend_registry.session_resume)
-    ["opencode"; "copilot-cli"]
+    ["opencode"; "copilot-cli"; "pi"]
 
 (* read_only_support: claude-code and codex support it natively *)
 let test_read_only_support_capabilities () =
@@ -241,6 +241,27 @@ let test_precedence_confidence_values () =
   check "opencode" Medium ;
   check "gemini-cli" Low ;
   check "copilot-cli" Low
+
+let test_media_and_web_capabilities_disabled_by_default () =
+  List.iter
+    (fun (d : Backend_registry.descriptor) ->
+      Alcotest.(check int)
+        (d.id ^ " has no supported media types")
+        0
+        (List.length d.capabilities.media_support.media_types) ;
+      Alcotest.(check bool)
+        (d.id ^ " has no media evidence")
+        true
+        (d.capabilities.media_support.evidence = None) ;
+      Alcotest.(check bool)
+        (d.id ^ " has web access disabled")
+        true
+        (d.capabilities.web_support.maximum = Backend_types.Web_disabled) ;
+      Alcotest.(check bool)
+        (d.id ^ " has no web evidence")
+        true
+        (d.capabilities.web_support.evidence = None))
+    (Backend_registry.all ())
 
 (** {1 AC4 — backend_supports_file_reading routed through registry} *)
 
@@ -336,6 +357,27 @@ let test_runtime_native_schema_capabilities_match_descriptors () =
                    d.id)
                 d.capabilities.native_json_schema_output
                 (Agentic_backend.native_json_schema_output backend))
+        (Backend_registry.all ()))
+
+(** Session-resume capability must agree between static descriptors and the
+    runtime modules hosts actually execute. In particular, the YAML-backed Pi
+    runtime must not silently accept a resume request that it cannot transport. *)
+let test_runtime_session_resume_capabilities_match_descriptors () =
+  with_host_runtime_backends (fun () ->
+      List.iter
+        (fun (d : Backend_registry.descriptor) ->
+          match Registry.get d.id with
+          | None ->
+              Alcotest.failf
+                "registered backend module missing for descriptor id=%s"
+                d.id
+          | Some backend ->
+              Alcotest.(check bool)
+                (Printf.sprintf
+                   "%s: runtime session_resume matches descriptor"
+                   d.id)
+                d.capabilities.session_resume
+                (Agentic_backend.supports_session_resume backend))
         (Backend_registry.all ()))
 
 (** {1 Helpers for investigation note tests (Epic #95)} *)
@@ -614,6 +656,10 @@ let () =
             "precedence_confidence: exact values per backend"
             `Quick
             test_precedence_confidence_values;
+          Alcotest.test_case
+            "media and web support disabled for all built-ins"
+            `Quick
+            test_media_and_web_capabilities_disabled_by_default;
         ] );
       ( "AC4 registry routing",
         [
@@ -640,6 +686,10 @@ let () =
             "runtime native schema capability matches descriptor"
             `Quick
             test_runtime_native_schema_capabilities_match_descriptors;
+          Alcotest.test_case
+            "runtime session resume capability matches descriptor"
+            `Quick
+            test_runtime_session_resume_capabilities_match_descriptors;
         ] );
       ( "AC6 Epic #95 native_json_schema_output",
         [

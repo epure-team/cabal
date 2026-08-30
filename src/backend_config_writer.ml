@@ -44,17 +44,22 @@ let attribution_text_for namespace =
 
 let attribution_text = attribution_text_for default_namespace
 
-let managed_marker_for namespace = namespace.Backend_types.id ^ "-managed"
+let managed_marker_for (namespace : Backend_types.managed_namespace) =
+  namespace.id ^ "-managed"
 
 let managed_marker = managed_marker_for default_namespace
 
-let hash_marker_for namespace = namespace.Backend_types.id ^ "-hash"
+let hash_marker_for (namespace : Backend_types.managed_namespace) =
+  namespace.id ^ "-hash"
 
-let sidecar_suffix namespace = "." ^ namespace.Backend_types.id ^ "-meta.json"
+let sidecar_suffix (namespace : Backend_types.managed_namespace) =
+  "." ^ namespace.id ^ "-meta.json"
 
-let temp_suffix namespace = "." ^ namespace.Backend_types.id ^ "-tmp"
+let temp_suffix (namespace : Backend_types.managed_namespace) =
+  "." ^ namespace.id ^ "-tmp"
 
-let backup_suffix namespace = "." ^ namespace.Backend_types.id ^ "-backup"
+let backup_suffix (namespace : Backend_types.managed_namespace) =
+  "." ^ namespace.id ^ "-backup"
 
 type comment_style = Slash | Hash | Html
 

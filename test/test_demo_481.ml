@@ -16,6 +16,8 @@
 
 open Cabal
 
+let () = Process_test_helper.install_launcher ()
+
 let contains_str s needle =
   let len = String.length s and nlen = String.length needle in
   let rec loop i =

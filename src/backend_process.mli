@@ -49,15 +49,17 @@ type process_result = {
 val validate_task_namespace : task_spec -> task_result option
 
 (** [run_process ~sw ~env ~cmd ~working_dir ~timeout_seconds ~parse_cost ~on_stdout]
-    spawns a subprocess with the given command, captures stdout/stderr
-    concurrently, and handles timeout via [Eio.Time.with_timeout].
+    spawns a subprocess with the given command in an owned process group,
+    captures stdout/stderr concurrently, and handles timeout via
+    [Eio.Time.with_timeout].
 
     @param parse_cost Optional function to extract cost from stdout.
       If not provided, cost is always [None].
     @param on_stdout Optional callback called for each line of stdout as it arrives.
       Used for streaming output to UI in real-time.
     @param working_dir Directory to run the process in.
-    @param timeout_seconds Maximum wall-clock seconds before SIGTERM.
+    @param timeout_seconds Maximum wall-clock seconds before initiating bounded,
+      ownership-aware process cleanup.
 
     {pre}
     [sw] must be active. [cmd] must be a non-empty list with a valid
@@ -66,8 +68,23 @@ val validate_task_namespace : task_spec -> task_result option
 
     {post}
     Returns a [process_result] with captured stdout/stderr, exit code,
-    elapsed time, and optional cost; [status] is [Timeout] if the process
-    exceeded [timeout_seconds], otherwise reflects the exit code.
+    elapsed time, and optional cost. Backend success additionally requires an
+    exact [Process_group.Established] handshake; timeout, invalid protocol, or a
+    launcher-reported pre-exec failure returns an explicit [Failed] result even
+    if the status FD reports exit zero. [status] is [Timeout] if an established
+    process exceeded [timeout_seconds], otherwise it reflects the exit code.
+    Timeout, cancellation, invalid handshake, and exceptional cleanup follow the
+    ownership established by the handshake. With a confirmed PGID, cleanup
+    terminates the group with TERM, grace, then KILL. Without a confirmed PGID,
+    cleanup performs bounded direct-process termination only; the official
+    launcher cannot fork the backend before its ownership ACK. Both paths inherit
+    {!Process_group.terminate}'s guarantee that concurrent cleanup completes only
+    after the direct supervisor's actual reap, including when malformed or
+    missing backend status requires fallback to that reaped status. Cleanup
+    drains stdout and stderr concurrently with bounded termination so TERM
+    handlers cannot block on a full pipe. Once backend status and all I/O have
+    completed, normal RELEASE and supervisor reaping occur outside the
+    configured timeout as an atomic completion boundary.
 
     {violators}
     (none)

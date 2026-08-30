@@ -10,6 +10,8 @@
 open Cabal
 open Backend_types
 
+let () = Process_test_helper.install_launcher ()
+
 type model_source =
   | Static_model of string option
   | Codex_openai_mini

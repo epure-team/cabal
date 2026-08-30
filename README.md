@@ -63,16 +63,56 @@ prepares backend-owned or Cabal-owned configuration, runs the CLI process, and
 normalizes results and session log events. Backend CLIs remain external tools;
 Cabal does not embed their product logic.
 
+### Process-tree termination
+
+`Backend_process` starts every backend through the installed
+`cabal-process-group-launcher` executable. On POSIX hosts (including the Linux
+and macOS CI targets), this launcher is a small supervisor: it creates a new
+session/process group, starts the backend child, and remains the group leader.
+Cabal confirms setup over a dedicated, bounded handshake FD: it receives the
+PGID immediately after `setsid` and before the backend is forked. The parent
+acknowledges that ownership before a fork is permitted; after the child `exec`
+succeeds, the launcher writes an explicit `EXEC` record before FD EOF. EOF
+alone never confirms `exec`, so a bare PGID after launcher death is not a
+successful handshake. If that PGID cannot be delivered, no backend exists. A
+launcher-side pre-exec failure is reported separately. A second
+bounded status FD reports the backend child's actual `EXIT` or `SIGNAL` result;
+the parent sends `TERM` or `RELEASE` over a separate control FD.
+
+Timeout, cancellation, and exceptional cleanup terminate the confirmed group
+with TERM, a full grace period, then KILL. The supervisor stays alive after
+TERM, preventing PGID reuse before KILL and ensuring descendants cannot outlive
+the command when the backend leader exits first. Unexpected supervisor death is
+catastrophic: Cabal immediately attempts group TERM and KILL back-to-back and
+may forfeit the remaining grace period before retiring ownership, avoiding a
+later stale negative-PGID signal after the group is no longer anchored. Normal
+completion is also two-phase: Cabal observes the backend status, drains
+stdout/stderr, then sends `RELEASE` and reaps the supervisor. If RELEASE delivery
+fails, Cabal clears the cached PGID and signals only its direct supervisor; a
+live official supervisor performs bounded group cleanup itself, avoiding a
+stale negative-PID signal.
+Captured bytes are retained through either path. If the handshake never
+establishes a group, Cabal falls back only to signalling its direct child; it
+never sends a negative-PID signal for an unconfirmed group.
+`Resource_guardian` registers these owned targets and uses
+the same group-aware termination path under memory pressure. The launcher is
+included in `@install`; installations must retain `cabal-process-group-launcher`
+on `PATH` (or set
+`CABAL_PROCESS_GROUP_LAUNCHER` to its path).
+
 ## Layout
 
 - `src/backend_types.*` — shared result, usage, cost, and streaming event types.
 - `src/agentic_backend.*` and `src/registry.*` — backend module signature and
   runtime backend registry.
 - `src/backend_registry.*` — static backend descriptors and capability metadata.
+- `src/task_preflight.*` — attachment integrity/workspace checks and requested
+  capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
   validator-safe backend routing.
-- `src/backend_process.*` and `src/backend_version.*` — process execution and
-  version probing.
+- `src/backend_process.*`, `src/process_group.*`, and `src/backend_version.*`
+  — process execution, process-tree ownership, and version probing.
+- `bin/process_group_launcher.ml` — installed pre-exec session/group launcher.
 - `src/backend_config_gen.*` and `src/backend_config_writer.*` — project config
   ownership, generation, and write safety.
 - `src/adapter_loader.*`, `src/yaml_adapter.*`, and `src/adapters/*.yaml` —
@@ -131,6 +171,28 @@ let () =
     (Backend_types.show_result_status result.status)
     (List.length result.files_changed)
 ```
+
+### Media and web preflight
+
+`Backend_types.task_spec` can carry workspace-relative PNG/JPEG attachment
+metadata and an explicit web policy. Existing callers default to no attachments
+and `Web_disabled`. Before dispatch, hosts can apply their own size/count policy
+and validate both the files and the selected static descriptor:
+
+```ocaml
+let limits : Task_preflight.limits =
+  {max_attachments = 4; max_file_size_bytes = 10_000_000; max_total_size_bytes = 20_000_000}
+in
+let ( let* ) = Result.bind in
+let* () = Task_preflight.validate_inputs ~limits spec in
+Task_preflight.validate_capabilities ~descriptor spec
+```
+
+Preflight is host-neutral and does not invoke a backend, access the network, or
+choose limits. Render failures with `Task_preflight.render_error`; its messages
+exclude attachment paths and bytes. CBL-01 does not centrally wire preflight
+into `run_task`, and all built-in descriptors currently declare no media support
+and `Web_disabled` pending backend-specific transport evidence.
 
 ### Redaction contract for hosts logging backend output
 

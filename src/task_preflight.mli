@@ -1,0 +1,138 @@
+(******************************************************************************)
+(*                                                                            *)
+(* Copyright (c) 2026 Epure Team                                              *)
+(* All rights reserved.                                                       *)
+(*                                                                            *)
+(******************************************************************************)
+
+(** Host-neutral validation for task inputs and backend capabilities.
+
+    This module performs no backend invocation or network access. Rendered
+    errors intentionally omit attachment paths and file contents. *)
+
+(** Caller-provided attachment limits. Zero-valued limits are valid and may be
+    used to disable attachments. *)
+type limits = {
+  max_attachments : int;  (** Maximum attachment count. *)
+  max_file_size_bytes : int;  (** Maximum size of any one attachment. *)
+  max_total_size_bytes : int;  (** Maximum aggregate attachment size. *)
+}
+
+(** Limit field identifying an invalid negative value. *)
+type limit_name =
+  | Max_attachments
+  | Max_file_size_bytes
+  | Max_total_size_bytes
+
+(** Typed input-validation failure. Attachment identifiers may be carried for
+    programmatic remediation, but {!render_error} never includes them, paths,
+    digests, or file bytes. *)
+type input_error =
+  | Negative_limit of limit_name
+  | Incoherent_limits
+  | Too_many_attachments of {maximum : int; actual : int}
+  | Empty_attachment_id
+  | Duplicate_attachment_id of string
+  | Absolute_attachment_path of string
+  | Workspace_unavailable
+  | Attachment_missing of string
+  | Attachment_outside_workspace of string
+  | Attachment_not_regular of string
+  | Attachment_unreadable of string
+  | Attachment_changed_during_validation of string
+  | Attachment_size_mismatch of {
+      attachment_id : string;
+      declared : int;
+      actual : int;
+    }
+  | Attachment_too_large of {
+      attachment_id : string;
+      maximum : int;
+      actual : int;
+    }
+  | Total_size_too_large of {maximum : int; actual : int}
+  | Malformed_sha256 of string
+  | Digest_mismatch of string
+  | Media_type_mismatch of {
+      attachment_id : string;
+      media_type : Backend_types.media_type;
+    }
+
+(** Typed capability-validation failure. Proof-invariant failures describe an
+    invalid descriptor; unsupported-feature failures describe a task that must
+    be rerouted or reduced. *)
+type capability_error =
+  | Native_json_schema_support_without_evidence
+  | Media_support_without_evidence
+  | Web_support_without_evidence
+  | Invalid_media_support_evidence
+  | Invalid_web_support_evidence
+  | Unsupported_media_type of Backend_types.media_type
+  | Unsupported_web_access of {
+      requested : Backend_types.web_access;
+      maximum : Backend_types.web_access;
+    }
+  | Read_only_unsupported
+  | Session_resume_unsupported
+
+(** Preflight failure category. *)
+type error = Input of input_error | Capability of capability_error
+
+(** [render_error error] returns an actionable diagnostic without embedding
+    attachment paths, identifiers, digests, or file bytes.
+
+    {b Preconditions.} None.
+
+    {b Postconditions.} Returns a non-empty sanitized diagnostic suitable for
+    logs or events.
+
+    {b Violators.} None.
+
+    {b Violates.} None. *)
+val render_error : error -> string
+
+(** [validate_inputs ~limits spec] validates attachment metadata and files in
+    [spec.working_dir]. The workspace is opened first, and relative attachment
+    paths are opened relative to that exact directory descriptor. Relative and
+    absolute symlinks are accepted only when the opened attachment descriptor
+    resolves to a readable regular file inside the resolved opened workspace.
+    No content is read before this descriptor-based authorization. Size limits
+    are enforced while streaming; mutation checks, observed size, SHA-256, and
+    PNG/JPEG magic bytes all use that same opened file descriptor. The opened
+    workspace and attachment paths are re-resolved after streaming and must
+    remain exactly the authorized, separator-safely contained paths. Platforms
+    that cannot resolve opened descriptor paths fail closed.
+
+    {b Preconditions.} [limits] is caller-owned policy; no library defaults are
+    implied.
+
+    {b Postconditions.} Returns [Ok ()] exactly when limits, identifiers, paths,
+    metadata, digests, and media signatures pass validation. Returns a typed
+    [Input _] failure before any backend is invoked.
+
+    {b Violators.} None.
+
+    {b Violates.} None. *)
+val validate_inputs :
+  limits:limits -> Backend_types.task_spec -> (unit, error) result
+
+(** [validate_capabilities ~descriptor spec] verifies descriptor proof
+    invariants and checks that [descriptor] supports every requested media type,
+    the requested web level, read-only mode, and session resume. A non-native
+    [spec.json_schema] is accepted because [Json_schema_enforcer] provides the
+    validate-and-retry fallback.
+
+    {b Preconditions.} [descriptor] is the descriptor selected for the
+    prospective invocation.
+
+    {b Postconditions.} Returns [Ok ()] when proof invariants and requested
+    capabilities are satisfied, otherwise a typed [Capability _] failure.
+    Performs no I/O.
+
+    {b Violators.} None.
+
+    {b Violates.} None. *)
+val validate_capabilities :
+  descriptor:Backend_registry.descriptor ->
+  Backend_types.task_spec ->
+  (unit, error) result

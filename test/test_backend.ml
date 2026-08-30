@@ -115,6 +115,11 @@ let test_make_task_spec () =
     (spec.expected_outputs
     = [Backend_types.Files_changed; Backend_types.Structured_report]) ;
   Alcotest.(check int) "lsp_servers default" 0 (List.length spec.lsp_servers) ;
+  Alcotest.(check int) "attachments default" 0 (List.length spec.attachments) ;
+  Alcotest.(check bool)
+    "web access default"
+    true
+    (spec.web_access = Backend_types.Web_disabled) ;
   Alcotest.(check string)
     "managed namespace default id"
     "cabal"
@@ -151,6 +156,15 @@ let test_make_task_spec_with_options () =
       config_dir = ".crucible/backend-config";
     }
   in
+  let attachment : Backend_types.media_attachment =
+    {
+      id = "cover";
+      path = "media/cover.png";
+      media_type = Png;
+      sha256 = String.make 64 'a';
+      size_bytes = 8;
+    }
+  in
   let spec =
     Backend_types.make_task_spec
       ~prompt:"Build story #12"
@@ -161,6 +175,8 @@ let test_make_task_spec_with_options () =
       ~working_dir:"/home/user/project"
       ~timeout:600.0
       ~expected_outputs:[Backend_types.Structured_report]
+      ~attachments:[attachment]
+      ~web_access:Backend_types.Web_search
       ()
   in
   Alcotest.(check string) "prompt" "Build story #12" spec.prompt ;
@@ -178,7 +194,15 @@ let test_make_task_spec_with_options () =
   Alcotest.(check bool)
     "expected_outputs"
     true
-    (spec.expected_outputs = [Backend_types.Structured_report])
+    (spec.expected_outputs = [Backend_types.Structured_report]) ;
+  Alcotest.(check bool)
+    "attachments"
+    true
+    (spec.attachments = [attachment]) ;
+  Alcotest.(check bool)
+    "web access"
+    true
+    (spec.web_access = Backend_types.Web_search)
 
 let test_mcp_server_config () =
   let config =
@@ -243,6 +267,17 @@ let test_task_spec_json_roundtrip () =
       ~timeout:600.0
       ~expected_outputs:
         [Backend_types.Files_changed; Backend_types.Structured_report]
+      ~attachments:
+        [
+          {
+            Backend_types.id = "front";
+            path = "media/front.jpeg";
+            media_type = Backend_types.Jpeg;
+            sha256 = String.make 64 'b';
+            size_bytes = 3;
+          };
+        ]
+      ~web_access:Backend_types.Web_search_and_fetch
       ()
   in
   let json = Backend_types.task_spec_to_yojson spec in
@@ -271,10 +306,51 @@ let test_task_spec_json_defaults_for_new_fields () =
   | Error e -> Alcotest.failf "legacy task_spec decode failed: %s" e
   | Ok spec ->
       Alcotest.(check int) "legacy lsp default" 0 (List.length spec.lsp_servers) ;
+      Alcotest.(check int)
+        "legacy attachments default"
+        0
+        (List.length spec.attachments) ;
+      Alcotest.(check bool)
+        "legacy web access default"
+        true
+        (spec.web_access = Backend_types.Web_disabled) ;
       Alcotest.(check string)
         "legacy namespace default"
         "cabal"
         spec.managed_namespace.id
+
+let test_make_resume_task_spec_copies_media_and_web_inputs () =
+  let attachment : Backend_types.media_attachment =
+    {
+      id = "front";
+      path = "media/front.png";
+      media_type = Png;
+      sha256 = String.make 64 'c';
+      size_bytes = 8;
+    }
+  in
+  let base =
+    Backend_types.make_task_spec
+      ~prompt:"identify"
+      ~working_dir:"/tmp/project"
+      ~attachments:[attachment]
+      ~web_access:Backend_types.Web_search_and_fetch
+      ()
+  in
+  let resumed =
+    Backend_types.make_resume_task_spec
+      ~base
+      ~resume_session_id:"session-1"
+      ()
+  in
+  Alcotest.(check bool)
+    "attachments copied"
+    true
+    (resumed.attachments = base.attachments) ;
+  Alcotest.(check bool)
+    "web access copied"
+    true
+    (resumed.web_access = base.web_access)
 
 let test_validate_managed_namespace_rejects_bad_id () =
   let namespace : Backend_types.managed_namespace =
@@ -457,6 +533,9 @@ let backend_types_tests =
     ( "task_spec JSON defaults for new fields",
       `Quick,
       test_task_spec_json_defaults_for_new_fields );
+    ( "resume task spec copies media and web inputs",
+      `Quick,
+      test_make_resume_task_spec_copies_media_and_web_inputs );
     ( "managed namespace rejects bad id",
       `Quick,
       test_validate_managed_namespace_rejects_bad_id );
