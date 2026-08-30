@@ -127,6 +127,8 @@ let marker_timestamp path =
       | Some timestamp -> timestamp
       | None -> Alcotest.failf "invalid timestamp in %s" path)
 
+let term_state_record_bytes = 64
+
 let term_state_records path =
   if not (Sys.file_exists path) then []
   else
@@ -134,11 +136,30 @@ let term_state_records path =
     Fun.protect
       ~finally:(fun () -> close_in_noerr channel)
       (fun () ->
-        really_input_string channel (in_channel_length channel)
-        |> String.split_on_char '\n'
-        |> List.filter_map (fun record ->
-               let record = String.trim record in
-               if record = "" then None else Some record))
+        let raw = really_input_string channel (in_channel_length channel) in
+        let raw_bytes = String.length raw in
+        if raw_bytes mod term_state_record_bytes <> 0 then
+          Alcotest.failf
+            "TERM-state log has a partial frame (%d bytes)"
+            raw_bytes ;
+        let rec records offset accumulated =
+          if offset = raw_bytes then List.rev accumulated
+          else
+            let newline = offset + term_state_record_bytes - 1 in
+            if raw.[newline] <> '\n' then
+              Alcotest.failf
+                "TERM-state frame at offset %d is not newline-terminated"
+                offset ;
+            let record =
+              String.sub raw offset (term_state_record_bytes - 1) |> String.trim
+            in
+            if record = "" then
+              Alcotest.failf "TERM-state frame at offset %d is empty" offset ;
+            records
+              (offset + term_state_record_bytes)
+              (record :: accumulated)
+        in
+        records 0 [])
 
 let wait_for_term_state_records ~clock path count =
   let deadline = Eio.Time.now clock +. 3.0 in
@@ -157,19 +178,45 @@ let wait_for_term_state_records ~clock path count =
   in
   loop ()
 
-let cleanup_raw_launcher ~clock process control =
-  try
-    (try Eio.Flow.copy_string "TERM 0\n" control with _ -> ()) ;
-    match
-      Eio.Time.with_timeout clock 0.8 (fun () -> Ok (Eio.Process.await process))
-    with
-    | Ok _ -> ()
-    | Error `Timeout ->
-        Eio.Process.signal process Sys.sigkill ;
-        ignore
-          (Eio.Time.with_timeout clock 0.5 (fun () ->
-               Ok (Eio.Process.await process)))
-  with _ -> ()
+let cleanup_raw_launcher ~clock ~validated_pgid process control =
+  let await timeout =
+    try
+      match
+        Eio.Time.with_timeout clock timeout (fun () ->
+            ignore (Eio.Process.await process) ;
+            Ok ())
+      with
+      | Ok () -> true
+      | Error `Timeout -> false
+    with _ -> false
+  in
+  (try Eio.Flow.copy_string "TERM 0\n" control with _ -> ()) ;
+  if not (await 0.8) then begin
+    (match validated_pgid with
+    | Some pgid when pgid > 0 -> (
+        try Unix.kill (-pgid) Sys.sigkill with Unix.Unix_error _ -> ())
+    | Some _ -> ()
+    | None -> (
+        try Eio.Process.signal process Sys.sigkill with _ -> ())) ;
+    if not (await 0.5) then begin
+      (try Eio.Process.signal process Sys.sigkill with _ -> ()) ;
+      ignore (await 0.5)
+    end
+  end
+
+let wait_for_raw_launcher_stop process =
+  let pid = Eio.Process.pid process in
+  let rec loop () =
+    try
+      match Unix.waitpid [Unix.WUNTRACED] pid with
+      | _, Unix.WSTOPPED _ -> ()
+      | _, Unix.WEXITED code ->
+          Alcotest.failf "raw launcher exited %d before it stopped" code
+      | _, Unix.WSIGNALED signal ->
+          Alcotest.failf "raw launcher received signal %d before it stopped" signal
+    with Unix.Unix_error (Unix.EINTR, _, _) -> loop ()
+  in
+  loop ()
 
 let fd_counter () =
   let rec first_available = function
@@ -212,7 +259,7 @@ let spawn_launcher_without_cabal ~sw ~env ?process_env command =
   close_noerr status_w ;
   (process, handshake_r, control_w, status_r)
 
-let read_launcher_pgid ~clock process handshake =
+let read_launcher_pgid ?validated_pgid ~clock process handshake =
   let buffer = Buffer.create 32 in
   let chunk = Cstruct.create 64 in
   let rec read_pgid () =
@@ -234,11 +281,69 @@ let read_launcher_pgid ~clock process handshake =
   Alcotest.(check string)
     "raw harness validates launcher PGID before ACK"
     (Printf.sprintf "PGID %d" expected)
-    record
+    record ;
+  Option.iter (fun target -> target := Some expected) validated_pgid
 
-let acknowledge_launcher ~clock process handshake control =
-  read_launcher_pgid ~clock process handshake ;
+let acknowledge_launcher ?validated_pgid ~clock process handshake control =
+  read_launcher_pgid ?validated_pgid ~clock process handshake ;
   Eio.Flow.copy_string "ACK\n" control
+
+let with_raw_term_recording_launcher
+    ?(before_cleanup = fun () -> ())
+    ~cleanup_paths
+    ~env
+    ~sw
+    test =
+  let marker = fresh_marker () in
+  let process = ref None in
+  let reaped = ref false in
+  let validated_pgid = ref None in
+  Fun.protect
+    ~finally:(fun () ->
+      before_cleanup () ;
+      Option.iter
+        (fun (launcher, control, handshake, status) ->
+          if not !reaped then
+            cleanup_raw_launcher
+              ~clock:(Eio.Stdenv.clock env)
+              ~validated_pgid:!validated_pgid
+              launcher
+              control ;
+          close_noerr handshake ;
+          close_noerr control ;
+          close_noerr status)
+        !process ;
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        (marker :: (marker ^ ".pid") :: (marker ^ ".terminated") :: cleanup_paths))
+    (fun () ->
+      let launcher, handshake, control, status =
+        spawn_launcher_without_cabal
+          ~sw
+          ~env
+          [
+            helper_path ();
+            "--process-descendant-helper";
+            "term-recording-ignoring-child";
+            marker;
+          ]
+      in
+      process := Some (launcher, control, handshake, status) ;
+      let clock = Eio.Stdenv.clock env in
+      acknowledge_launcher
+        ~validated_pgid
+        ~clock
+        launcher
+        handshake
+        control ;
+      wait_for_file ~clock marker ;
+      test
+        ~clock
+        ~launcher
+        ~control
+        ~marker
+        ~descendant:(child_pid marker)
+        ~set_reaped:(fun () -> reaped := true))
 
 let read_handshake_to_eof ~clock handshake =
   let buffer = Buffer.create 32 in
@@ -305,14 +410,20 @@ let test_raw_explicit_exec_record_confirms_success () =
       [helper_path (); "--process-descendant-helper"; "sleep"]
   in
   let clock = Eio.Stdenv.clock env in
+  let validated_pgid = ref None in
   Fun.protect
     ~finally:(fun () ->
-      cleanup_raw_launcher ~clock process control ;
+      cleanup_raw_launcher ~clock ~validated_pgid:!validated_pgid process control ;
       close_noerr handshake ;
       close_noerr control ;
       close_noerr status)
     (fun () ->
-      acknowledge_launcher ~clock process handshake control ;
+      acknowledge_launcher
+        ~validated_pgid
+        ~clock
+        process
+        handshake
+        control ;
       Alcotest.(check string)
         "only explicit EXEC confirms the raw launcher handshake"
         "EXEC\n"
@@ -330,9 +441,10 @@ let test_raw_no_ack_timeout_reports_failure_without_backend () =
       [helper_path (); "--process-descendant-helper"; "child"; marker]
   in
   let clock = Eio.Stdenv.clock env in
+  let validated_pgid = ref None in
   Fun.protect
     ~finally:(fun () ->
-      cleanup_raw_launcher ~clock process control ;
+      cleanup_raw_launcher ~clock ~validated_pgid:!validated_pgid process control ;
       close_noerr handshake ;
       close_noerr control ;
       close_noerr status ;
@@ -340,7 +452,7 @@ let test_raw_no_ack_timeout_reports_failure_without_backend () =
         (fun path -> try Sys.remove path with Sys_error _ -> ())
         [marker; marker ^ ".pid"])
     (fun () ->
-      read_launcher_pgid ~clock process handshake ;
+      read_launcher_pgid ~validated_pgid ~clock process handshake ;
       let failure = read_handshake_to_eof ~clock handshake in
       Alcotest.(check bool)
         "no-ACK handshake has a controlled ERROR record"
@@ -367,9 +479,10 @@ let test_raw_external_death_after_pgid_has_no_exec_record () =
       [helper_path (); "--process-descendant-helper"; "child"; marker]
   in
   let clock = Eio.Stdenv.clock env in
+  let validated_pgid = ref None in
   Fun.protect
     ~finally:(fun () ->
-      cleanup_raw_launcher ~clock process control ;
+      cleanup_raw_launcher ~clock ~validated_pgid:!validated_pgid process control ;
       close_noerr handshake ;
       close_noerr control ;
       close_noerr status ;
@@ -377,7 +490,7 @@ let test_raw_external_death_after_pgid_has_no_exec_record () =
         (fun path -> try Sys.remove path with Sys_error _ -> ())
         [marker; marker ^ ".pid"])
     (fun () ->
-      read_launcher_pgid ~clock process handshake ;
+      read_launcher_pgid ~validated_pgid ~clock process handshake ;
       Unix.kill (Eio.Process.pid process) Sys.sigkill ;
       Alcotest.(check string)
         "external launcher death leaves no implicit EXEC record"
@@ -391,6 +504,67 @@ let test_raw_external_death_after_pgid_has_no_exec_record () =
         "externally killed launcher is reaped"
         true
         (is_signaled (Eio.Process.await process)))
+
+let test_raw_cleanup_kills_validated_group () =
+  with_launcher @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  let process, handshake, control, status =
+    spawn_launcher_without_cabal
+      ~sw
+      ~env
+      [
+        helper_path ();
+        "--process-descendant-helper";
+        "term-ignoring-child";
+        marker;
+      ]
+  in
+  let clock = Eio.Stdenv.clock env in
+  let validated_pgid = ref None in
+  let cleaned = ref false in
+  let stopped = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      if !stopped then
+        (try Eio.Process.signal process Sys.sigcont with _ -> ()) ;
+      if not !cleaned then
+        cleanup_raw_launcher
+          ~clock
+          ~validated_pgid:!validated_pgid
+          process
+          control ;
+      close_noerr handshake ;
+      close_noerr control ;
+      close_noerr status ;
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [marker; marker ^ ".pid"])
+    (fun () ->
+      acknowledge_launcher
+        ~validated_pgid
+        ~clock
+        process
+        handshake
+        control ;
+      wait_for_file ~clock marker ;
+      let descendant = child_pid marker in
+      Eio.Process.signal process Sys.sigstop ;
+      stopped := true ;
+      wait_for_raw_launcher_stop process ;
+      cleanup_raw_launcher
+        ~clock
+        ~validated_pgid:!validated_pgid
+        process
+        control ;
+      stopped := false ;
+      cleaned := true ;
+      Alcotest.(check bool)
+        "raw cleanup reaps the stopped supervisor"
+        true
+        (is_signaled (Eio.Process.await process)) ;
+      wait_for_pid_exit ~clock descendant)
 
 let test_invalid_handshake_sequences_never_establish_exec () =
   Eio_posix.run @@ fun env ->
@@ -775,38 +949,11 @@ let test_malformed_control_records_use_fallback () =
     (fun record ->
       Eio_posix.run @@ fun env ->
       Eio.Switch.run @@ fun sw ->
-      let marker = fresh_marker () in
-      let process = ref None in
-      let reaped = ref false in
-      Fun.protect
-        ~finally:(fun () ->
-          Option.iter
-            (fun (launcher, control, handshake, status) ->
-              if not !reaped then cleanup_raw_launcher ~clock:(Eio.Stdenv.clock env) launcher control ;
-              close_noerr handshake ;
-              close_noerr control ;
-              close_noerr status)
-            !process ;
-          List.iter
-            (fun path -> try Sys.remove path with Sys_error _ -> ())
-            [marker; marker ^ ".pid"; marker ^ ".terminated"])
-        (fun () ->
-          let launcher, handshake, control, status =
-            spawn_launcher_without_cabal
-              ~sw
-              ~env
-              [
-                helper_path ();
-                "--process-descendant-helper";
-                "term-recording-ignoring-child";
-                marker;
-              ]
-          in
-          process := Some (launcher, control, handshake, status) ;
-          let clock = Eio.Stdenv.clock env in
-          acknowledge_launcher ~clock launcher handshake control ;
-          wait_for_file ~clock marker ;
-          let descendant = child_pid marker in
+      with_raw_term_recording_launcher
+        ~cleanup_paths:[]
+        ~env
+        ~sw
+      @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
           let started = Eio.Time.now clock in
           let started_wall = Unix.gettimeofday () in
           Eio.Flow.copy_string (record ^ "\n") control ;
@@ -816,7 +963,7 @@ let test_malformed_control_records_use_fallback () =
             Eio.Time.with_timeout clock 1.0 (fun () ->
                 Ok (Eio.Process.await launcher))
           in
-          (match outcome with Ok _ -> reaped := true | Error `Timeout -> ()) ;
+          (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
           Alcotest.(check bool)
             (record ^ " delivers TERM before fallback KILL")
             true
@@ -829,7 +976,7 @@ let test_malformed_control_records_use_fallback () =
             (record ^ " fallback remains bounded")
             true
             (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
-          wait_for_pid_exit ~clock descendant))
+          wait_for_pid_exit ~clock descendant)
     ["TERM nan"; "TERM infinity"; "TERM -infinity"; "TERM -0.1"; "TERM garbage"]
 
 let test_first_valid_control_record_wins () =
@@ -838,38 +985,11 @@ let test_first_valid_control_record_wins () =
   with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log @@ fun () ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let marker = fresh_marker () in
-  let process = ref None in
-  let reaped = ref false in
-  Fun.protect
-    ~finally:(fun () ->
-      Option.iter
-        (fun (launcher, control, handshake, status) ->
-          if not !reaped then cleanup_raw_launcher ~clock:(Eio.Stdenv.clock env) launcher control ;
-          close_noerr handshake ;
-          close_noerr control ;
-          close_noerr status)
-        !process ;
-      List.iter
-        (fun path -> try Sys.remove path with Sys_error _ -> ())
-        [marker; marker ^ ".pid"; marker ^ ".terminated"; term_state_log])
-    (fun () ->
-      let launcher, handshake, control, status =
-        spawn_launcher_without_cabal
-          ~sw
-          ~env
-          [
-            helper_path ();
-            "--process-descendant-helper";
-            "term-recording-ignoring-child";
-            marker;
-          ]
-      in
-      process := Some (launcher, control, handshake, status) ;
-      let clock = Eio.Stdenv.clock env in
-      acknowledge_launcher ~clock launcher handshake control ;
-      wait_for_file ~clock marker ;
-      let descendant = child_pid marker in
+  with_raw_term_recording_launcher
+    ~cleanup_paths:[term_state_log]
+    ~env
+    ~sw
+  @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
       Eio.Flow.copy_string "TERM 2\n" control ;
       wait_for_file ~clock (marker ^ ".terminated") ;
       Alcotest.(check (list string))
@@ -901,12 +1021,191 @@ let test_first_valid_control_record_wins () =
       let outcome =
         Eio.Time.with_timeout clock 5.0 (fun () -> Ok (Eio.Process.await launcher))
       in
-      (match outcome with Ok _ -> reaped := true | Error `Timeout -> ()) ;
+      (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
       Alcotest.(check bool)
         "first-valid TERM launcher is reaped"
         true
         (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
-      wait_for_pid_exit ~clock descendant)
+      let final_records = term_state_records term_state_log in
+      Alcotest.(check (list string))
+        "reaped launcher leaves the complete stable TERM-state sequence"
+        [ "TERM_ACCEPT grace=2";
+          "DEADLINE_CREATE grace=2";
+          "TERM_IGNORE grace=1";
+          "TERM_IGNORE grace=3";
+        ]
+        final_records ;
+      Alcotest.(check int)
+        "stable TERM-state log contains four complete raw frames"
+        (4 * term_state_record_bytes)
+        (Unix.stat term_state_log).st_size ;
+      Alcotest.(check int)
+        "stable log records exactly one deadline creation"
+        1
+        (List.fold_left
+           (fun count record ->
+             if String.starts_with ~prefix:"DEADLINE_CREATE " record then
+               count + 1
+             else count)
+           0
+           final_records) ;
+      wait_for_pid_exit ~clock descendant
+
+let test_signal_before_control_record_enriches_deadline () =
+  with_launcher @@ fun () ->
+  let term_state_log = fresh_marker () in
+  let signal_gate = fresh_marker () in
+  Process_test_helper.write_file signal_gate "blocked\n" ;
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log @@ fun () ->
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_SIGNAL_GATE" signal_gate @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  with_raw_term_recording_launcher
+    ~before_cleanup:(fun () ->
+      try Sys.remove signal_gate with Sys_error _ -> ())
+    ~cleanup_paths:[term_state_log; signal_gate]
+    ~env
+    ~sw
+  @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
+      Eio.Process.signal launcher Sys.sigterm ;
+      Alcotest.(check (list string))
+        "launcher observes SIGTERM before FD4 is written"
+        ["TERM_SIGNAL"]
+        (wait_for_term_state_records ~clock term_state_log 1) ;
+      Eio.Flow.copy_string "TERM 1\n" control ;
+      Sys.remove signal_gate ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
+      let outcome =
+        Eio.Time.with_timeout clock 3.0 (fun () -> Ok (Eio.Process.await launcher))
+      in
+      (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
+      Alcotest.(check bool)
+        "signal-before-FD4 launcher is reaped"
+        true
+        (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
+      Alcotest.(check (list string))
+        "pending SIGTERM is observed before FD4 enriches its deadline"
+        [ "TERM_SIGNAL";
+          "TERM_ACCEPT grace=1";
+          "DEADLINE_CREATE grace=1";
+        ]
+        (term_state_records term_state_log) ;
+      Alcotest.(check int)
+        "signal enrichment emits complete raw frames"
+        (3 * term_state_record_bytes)
+        (Unix.stat term_state_log).st_size ;
+      wait_for_pid_exit ~clock descendant
+
+let test_term_state_event_cap_preserves_framing () =
+  with_launcher @@ fun () ->
+  let term_state_log = fresh_marker () in
+  let cap_marker = fresh_marker () in
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log @@ fun () ->
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_CAP_MARKER" cap_marker @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  with_raw_term_recording_launcher
+    ~cleanup_paths:[term_state_log; cap_marker]
+    ~env
+    ~sw
+  @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
+      Eio.Flow.copy_string "TERM 1\n" control ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
+      ignore (wait_for_term_state_records ~clock term_state_log 2) ;
+      let ignored_records =
+        List.init 12 (fun index -> Printf.sprintf "TERM %d\n" (index + 1))
+        |> String.concat ""
+      in
+      Eio.Flow.copy_string ignored_records control ;
+      ignore (wait_for_term_state_records ~clock term_state_log 8) ;
+      let outcome =
+        Eio.Time.with_timeout clock 3.0 (fun () -> Ok (Eio.Process.await launcher))
+      in
+      (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
+      Alcotest.(check bool)
+        "capped TERM-state launcher processed termination and was reaped"
+        true
+        (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
+      Alcotest.(check (list string))
+        "more than eight inputs retain exactly the first eight events"
+        [ "TERM_ACCEPT grace=1";
+          "DEADLINE_CREATE grace=1";
+          "TERM_IGNORE grace=1";
+          "TERM_IGNORE grace=2";
+          "TERM_IGNORE grace=3";
+          "TERM_IGNORE grace=4";
+          "TERM_IGNORE grace=5";
+          "TERM_IGNORE grace=6";
+        ]
+        (term_state_records term_state_log) ;
+      Alcotest.(check int)
+        "event cap is eight complete raw frames"
+        (8 * term_state_record_bytes)
+        (Unix.stat term_state_log).st_size ;
+      Alcotest.(check bool)
+        "launcher processed TERM events beyond the logging cap"
+        true
+        (Sys.file_exists cap_marker) ;
+      wait_for_pid_exit ~clock descendant
+
+let test_fifo_term_state_log_is_nonblocking () =
+  with_launcher @@ fun () ->
+  let fifo = fresh_marker () in
+  (try Unix.mkfifo fifo 0o600
+   with Unix.Unix_error _ -> Alcotest.skip ()) ;
+  Fun.protect
+    ~finally:(fun () -> try Sys.remove fifo with Sys_error _ -> ())
+    (fun () ->
+      with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" fifo @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      with_raw_term_recording_launcher
+        ~cleanup_paths:[]
+        ~env
+        ~sw
+      @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
+          Eio.Flow.copy_string "TERM 0.05\n" control ;
+          wait_for_file ~clock (marker ^ ".terminated") ;
+          let outcome =
+            Eio.Time.with_timeout clock 1.0 (fun () ->
+                Ok (Eio.Process.await launcher))
+          in
+          (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
+          Alcotest.(check bool)
+            "TERM-state FIFO with no reader cannot block termination"
+            true
+            (match outcome with
+            | Ok status -> is_signaled status
+            | Error `Timeout -> false) ;
+          wait_for_pid_exit ~clock descendant)
+
+let test_short_term_state_writes_are_rolled_back () =
+  with_launcher @@ fun () ->
+  let term_state_log = fresh_marker () in
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log @@ fun () ->
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_WRITE_BYTES" "7" @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  with_raw_term_recording_launcher
+    ~cleanup_paths:[term_state_log]
+    ~env
+    ~sw
+  @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
+      Eio.Flow.copy_string "TERM 0.05\n" control ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
+      let outcome =
+        Eio.Time.with_timeout clock 1.0 (fun () -> Ok (Eio.Process.await launcher))
+      in
+      (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
+      Alcotest.(check bool)
+        "short-write injection cannot block termination"
+        true
+        (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
+      Alcotest.(check int)
+        "short writes are rolled back instead of exposing partial frames"
+        0
+        (Unix.stat term_state_log).st_size ;
+      wait_for_pid_exit ~clock descendant
 
 let test_invalid_term_state_log_is_best_effort () =
   with_launcher @@ fun () ->
@@ -915,48 +1214,22 @@ let test_invalid_term_state_log_is_best_effort () =
   with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" invalid_log @@ fun () ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let marker = fresh_marker () in
-  let process = ref None in
-  let reaped = ref false in
-  Fun.protect
-    ~finally:(fun () ->
-      Option.iter
-        (fun (launcher, control, handshake, status) ->
-          if not !reaped then cleanup_raw_launcher ~clock:(Eio.Stdenv.clock env) launcher control ;
-          close_noerr handshake ;
-          close_noerr control ;
-          close_noerr status)
-        !process ;
-      List.iter
-        (fun path -> try Sys.remove path with Sys_error _ -> ())
-        [marker; marker ^ ".pid"; marker ^ ".terminated"])
-    (fun () ->
-      let launcher, handshake, control, status =
-        spawn_launcher_without_cabal
-          ~sw
-          ~env
-          [ helper_path ();
-            "--process-descendant-helper";
-            "term-recording-ignoring-child";
-            marker;
-          ]
-      in
-      process := Some (launcher, control, handshake, status) ;
-      let clock = Eio.Stdenv.clock env in
-      acknowledge_launcher ~clock launcher handshake control ;
-      wait_for_file ~clock marker ;
-      let descendant = child_pid marker in
+  with_raw_term_recording_launcher
+    ~cleanup_paths:[]
+    ~env
+    ~sw
+  @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
       Eio.Flow.copy_string "TERM 0.05\n" control ;
       wait_for_file ~clock (marker ^ ".terminated") ;
       let outcome =
         Eio.Time.with_timeout clock 2.0 (fun () -> Ok (Eio.Process.await launcher))
       in
-      (match outcome with Ok _ -> reaped := true | Error `Timeout -> ()) ;
+      (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
       Alcotest.(check bool)
         "invalid TERM-state log cannot block termination"
         true
         (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
-      wait_for_pid_exit ~clock descendant)
+      wait_for_pid_exit ~clock descendant
 
 let test_cancelled_handshake_after_fork_reaps_child () =
   with_launcher @@ fun () ->
@@ -2447,6 +2720,9 @@ let () =
           ( "raw external death after PGID has no EXEC",
             `Quick,
             test_raw_external_death_after_pgid_has_no_exec_record );
+          ( "raw cleanup kills a validated process group",
+            `Quick,
+            test_raw_cleanup_kills_validated_group );
           ( "invalid handshake sequences never establish exec",
             `Quick,
             test_invalid_handshake_sequences_never_establish_exec );
@@ -2482,6 +2758,18 @@ let () =
            ( "first valid FD4 TERM record wins",
              `Quick,
              test_first_valid_control_record_wins );
+           ( "signal-before-FD4 enriches TERM deadline",
+             `Quick,
+             test_signal_before_control_record_enriches_deadline );
+           ( "TERM-state event cap preserves framing",
+             `Quick,
+             test_term_state_event_cap_preserves_framing );
+           ( "TERM-state FIFO is nonblocking",
+             `Quick,
+             test_fifo_term_state_log_is_nonblocking );
+           ( "short TERM-state writes preserve framing",
+             `Quick,
+             test_short_term_state_writes_are_rolled_back );
            ( "invalid TERM-state log is best effort",
              `Quick,
              test_invalid_term_state_log_is_best_effort );

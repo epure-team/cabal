@@ -85,6 +85,8 @@ type control = {
   mutable deadline_started : bool;
   mutable release_requested : bool;
   mutable term_state_event_count : int;
+  mutable term_signal_observed : bool;
+  mutable term_signal_logged : bool;
 }
 
 let report_ack_failure fd control =
@@ -101,6 +103,7 @@ let finite_non_negative seconds =
   match classify_float seconds with FP_normal | FP_subnormal | FP_zero -> true | _ -> false
 
 type term_state_event =
+  | Term_signal
   | Term_accepted of float
   | Term_ignored of float
   | Deadline_created of float
@@ -110,6 +113,7 @@ let max_term_state_events = 8
 let term_state_record_bytes = 64
 
 let term_state_event_text = function
+  | Term_signal -> "TERM_SIGNAL"
   | Term_accepted seconds -> Printf.sprintf "TERM_ACCEPT grace=%.17g" seconds
   | Term_ignored seconds -> Printf.sprintf "TERM_IGNORE grace=%.17g" seconds
   | Deadline_created seconds ->
@@ -124,11 +128,50 @@ let fixed_term_state_record event =
   in
   payload ^ String.make (payload_bytes - String.length payload) ' ' ^ "\n"
 
+let rollback_partial_record fd initial_size =
+  let rec loop remaining_attempts =
+    try Unix.ftruncate fd initial_size
+    with
+    | Unix.Unix_error (Unix.EINTR, _, _) when remaining_attempts > 0 ->
+        loop (remaining_attempts - 1)
+    | Unix.Unix_error _ -> ()
+  in
+  loop 1
+
+let test_term_state_write_bytes record_bytes =
+  match Sys.getenv_opt "CABAL_PROCESS_GROUP_TEST_TERM_STATE_WRITE_BYTES" with
+  | Some value -> (
+      match int_of_string_opt value with
+      | Some bytes when bytes >= 0 && bytes < record_bytes -> bytes
+      | Some _ | None -> record_bytes)
+  | None -> record_bytes
+
+let write_term_state_record fd record =
+  let stats = Unix.fstat fd in
+  match stats.Unix.st_kind with
+  | Unix.S_REG when stats.Unix.st_size mod term_state_record_bytes = 0 ->
+      let requested_bytes = test_term_state_write_bytes (String.length record) in
+      let written = Unix.write_substring fd record 0 requested_bytes in
+      if written <> String.length record then
+        rollback_partial_record fd stats.Unix.st_size
+  | Unix.S_FIFO ->
+      (* A single nonblocking write no larger than POSIX PIPE_BUF is atomic: it
+         either emits the complete fixed frame or raises without writing it. *)
+      ignore (Unix.write_substring fd record 0 (String.length record))
+  | Unix.S_REG
+  | Unix.S_DIR
+  | Unix.S_CHR
+  | Unix.S_BLK
+  | Unix.S_LNK
+  | Unix.S_SOCK ->
+      ()
+
 let log_term_state control event =
+  let within_cap = control.term_state_event_count < max_term_state_events in
+  control.term_state_event_count <- control.term_state_event_count + 1 ;
   match Sys.getenv_opt "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" with
   | None | Some "" -> ()
-  | Some path when control.term_state_event_count < max_term_state_events ->
-      control.term_state_event_count <- control.term_state_event_count + 1 ;
+  | Some path when within_cap ->
       (try
          let fd =
            Unix.openfile
@@ -139,10 +182,22 @@ let log_term_state control event =
          Fun.protect
            ~finally:(fun () -> close_noerr fd)
            (fun () ->
+             Unix.set_close_on_exec fd ;
              let record = fixed_term_state_record event in
-             ignore (Unix.write_substring fd record 0 (String.length record)))
+             write_term_state_record fd record)
        with _ -> ())
   | Some _ -> ()
+
+let log_observed_term_signal control =
+  if
+    control.term_signal_observed
+    && not control.term_signal_logged
+  then begin
+    control.term_signal_logged <- true ;
+    log_term_state control Term_signal ;
+    true
+  end
+  else false
 
 let request_term ?grace_seconds control =
   match (control.term_requested, grace_seconds) with
@@ -162,6 +217,8 @@ let request_term ?grace_seconds control =
 
 let install_term_handler control =
   let rec handle _ =
+    if not control.term_requested then
+      control.term_signal_observed <- true ;
     ignore (request_term control) ;
     (* Some Unix signal implementations reset a handler after delivery. Keep
        repeated direct and group-delivered TERM requests on the same state
@@ -369,6 +426,26 @@ let write_test_marker variable =
           (fun () -> write_all fd "started\n")
       with Unix.Unix_error _ -> ())
 
+let write_bounded_test_marker variable =
+  match Sys.getenv_opt variable with
+  | None | Some "" -> ()
+  | Some path -> (
+      try
+        let fd =
+          Unix.openfile
+            path
+            [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC; Unix.O_NONBLOCK]
+            0o600
+        in
+        Fun.protect
+          ~finally:(fun () -> close_noerr fd)
+          (fun () -> ignore (Unix.write_substring fd "started\n" 0 8))
+      with _ -> ())
+
+let write_term_state_cap_marker control =
+  if control.term_state_event_count > max_term_state_events then
+    write_bounded_test_marker "CABAL_PROCESS_GROUP_TEST_TERM_STATE_CAP_MARKER"
+
 let handshake_pgid_record established_pgid =
   match Sys.getenv_opt "CABAL_PROCESS_GROUP_TEST_HANDSHAKE_PGID" with
   | Some value ->
@@ -446,6 +523,23 @@ let wait_for_test_gate ~control ~on_tick variable =
       in
       loop ()
 
+let wait_for_term_signal_test_gate () =
+  match Sys.getenv_opt "CABAL_PROCESS_GROUP_TEST_TERM_SIGNAL_GATE" with
+  | None | Some "" -> ()
+  | Some path ->
+      let deadline =
+        monotonic_now () +. default_test_release_gate_timeout_seconds
+      in
+      let rec loop () =
+        if Sys.file_exists path then
+          let remaining = deadline -. monotonic_now () in
+          if remaining > 0.0 then begin
+            ignore (select_retry [] (min remaining 0.01)) ;
+            loop ()
+          end
+      in
+      loop ()
+
 let () =
   let handshake = descriptor_of_int handshake_fd in
   let control_fd = descriptor_of_int control_fd in
@@ -459,6 +553,8 @@ let () =
   let post_fork_cleanup () =
     match (!pgid, !control_state) with
     | Some established_pgid, Some control when !forked ->
+        if log_observed_term_signal control then
+          wait_for_term_signal_test_gate () ;
         wait_for_control control 0.0 ;
         ignore (request_term control) ;
         Option.iter
@@ -474,6 +570,7 @@ let () =
         in
         let kill_after_grace () =
           if monotonic_now () >= deadline then begin
+            write_term_state_cap_marker control ;
             terminate_group established_pgid ;
             exit 128
           end
@@ -516,6 +613,8 @@ let () =
         deadline_started = false;
         release_requested = false;
         term_state_event_count = 0;
+        term_signal_observed = false;
+        term_signal_logged = false;
       }
     in
     control_state := Some control ;
@@ -581,6 +680,8 @@ let () =
     in
     let enforce_termination_deadline () =
       if control.term_requested then begin
+        if log_observed_term_signal control then
+          wait_for_term_signal_test_gate () ;
         if
           Option.is_none control.requested_grace_seconds
           && not control.deadline_started
@@ -593,6 +694,7 @@ let () =
           | None -> create_termination_deadline control term_deadline
         in
         if monotonic_now () >= deadline then begin
+          write_term_state_cap_marker control ;
           (* The supervisor remains the confirmed group leader until this
              broadcast.  Killing it with the group is safe: all descendants
              have already received TERM and no parent remains to release us. *)
