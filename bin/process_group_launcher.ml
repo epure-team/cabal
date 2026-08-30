@@ -301,6 +301,22 @@ let test_delay_seconds variable =
 let test_enabled variable =
   match Sys.getenv_opt variable with Some "1" | Some "true" -> true | _ -> false
 
+let write_test_marker variable =
+  match Sys.getenv_opt variable with
+  | None | Some "" -> ()
+  | Some path -> (
+      try
+        let fd =
+          Unix.openfile
+            path
+            [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC; Unix.O_NONBLOCK]
+            0o600
+        in
+        Fun.protect
+          ~finally:(fun () -> close_noerr fd)
+          (fun () -> write_all fd "started\n")
+      with Unix.Unix_error _ -> ())
+
 let handshake_pgid_record established_pgid =
   match Sys.getenv_opt "CABAL_PROCESS_GROUP_TEST_HANDSHAKE_PGID" with
   | Some value ->
@@ -327,6 +343,18 @@ let delay_with_control ~control ~on_tick seconds =
     end
   in
   loop ()
+
+let wait_for_test_gate ~control ~on_tick variable =
+  match Sys.getenv_opt variable with
+  | None | Some "" -> ()
+  | Some path ->
+      let rec loop () =
+        if not (Sys.file_exists path) then begin
+          delay_with_control ~control ~on_tick 0.01 ;
+          loop ()
+        end
+      in
+      loop ()
 
 let () =
   let handshake = descriptor_of_int handshake_fd in
@@ -538,6 +566,11 @@ let () =
         remain_anchor ()
       end
       else if control.release_requested then begin
+        write_test_marker "CABAL_PROCESS_GROUP_TEST_RELEASE_STARTED_MARKER" ;
+        wait_for_test_gate
+          ~control
+          ~on_tick:enforce_termination_deadline
+          "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE" ;
         delay_with_control
           ~control
           ~on_tick:enforce_termination_deadline

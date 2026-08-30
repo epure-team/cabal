@@ -679,22 +679,51 @@ let test_unexpected_supervisor_death_terminates_term_responsive_backend_promptly
       wait_for_pid_exit ~clock (child_pid marker))
 
 let test_release_commit_boundary_survives_elapsed_timeout () =
-  Eio_posix.run @@ fun env ->
-  Eio.Switch.run @@ fun sw ->
-  with_env "CABAL_PROCESS_GROUP_TEST_RELEASE_DELAY_SECONDS" "0.4" @@ fun () ->
-  let result =
-    Backend_process.run_process
-      ~sw
-      ~env
-      ~cmd:[helper_path (); "--process-descendant-helper"; "success"]
-      ~working_dir:"/tmp"
-      ~timeout_seconds:0.1
-      ()
-  in
-  Alcotest.(check bool)
-    "completed backend remains successful while RELEASE is delayed"
-    true
-    (result.Backend_process.status = Backend_types.Success)
+  let marker = fresh_marker () in
+  let release_started = marker ^ ".release-started" in
+  let release_gate = marker ^ ".allow-release" in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [release_started; release_gate])
+    (fun () ->
+      with_env
+        "CABAL_PROCESS_GROUP_TEST_RELEASE_STARTED_MARKER"
+        release_started
+      @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_TEST_RELEASE_GATE" release_gate @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let clock = Eio.Stdenv.clock env in
+      let timeout_seconds = 1.0 in
+      let completion =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+            Backend_process.run_process
+              ~sw
+              ~env
+              ~cmd:[helper_path (); "--process-descendant-helper"; "success"]
+              ~working_dir:"/tmp"
+              ~timeout_seconds
+              ())
+      in
+      Fun.protect
+        ~finally:(fun () ->
+          if not (Sys.file_exists release_gate) then
+            Process_test_helper.write_file release_gate "continue\n")
+        (fun () ->
+          wait_for_file ~clock release_started ;
+          Eio.Time.sleep clock (timeout_seconds +. 0.1) ;
+          Alcotest.(check bool)
+            "normal completion waits for gated RELEASE outside task timeout"
+            true
+            (Option.is_none (Eio.Promise.peek completion)) ;
+          Process_test_helper.write_file release_gate "continue\n" ;
+          let result = Eio.Promise.await_exn completion in
+          Alcotest.(check bool)
+            "completed backend remains successful while RELEASE is delayed"
+            true
+            (result.Backend_process.status = Backend_types.Success)))
 
 let test_backend_process_preserves_child_signal_semantics () =
   Eio_posix.run @@ fun env ->

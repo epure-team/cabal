@@ -142,7 +142,6 @@ let run_term_observing_child marker =
   sleep_forever ()
 
 let run_term_recording_ignoring_child marker =
-  write_file marker "started\n" ;
   write_file (marker ^ ".pid") (string_of_int (Unix.getpid ())) ;
   Sys.set_signal
     Sys.sigterm
@@ -151,6 +150,9 @@ let run_term_recording_ignoring_child marker =
          write_file
            (marker ^ ".terminated")
            (Printf.sprintf "%.6f\n" (Unix.gettimeofday ())))) ;
+  (* The marker is the parent's readiness boundary: publish it only after the
+     TERM handler is installed so an immediate control record is deterministic. *)
+  write_file marker "started\n" ;
   sleep_forever ()
 
 let wait_for_path path =
