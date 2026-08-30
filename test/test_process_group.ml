@@ -127,6 +127,36 @@ let marker_timestamp path =
       | Some timestamp -> timestamp
       | None -> Alcotest.failf "invalid timestamp in %s" path)
 
+let term_state_records path =
+  if not (Sys.file_exists path) then []
+  else
+    let channel = open_in_bin path in
+    Fun.protect
+      ~finally:(fun () -> close_in_noerr channel)
+      (fun () ->
+        really_input_string channel (in_channel_length channel)
+        |> String.split_on_char '\n'
+        |> List.filter_map (fun record ->
+               let record = String.trim record in
+               if record = "" then None else Some record))
+
+let wait_for_term_state_records ~clock path count =
+  let deadline = Eio.Time.now clock +. 3.0 in
+  let rec loop () =
+    let records = term_state_records path in
+    if List.length records >= count then records
+    else if Eio.Time.now clock >= deadline then
+      Alcotest.failf
+        "timed out waiting for %d TERM-state records (saw %d)"
+        count
+        (List.length records)
+    else begin
+      Eio.Time.sleep clock 0.02 ;
+      loop ()
+    end
+  in
+  loop ()
+
 let cleanup_raw_launcher ~clock process control =
   try
     (try Eio.Flow.copy_string "TERM 0\n" control with _ -> ()) ;
@@ -804,7 +834,85 @@ let test_malformed_control_records_use_fallback () =
 
 let test_first_valid_control_record_wins () =
   with_launcher @@ fun () ->
-  with_env "CABAL_PROCESS_GROUP_TEST_TERM_GRACE_SECONDS" "0.2" @@ fun () ->
+  let term_state_log = fresh_marker () in
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let marker = fresh_marker () in
+  let process = ref None in
+  let reaped = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      Option.iter
+        (fun (launcher, control, handshake, status) ->
+          if not !reaped then cleanup_raw_launcher ~clock:(Eio.Stdenv.clock env) launcher control ;
+          close_noerr handshake ;
+          close_noerr control ;
+          close_noerr status)
+        !process ;
+      List.iter
+        (fun path -> try Sys.remove path with Sys_error _ -> ())
+        [marker; marker ^ ".pid"; marker ^ ".terminated"; term_state_log])
+    (fun () ->
+      let launcher, handshake, control, status =
+        spawn_launcher_without_cabal
+          ~sw
+          ~env
+          [
+            helper_path ();
+            "--process-descendant-helper";
+            "term-recording-ignoring-child";
+            marker;
+          ]
+      in
+      process := Some (launcher, control, handshake, status) ;
+      let clock = Eio.Stdenv.clock env in
+      acknowledge_launcher ~clock launcher handshake control ;
+      wait_for_file ~clock marker ;
+      let descendant = child_pid marker in
+      Eio.Flow.copy_string "TERM 2\n" control ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
+      Alcotest.(check (list string))
+        "first valid TERM selects the deadline grace"
+        ["TERM_ACCEPT grace=2"; "DEADLINE_CREATE grace=2"]
+        (wait_for_term_state_records ~clock term_state_log 2) ;
+      Eio.Flow.copy_string "TERM 1\n" control ;
+      ignore (wait_for_term_state_records ~clock term_state_log 3) ;
+      Eio.Flow.copy_string "TERM 3\n" control ;
+      let records = wait_for_term_state_records ~clock term_state_log 4 in
+      Alcotest.(check (list string))
+        "later shorter and longer TERM records are ignored in order"
+        [ "TERM_ACCEPT grace=2";
+          "DEADLINE_CREATE grace=2";
+          "TERM_IGNORE grace=1";
+          "TERM_IGNORE grace=3";
+        ]
+        records ;
+      Alcotest.(check int)
+        "deadline is created exactly once"
+        1
+        (List.fold_left
+           (fun count record ->
+             if String.starts_with ~prefix:"DEADLINE_CREATE " record then
+               count + 1
+             else count)
+           0
+           records) ;
+      let outcome =
+        Eio.Time.with_timeout clock 5.0 (fun () -> Ok (Eio.Process.await launcher))
+      in
+      (match outcome with Ok _ -> reaped := true | Error `Timeout -> ()) ;
+      Alcotest.(check bool)
+        "first-valid TERM launcher is reaped"
+        true
+        (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
+      wait_for_pid_exit ~clock descendant)
+
+let test_invalid_term_state_log_is_best_effort () =
+  with_launcher @@ fun () ->
+  let missing_parent = fresh_marker () in
+  let invalid_log = Filename.concat missing_parent "term-state.log" in
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" invalid_log @@ fun () ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let marker = fresh_marker () in
@@ -827,8 +935,7 @@ let test_first_valid_control_record_wins () =
         spawn_launcher_without_cabal
           ~sw
           ~env
-          [
-            helper_path ();
+          [ helper_path ();
             "--process-descendant-helper";
             "term-recording-ignoring-child";
             marker;
@@ -839,32 +946,14 @@ let test_first_valid_control_record_wins () =
       acknowledge_launcher ~clock launcher handshake control ;
       wait_for_file ~clock marker ;
       let descendant = child_pid marker in
-      let started = Eio.Time.now clock in
-      let started_wall = Unix.gettimeofday () in
-      Eio.Flow.copy_string "TERM 0.6\n" control ;
-      wait_for_file ~clock (marker ^ ".terminated") ;
-      let observed = marker_timestamp (marker ^ ".terminated") in
-      Eio.Time.sleep clock 0.15 ;
       Eio.Flow.copy_string "TERM 0.05\n" control ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
       let outcome =
-        Eio.Time.with_timeout clock 1.2 (fun () -> Ok (Eio.Process.await launcher))
+        Eio.Time.with_timeout clock 2.0 (fun () -> Ok (Eio.Process.await launcher))
       in
       (match outcome with Ok _ -> reaped := true | Error `Timeout -> ()) ;
-      let elapsed = Eio.Time.now clock -. started in
       Alcotest.(check bool)
-        "first valid TERM is observed before the later record"
-        true
-        (observed -. started_wall < 0.2) ;
-      Alcotest.(check bool)
-        "later shorter TERM does not shorten the first deadline"
-        true
-        (elapsed >= 0.5) ;
-      Alcotest.(check bool)
-        "later TERM does not reset the first deadline"
-        true
-        (elapsed < 0.75) ;
-      Alcotest.(check bool)
-        "first-valid TERM launcher is reaped"
+        "invalid TERM-state log cannot block termination"
         true
         (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
       wait_for_pid_exit ~clock descendant)
@@ -2393,6 +2482,9 @@ let () =
            ( "first valid FD4 TERM record wins",
              `Quick,
              test_first_valid_control_record_wins );
+           ( "invalid TERM-state log is best effort",
+             `Quick,
+             test_invalid_term_state_log_is_best_effort );
            ( "cancelled post-fork handshake reaps child",
             `Quick,
             test_cancelled_handshake_after_fork_reaps_child );

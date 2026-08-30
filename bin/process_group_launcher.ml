@@ -84,6 +84,7 @@ type control = {
   mutable requested_grace_seconds : float option;
   mutable deadline_started : bool;
   mutable release_requested : bool;
+  mutable term_state_event_count : int;
 }
 
 let report_ack_failure fd control =
@@ -99,23 +100,69 @@ let finite_non_negative seconds =
   &&
   match classify_float seconds with FP_normal | FP_subnormal | FP_zero -> true | _ -> false
 
+type term_state_event =
+  | Term_accepted of float
+  | Term_ignored of float
+  | Deadline_created of float
+
+let max_term_state_events = 8
+
+let term_state_record_bytes = 64
+
+let term_state_event_text = function
+  | Term_accepted seconds -> Printf.sprintf "TERM_ACCEPT grace=%.17g" seconds
+  | Term_ignored seconds -> Printf.sprintf "TERM_IGNORE grace=%.17g" seconds
+  | Deadline_created seconds ->
+      Printf.sprintf "DEADLINE_CREATE grace=%.17g" seconds
+
+let fixed_term_state_record event =
+  let payload = term_state_event_text event in
+  let payload_bytes = term_state_record_bytes - 1 in
+  let payload =
+    if String.length payload <= payload_bytes then payload
+    else String.sub payload 0 payload_bytes
+  in
+  payload ^ String.make (payload_bytes - String.length payload) ' ' ^ "\n"
+
+let log_term_state control event =
+  match Sys.getenv_opt "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" with
+  | None | Some "" -> ()
+  | Some path when control.term_state_event_count < max_term_state_events ->
+      control.term_state_event_count <- control.term_state_event_count + 1 ;
+      (try
+         let fd =
+           Unix.openfile
+             path
+             [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND; Unix.O_NONBLOCK]
+             0o600
+         in
+         Fun.protect
+           ~finally:(fun () -> close_noerr fd)
+           (fun () ->
+             let record = fixed_term_state_record event in
+             ignore (Unix.write_substring fd record 0 (String.length record)))
+       with _ -> ())
+  | Some _ -> ()
+
 let request_term ?grace_seconds control =
   match (control.term_requested, grace_seconds) with
   | false, _ ->
       control.term_requested <- true ;
-      control.requested_grace_seconds <- grace_seconds
+      control.requested_grace_seconds <- grace_seconds ;
+      Option.is_some grace_seconds
   | true, Some seconds
     when Option.is_none control.requested_grace_seconds
          && not control.deadline_started ->
       (* Parent TERM is written before its group broadcast. A queued valid
          record can therefore enrich an already-observed SIGTERM before the
          deadline is fixed. *)
-      control.requested_grace_seconds <- Some seconds
-  | true, None | true, Some _ -> ()
+      control.requested_grace_seconds <- Some seconds ;
+      true
+  | true, None | true, Some _ -> false
 
 let install_term_handler control =
   let rec handle _ =
-    request_term control ;
+    ignore (request_term control) ;
     (* Some Unix signal implementations reset a handler after delivery. Keep
        repeated direct and group-delivered TERM requests on the same state
        machine instead of falling back to the default immediate termination. *)
@@ -128,19 +175,24 @@ let handle_control_line control line =
   | ["TERM"; seconds] -> (
       match float_of_string_opt seconds with
       | Some seconds when finite_non_negative seconds ->
-          request_term ~grace_seconds:seconds control
-      | Some _ | None -> request_term control)
+          let event =
+            if request_term ~grace_seconds:seconds control then
+              Term_accepted seconds
+            else Term_ignored seconds
+          in
+          log_term_state control event
+      | Some _ | None -> ignore (request_term control))
   | ["ACK"]
     when not control.acknowledged
          && not control.term_requested
          && not control.release_requested ->
       control.acknowledged <- true
-  | ["ACK"] -> request_term control
+  | ["ACK"] -> ignore (request_term control)
   | ["RELEASE"] -> control.release_requested <- true
   | _ ->
       (* A malformed command cannot safely leave an owned group running after
          its parent has failed. *)
-      request_term control
+      ignore (request_term control)
 
 let consume_control_lines control =
   let text = Buffer.contents control.pending in
@@ -162,10 +214,10 @@ let service_control control =
         match Unix.read fd bytes 0 (Bytes.length bytes) with
         | 0 ->
             control.fd <- None ;
-            request_term control
+            ignore (request_term control)
         | count ->
             if Buffer.length control.pending + count > max_control_bytes then
-              request_term control
+              ignore (request_term control)
             else begin
               Buffer.add_subbytes control.pending bytes 0 count ;
               consume_control_lines control
@@ -174,7 +226,7 @@ let service_control control =
       | Unix.Unix_error (Unix.EINTR, _, _) -> ()
       | Unix.Unix_error _ ->
           control.fd <- None ;
-          request_term control)
+          ignore (request_term control))
 
 let select_retry ?(on_eintr = fun () -> ()) read_fds timeout =
   let deadline = monotonic_now () +. timeout in
@@ -332,6 +384,20 @@ let parent_loss_grace_seconds =
       | _ -> default)
   | None -> default
 
+let create_termination_deadline control term_deadline =
+  control.deadline_started <- true ;
+  let grace_seconds =
+    Option.value
+      ~default:parent_loss_grace_seconds
+      control.requested_grace_seconds
+  in
+  let deadline = monotonic_now () +. grace_seconds in
+  term_deadline := Some deadline ;
+  (* This event follows the assignment above, so a recorded creation always
+     corresponds to the actual write-once deadline state. *)
+  log_term_state control (Deadline_created grace_seconds) ;
+  deadline
+
 let delay_with_control ~control ~on_tick seconds =
   let deadline = monotonic_now () +. seconds in
   let rec loop () =
@@ -394,7 +460,7 @@ let () =
     match (!pgid, !control_state) with
     | Some established_pgid, Some control when !forked ->
         wait_for_control control 0.0 ;
-        request_term control ;
+        ignore (request_term control) ;
         Option.iter
           (fun child_pid ->
             try Unix.kill child_pid Sys.sigterm with Unix.Unix_error _ -> ())
@@ -404,16 +470,7 @@ let () =
         let deadline =
           match !term_deadline with
           | Some deadline -> deadline
-          | None ->
-              control.deadline_started <- true ;
-              let deadline =
-                monotonic_now ()
-                +. Option.value
-                     ~default:parent_loss_grace_seconds
-                     control.requested_grace_seconds
-              in
-              term_deadline := Some deadline ;
-              deadline
+          | None -> create_termination_deadline control term_deadline
         in
         let kill_after_grace () =
           if monotonic_now () >= deadline then begin
@@ -458,6 +515,7 @@ let () =
         requested_grace_seconds = None;
         deadline_started = false;
         release_requested = false;
+        term_state_event_count = 0;
       }
     in
     control_state := Some control ;
@@ -532,16 +590,7 @@ let () =
         let deadline =
           match !term_deadline with
           | Some deadline -> deadline
-           | None ->
-               control.deadline_started <- true ;
-               let deadline =
-                 monotonic_now ()
-                +. Option.value
-                     ~default:parent_loss_grace_seconds
-                     control.requested_grace_seconds
-              in
-              term_deadline := Some deadline ;
-              deadline
+          | None -> create_termination_deadline control term_deadline
         in
         if monotonic_now () >= deadline then begin
           (* The supervisor remains the confirmed group leader until this
