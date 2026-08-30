@@ -146,19 +146,38 @@ let test_term_state_write_bytes record_bytes =
       | Some _ | None -> record_bytes)
   | None -> record_bytes
 
+let unlock_whole_file_noerr fd =
+  try
+    ignore (Unix.lseek fd 0 Unix.SEEK_SET) ;
+    Unix.lockf fd Unix.F_ULOCK 0
+  with Unix.Unix_error _ -> ()
+
+let with_nonblocking_whole_file_lock fd action =
+  ignore (Unix.lseek fd 0 Unix.SEEK_SET) ;
+  Unix.lockf fd Unix.F_TLOCK 0 ;
+  Fun.protect ~finally:(fun () -> unlock_whole_file_noerr fd) action
+
 let write_term_state_record fd record =
   let stats = Unix.fstat fd in
   match stats.Unix.st_kind with
-  | Unix.S_REG when stats.Unix.st_size mod term_state_record_bytes = 0 ->
-      let requested_bytes = test_term_state_write_bytes (String.length record) in
-      let written = Unix.write_substring fd record 0 requested_bytes in
-      if written <> String.length record then
-        rollback_partial_record fd stats.Unix.st_size
+  | Unix.S_REG ->
+      (* The lock starts at offset zero and extends to EOF. F_TLOCK never waits:
+         a cooperating writer already holding the lock makes this event a
+         best-effort no-op. Closing [fd] remains a final lock-release backstop. *)
+      with_nonblocking_whole_file_lock fd (fun () ->
+          let locked_stats = Unix.fstat fd in
+          if locked_stats.Unix.st_size mod term_state_record_bytes = 0 then begin
+            let requested_bytes =
+              test_term_state_write_bytes (String.length record)
+            in
+            let written = Unix.write_substring fd record 0 requested_bytes in
+            if written <> String.length record then
+              rollback_partial_record fd locked_stats.Unix.st_size
+          end)
   | Unix.S_FIFO ->
       (* A single nonblocking write no larger than POSIX PIPE_BUF is atomic: it
          either emits the complete fixed frame or raises without writing it. *)
       ignore (Unix.write_substring fd record 0 (String.length record))
-  | Unix.S_REG
   | Unix.S_DIR
   | Unix.S_CHR
   | Unix.S_BLK

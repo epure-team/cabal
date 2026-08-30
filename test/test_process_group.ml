@@ -129,6 +129,24 @@ let marker_timestamp path =
 
 let term_state_record_bytes = 64
 
+let fixed_term_state_test_record text =
+  let payload_bytes = term_state_record_bytes - 1 in
+  if String.length text > payload_bytes then
+    invalid_arg "TERM-state test record exceeds fixed frame size" ;
+  text ^ String.make (payload_bytes - String.length text) ' ' ^ "\n"
+
+let lock_term_state_log_or_skip fd =
+  ignore (Unix.lseek fd 0 Unix.SEEK_SET) ;
+  try Unix.lockf fd Unix.F_TLOCK 0
+  with
+  | Unix.Unix_error ((Unix.ENOSYS | Unix.EOPNOTSUPP), _, _) -> Alcotest.skip ()
+
+let unlock_term_state_log_noerr fd =
+  try
+    ignore (Unix.lseek fd 0 Unix.SEEK_SET) ;
+    Unix.lockf fd Unix.F_ULOCK 0
+  with Unix.Unix_error _ -> ()
+
 let term_state_records path =
   if not (Sys.file_exists path) then []
   else
@@ -873,12 +891,21 @@ let test_repeated_direct_sigterm_keeps_the_original_grace () =
   Eio.Switch.run @@ fun sw ->
   let marker = fresh_marker () in
   let process = ref None in
+  let validated_pgid = ref None in
+  let reaped = ref false in
   Fun.protect
     ~finally:(fun () ->
       Option.iter
-        (fun launcher_pid ->
-          try Unix.kill (-launcher_pid) Sys.sigkill
-          with Unix.Unix_error _ -> ())
+        (fun (launcher, handshake, control, status) ->
+          if not !reaped then
+            cleanup_raw_launcher
+              ~clock:(Eio.Stdenv.clock env)
+              ~validated_pgid:!validated_pgid
+              launcher
+              control ;
+          close_noerr handshake ;
+          close_noerr control ;
+          close_noerr status)
         !process ;
       List.iter
         (fun path -> try Sys.remove path with Sys_error _ -> ())
@@ -897,43 +924,41 @@ let test_repeated_direct_sigterm_keeps_the_original_grace () =
             marker;
           ]
       in
-       process := Some (Eio.Process.pid spawned) ;
-       let clock = Eio.Stdenv.clock env in
-       acknowledge_launcher ~clock spawned handshake control ;
-       Fun.protect
-        ~finally:(fun () ->
-          close_noerr handshake ;
-          close_noerr control ;
-          close_noerr status)
-        (fun () ->
-          wait_for_file ~clock marker ;
-          let started = Eio.Time.now clock in
-          Unix.kill (Eio.Process.pid spawned) Sys.sigterm ;
-          Eio.Time.sleep clock 0.1 ;
-          Unix.kill (Eio.Process.pid spawned) Sys.sigterm ;
-          wait_for_file ~clock (marker ^ ".terminated") ;
-          let outcome =
-            Eio.Time.with_timeout clock 2.0 (fun () ->
-                Ok (Eio.Process.await spawned))
-          in
-          (match outcome with Ok _ -> process := None | Error `Timeout -> ()) ;
-          let elapsed = Eio.Time.now clock -. started in
-          Alcotest.(check bool)
-            "launcher is killed after the grace period"
-            true
-            (match outcome with
-            | Ok status -> is_signaled status
-            | Error `Timeout -> false) ;
-          if elapsed < 0.4 then
-            Alcotest.failf
-              "repeated SIGTERM ended the launcher after %.3fs, before the \
-               grace"
-              elapsed ;
-          Alcotest.(check bool)
-            "graceful cleanup remains bounded"
-            true
-           (elapsed < 1.5) ;
-           wait_for_pid_exit ~clock (child_pid marker)))
+      process := Some (spawned, handshake, control, status) ;
+      let clock = Eio.Stdenv.clock env in
+      acknowledge_launcher
+        ~validated_pgid
+        ~clock
+        spawned
+        handshake
+        control ;
+      wait_for_file ~clock marker ;
+      let started = Eio.Time.now clock in
+      Unix.kill (Eio.Process.pid spawned) Sys.sigterm ;
+      Eio.Time.sleep clock 0.1 ;
+      Unix.kill (Eio.Process.pid spawned) Sys.sigterm ;
+      wait_for_file ~clock (marker ^ ".terminated") ;
+      let outcome =
+        Eio.Time.with_timeout clock 2.0 (fun () ->
+            Ok (Eio.Process.await spawned))
+      in
+      (match outcome with Ok _ -> reaped := true | Error `Timeout -> ()) ;
+      let elapsed = Eio.Time.now clock -. started in
+      Alcotest.(check bool)
+        "launcher is killed after the grace period"
+        true
+        (match outcome with
+        | Ok status -> is_signaled status
+        | Error `Timeout -> false) ;
+      if elapsed < 0.4 then
+        Alcotest.failf
+          "repeated SIGTERM ended the launcher after %.3fs, before the grace"
+          elapsed ;
+      Alcotest.(check bool)
+        "graceful cleanup remains bounded"
+        true
+        (elapsed < 1.5) ;
+      wait_for_pid_exit ~clock (child_pid marker))
 
 let test_malformed_control_records_use_fallback () =
   with_launcher @@ fun () ->
@@ -1096,6 +1121,78 @@ let test_signal_before_control_record_enriches_deadline () =
         (Unix.stat term_state_log).st_size ;
       wait_for_pid_exit ~clock descendant
 
+let test_term_signal_gate_releases_automatically () =
+  with_launcher @@ fun () ->
+  let term_state_log = fresh_marker () in
+  let signal_gate = fresh_marker () in
+  Process_test_helper.write_file signal_gate "blocked\n" ;
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log @@ fun () ->
+  with_env "CABAL_PROCESS_GROUP_TEST_TERM_SIGNAL_GATE" signal_gate @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  with_raw_term_recording_launcher
+    ~before_cleanup:(fun () ->
+      try Sys.remove signal_gate with Sys_error _ -> ())
+    ~cleanup_paths:[term_state_log; signal_gate]
+    ~env
+    ~sw
+  @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
+      let started = Eio.Time.now clock in
+      Eio.Process.signal launcher Sys.sigterm ;
+      Alcotest.(check (list string))
+        "launcher reaches the still-present signal gate"
+        ["TERM_SIGNAL"]
+        (wait_for_term_state_records ~clock term_state_log 1) ;
+      Eio.Flow.copy_string "TERM 0.05\n" control ;
+      wait_for_file ~timeout_seconds:3.5 ~clock (marker ^ ".terminated") ;
+      let outcome =
+        Eio.Time.with_timeout clock 4.0 (fun () ->
+            Ok (Eio.Process.await launcher))
+      in
+      (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
+      let elapsed = Eio.Time.now clock -. started in
+      Alcotest.(check bool)
+        "signal gate remains present until automatic release"
+        true
+        (Sys.file_exists signal_gate) ;
+      Alcotest.(check bool)
+        "signal gate honors its two-second fail-safe"
+        true
+        (elapsed >= 1.8) ;
+      Alcotest.(check bool)
+        "automatic gate release and short grace remain bounded"
+        true
+        (elapsed < 3.5) ;
+      Alcotest.(check bool)
+        "automatically released signal-gate launcher is reaped"
+        true
+        (match outcome with
+        | Ok status -> is_signaled status
+        | Error `Timeout -> false) ;
+      let final_records = term_state_records term_state_log in
+      Alcotest.(check (list string))
+        "queued FD4 TERM enriches the signal after automatic gate release"
+        [ "TERM_SIGNAL";
+          "TERM_ACCEPT grace=0.050000000000000003";
+          "DEADLINE_CREATE grace=0.050000000000000003";
+        ]
+        final_records ;
+      Alcotest.(check int)
+        "automatic gate release leaves three complete stable frames"
+        (3 * term_state_record_bytes)
+        (Unix.stat term_state_log).st_size ;
+      Alcotest.(check int)
+        "automatic gate release creates exactly one deadline"
+        1
+        (List.fold_left
+           (fun count record ->
+             if String.starts_with ~prefix:"DEADLINE_CREATE " record then
+               count + 1
+             else count)
+           0
+           final_records) ;
+      wait_for_pid_exit ~clock descendant
+
 let test_term_state_event_cap_preserves_framing () =
   with_launcher @@ fun () ->
   let term_state_log = fresh_marker () in
@@ -1179,9 +1276,58 @@ let test_fifo_term_state_log_is_nonblocking () =
             | Error `Timeout -> false) ;
           wait_for_pid_exit ~clock descendant)
 
+let test_locked_term_state_log_is_skipped_safely () =
+  with_launcher @@ fun () ->
+  let term_state_log = fresh_marker () in
+  Process_test_helper.write_file
+    term_state_log
+    (fixed_term_state_test_record "PREEXISTING_FRAME") ;
+  let lock_fd = Unix.openfile term_state_log [Unix.O_RDWR] 0 in
+  Fun.protect
+    ~finally:(fun () ->
+      unlock_term_state_log_noerr lock_fd ;
+      Unix.close lock_fd ;
+      try Sys.remove term_state_log with Sys_error _ -> ())
+    (fun () ->
+      lock_term_state_log_or_skip lock_fd ;
+      with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log
+      @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      with_raw_term_recording_launcher
+        ~cleanup_paths:[]
+        ~env
+        ~sw
+      @@ fun ~clock ~launcher ~control ~marker ~descendant ~set_reaped ->
+          Eio.Flow.copy_string "TERM 0.05\n" control ;
+          wait_for_file ~clock (marker ^ ".terminated") ;
+          let outcome =
+            Eio.Time.with_timeout clock 1.0 (fun () ->
+                Ok (Eio.Process.await launcher))
+          in
+          (match outcome with Ok _ -> set_reaped () | Error `Timeout -> ()) ;
+          Alcotest.(check bool)
+            "a cooperating writer's lock cannot block termination"
+            true
+            (match outcome with
+            | Ok status -> is_signaled status
+            | Error `Timeout -> false) ;
+          Alcotest.(check (list string))
+            "unavailable advisory lock skips logging without touching old frames"
+            ["PREEXISTING_FRAME"]
+            (term_state_records term_state_log) ;
+          Alcotest.(check int)
+            "locked log retains its pre-existing aligned frame"
+            term_state_record_bytes
+            (Unix.stat term_state_log).st_size ;
+          wait_for_pid_exit ~clock descendant)
+
 let test_short_term_state_writes_are_rolled_back () =
   with_launcher @@ fun () ->
   let term_state_log = fresh_marker () in
+  Process_test_helper.write_file
+    term_state_log
+    (fixed_term_state_test_record "PREEXISTING_FRAME") ;
   with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_LOG" term_state_log @@ fun () ->
   with_env "CABAL_PROCESS_GROUP_TEST_TERM_STATE_WRITE_BYTES" "7" @@ fun () ->
   Eio_posix.run @@ fun env ->
@@ -1202,9 +1348,13 @@ let test_short_term_state_writes_are_rolled_back () =
         true
         (match outcome with Ok status -> is_signaled status | Error `Timeout -> false) ;
       Alcotest.(check int)
-        "short writes are rolled back instead of exposing partial frames"
-        0
+        "short-write rollback preserves the pre-existing aligned frame"
+        term_state_record_bytes
         (Unix.stat term_state_log).st_size ;
+      Alcotest.(check (list string))
+        "short-write rollback leaves pre-existing frame contents unchanged"
+        ["PREEXISTING_FRAME"]
+        (term_state_records term_state_log) ;
       wait_for_pid_exit ~clock descendant
 
 let test_invalid_term_state_log_is_best_effort () =
@@ -2761,12 +2911,18 @@ let () =
            ( "signal-before-FD4 enriches TERM deadline",
              `Quick,
              test_signal_before_control_record_enriches_deadline );
+           ( "TERM signal gate releases automatically",
+             `Quick,
+             test_term_signal_gate_releases_automatically );
            ( "TERM-state event cap preserves framing",
              `Quick,
              test_term_state_event_cap_preserves_framing );
            ( "TERM-state FIFO is nonblocking",
              `Quick,
              test_fifo_term_state_log_is_nonblocking );
+           ( "locked TERM-state log is skipped safely",
+             `Quick,
+             test_locked_term_state_log_is_skipped_safely );
            ( "short TERM-state writes preserve framing",
              `Quick,
              test_short_term_state_writes_are_rolled_back );
