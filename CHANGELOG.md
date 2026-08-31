@@ -15,16 +15,17 @@ by the date a change merged to `main`.
   keeps model probes opt-in, installs the five handwritten implementations plus
   embedded Pi, and validates descriptor/runtime consistency before commit.
    `Runtime_dispatch.run_task` requires caller-provided attachment limits,
-   resolves registry overrides at every invocation, enforces runtime consistency
-   and runs input/capability preflight before version or availability side
-   effects, then enforces installed-version baselines, sanitizes ordinary
-   probe/execution exceptions, and keeps one resolved backend snapshot across
-   schema retries. By-name completers defer all dynamic checks until
-   invocation. Extensible custom YAML adapters now receive conservative,
-   loader-owned descriptors with global → project pair precedence.
+   resolves one immutable validated entry at every invocation, and rejects raw
+   runtime-only overrides before side effects rather than lending them catalog
+   claims. Input/capability preflight precedes version or availability work;
+   ordinary exceptions are sanitized while cancellation/fatal exceptions
+   propagate. Hardened entries bind independent full capability snapshots,
+   approved descriptors, explicit origins, and `Enforce_baseline`. Extensible
+   YAML entries bind conservative effective descriptors and `No_version_gate`
+   with global → project whole-entry precedence, including built-in-id overrides.
    Custom backends can be added as validated descriptor/runtime pairs through
-   `Runtime_bootstrap.register_custom`, and runtime implementation provenance is
-   explicit through `Agentic_backend.implementation_origin`.
+   `Runtime_bootstrap.register_custom`; provenance no longer adds a required
+   field to `Agentic_backend.S`.
 - **Per-backend `models` enumeration** (non-breaking, additive).
   Every adapter implementing `Agentic_backend.S` now exposes a
   `models : string list` member listing the model ids it accepts via its

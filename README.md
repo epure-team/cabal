@@ -138,8 +138,8 @@ let () =
 `Backend_types.task_spec` can carry workspace-relative PNG/JPEG attachment
 metadata and an explicit web policy. Existing callers default to no attachments
 and `Web_disabled`. `Runtime_dispatch.run_task` requires the host's size/count
-policy and validates files plus the final runtime/descriptor pair before the
-backend is called:
+policy and validates files plus requested capabilities against one bound,
+validated runtime entry before the backend is called:
 
 ```ocaml
 let limits : Task_preflight.limits =
@@ -183,19 +183,20 @@ priority first:
    passed).
 
 Project-local adapters override user-global, which override built-ins by id when
-the override satisfies the descriptor trust boundary.
+the override produces a structurally valid conservative entry.
 `Runtime_bootstrap.Extensible` preserves the existing probe behavior when both
-`sw` and `env` are supplied. Non-built-in YAML ids receive conservative
-loader-owned descriptors before their runtimes are installed: baseline `0.0.0`,
-the executable token derived without execution, and no positive
-media/web/native-schema/session-resume/read-only claims. Project overrides update
-both the runtime and loader-owned descriptor. Descriptor ownership failures
-leave the prior pair unchanged.
+`sw` and `env` are supplied. Every generic YAML adapter, including one that
+overrides a built-in id, receives a conservative effective descriptor: baseline
+metadata `0.0.0`, the executable token derived without execution, and no positive
+structured/streaming/media/web/native-schema/session-resume/read-only/MCP/config/
+file-reading claims. The entry explicitly uses `No_version_gate`, so arbitrary
+or prerelease YAML CLI version formats remain compatible while availability is
+still checked. Project overrides replace backend, effective descriptor, YAML
+origin, and policy together.
 
-Built-in descriptors are immutable. A user/project YAML override of a built-in
-must retain its binary identity and match every runtime-represented capability;
-otherwise the override is rejected and the previous runtime remains installed.
-Compatibility and explicit host descriptors cannot be replaced by YAML.
+Built-in and explicit host descriptors remain immutable catalog entries; YAML
+does not replace or inherit them. Central dispatch uses only the effective
+descriptor bound to the validated runtime entry.
 
 `Adapter_loader.register_all` registers YAML-backed adapters only. It does not
 by itself install handwritten backend modules such as `Claude_code`. It remains
@@ -205,14 +206,22 @@ sequences themselves.
 
 Service hosts should use `Runtime_bootstrap.Hardened_builtins`: it requires an
 empty runtime registry, does not read `HOME` or project adapter directories,
-validates all six final runtime/descriptor pairs before committing, keeps Pi as
-the approved embedded YAML backend, and installs the other five handwritten
-implementations. Model probes are disabled unless explicitly requested with
-both `sw` and `env`. Custom backends remain supported additively through
-`Runtime_bootstrap.register_custom ~descriptor ~backend`; collisions and
-invalid capability/evidence pairs mutate neither registry. Runtime origin is
-explicitly inspectable through `Agentic_backend.implementation_origin`; hardened
-mode pins five `Handwritten` backends and one `Yaml` backend (Pi).
+validates all six entries against an independent bootstrap-owned full capability
+mapping and their approved static descriptors before one atomic commit, keeps Pi
+as the approved embedded YAML backend, and installs the other five handwritten
+implementations. All six use `Enforce_baseline`. Model probes are disabled unless
+explicitly requested with both `sw` and `env`. Custom backends remain supported
+additively through `Runtime_bootstrap.register_custom ~descriptor ~backend`;
+their explicit descriptor is the host's full capability attestation and uses the
+safe `Enforce_baseline` default. Collisions and invalid capability/evidence pairs
+mutate neither registry. Origin is registry-entry metadata, so
+`Agentic_backend.S` imposes no provenance field on downstream modules.
+
+`Registry.register` remains the legacy runtime-only compatibility API. It always
+installs a raw, untrusted entry and clears any validated pairing for the same id;
+`Runtime_dispatch` rejects it before preflight side effects, version/availability
+processes, project config, or backend execution. Trusted call-time replacement
+must replace the whole validated entry.
 
 ### Known limitations
 

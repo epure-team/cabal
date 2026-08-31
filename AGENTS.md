@@ -249,32 +249,38 @@ standalone OCaml library and as the backend abstraction layer vendored under
 
 - `Runtime_bootstrap.Hardened_builtins` requires an empty runtime registry,
   ignores HOME/project adapters, retains Pi as embedded YAML, installs the five
-  handwritten built-ins, validates all final pairs before commit, and leaves
-  model probes off unless explicitly requested with both `sw` and `env`.
+  handwritten built-ins, validates all six entries against an independent full
+  capability mapping, atomically publishes them with `Enforce_baseline`, and
+  leaves model probes off unless explicitly requested with both `sw` and `env`.
 - Pi does not transport resume; both its descriptor and YAML runtime report
   `session_resume = false`.
 - `Runtime_dispatch.run_task` is the central invocation path. It requires caller
-  limits, resolves runtime and descriptor at each call, validates consistency,
-  runs input/capability preflight before any process or availability side effect,
-  enforces parseable installed versions against the descriptor baseline, checks
-  availability, and passes one resolved backend snapshot through schema retries.
-  Missing/unparseable version output keeps the compatibility skip policy;
-  below-baseline parseable output fails before backend execution. Ordinary
-  probe/backend exceptions render as payload-free typed errors, while Eio
-  cancellation propagates.
+  limits and resolves exactly one `Registry.Validated` entry snapshot at each
+  call; it never joins a runtime to `Backend_registry.find`. It runs
+  input/capability preflight before any process or availability side effect,
+  applies the entry's version policy, checks availability, and passes the same
+  backend through schema retries. Raw `Registry.register` entries are rejected
+  before side effects. `Enforce_baseline` keeps the missing/unparseable skip
+  policy and blocks parseable below-baseline versions; `No_version_gate` skips
+  stability comparison. Ordinary exceptions are sanitized; Eio cancellation,
+  `Out_of_memory`, `Stack_overflow`, and `Sys.Break` propagate.
 - `Backend_completer.make_by_name` and `make_validator_by_name` use central
   dispatch with a private attachment-free/Web-disabled compatibility policy.
   Construction performs no registry lookup or adapter command; dynamic checks
   happen only when the returned completer is invoked.
   `Backend_completer.make`, `Agentic_backend.run_task`, and
   `Json_schema_enforcer.run_task` remain documented low-level bypasses.
-- Extensible non-built-in YAML adapters receive conservative loader-owned
-  descriptors (`0.0.0`, no media/web/native/resume/read-only claims) before the
-  runtime is installed. Global → project overrides may replace only metadata
-  already owned by the YAML loader. Built-in and host descriptors are immutable
-  across this path; mismatched built-in YAML overrides fail closed.
-- `Agentic_backend.implementation_origin` is the runtime-origin proof:
-  hardened mode must map Claude/Codex/Copilot/Gemini/OpenCode to `Handwritten`
-  and Pi to `Yaml`; host/test implementations use `Custom`.
+- Every Extensible YAML adapter receives a conservative effective descriptor and
+  `No_version_gate`; this includes built-in-id overrides. Global → project
+  precedence replaces the complete validated entry. YAML neither mutates nor
+  inherits built-in/host catalog descriptors.
+- `Runtime_entry.origin` is registration metadata: hardened mode maps
+  Claude/Codex/Copilot/Gemini/OpenCode to `Handwritten` and Pi to `Yaml`;
+  loader entries use `Yaml`, and explicit host entries use `Custom`.
+- `Agentic_backend.S` deliberately has no origin field, preserving downstream
+  custom module source compatibility. YAML package/config metadata is bounded to
+  the latest package per id and cleared by `Registry.clear`.
 - Custom backends are registered additively as a validated descriptor/runtime
-  pair through `Runtime_bootstrap.register_custom`; collisions replace nothing.
+  pair through `Runtime_bootstrap.register_custom`; their explicit descriptor is
+  the full host capability attestation and `Enforce_baseline` is the safe default.
+  Collisions replace nothing.
