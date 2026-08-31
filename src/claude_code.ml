@@ -164,22 +164,6 @@ let is_resume_failure (result : task_result) =
       || is_resume_failure_text result.stderr
   | Success | Timeout | Cancelled -> false
 
-let status_text = function
-  | Success -> "success"
-  | Failed msg -> msg
-  | Timeout -> "timed out"
-  | Cancelled -> "cancelled"
-
-(* Formats what the CLI actually did. Kept whole -- it is the only evidence a
-   reader gets about why no verdict came back. *)
-let process_result_detail cmd (result : Backend_process.process_result) =
-  Printf.sprintf
-    "%s\nstatus: %s\nstdout:\n%s\nstderr:\n%s"
-    (String.concat " " cmd)
-    (status_text result.status)
-    result.stdout
-    result.stderr
-
 let check_project_config ~sw ~env ~project_dir ~setup_result =
   match setup_result.Backend_config_writer.project_config_path with
   | None ->
@@ -208,30 +192,14 @@ let check_project_config ~sw ~env ~project_dir ~setup_result =
               ~timeout_seconds:10.0
               ()
           in
-          match result.status with
-          | Success -> Agentic_backend.Config_valid
-          | Failed _ | Timeout | Cancelled ->
-              (* Anything but success here is evidence about the machine, not
-                 about the settings file, and Config_invalid asserts the
-                 opposite. The non-zero exit is the common case and the one
-                 that misleads: an unauthenticated CLI, a rate limit, or
-                 --init-only disappearing from a self-updating binary (it is
-                 absent from `claude --help` as of 2.1.251) all exit non-zero,
-                 and none of them says the settings are wrong.
-
-                 It matters beyond tidiness: the test covering this function
-                 has no PATH gate, so an opinionated verdict turns any of the
-                 above into a red suite -- and, with the pre-commit test gate
-                 blocking, into a developer who cannot commit for a reason
-                 unrelated to their diff. The process output is kept in the
-                 message, so a real "your settings are bad" stays legible. *)
-              Agentic_backend.Config_check_unsupported
-                (Printf.sprintf
-                   "Claude Code native config validation returned no verdict \
-                    on %s; treating the config as unchecked.\n\
-                    %s"
-                   settings_path
-                   (process_result_detail cmd result))
+          (* A non-zero exit can mean authentication, rate limiting, or CLI
+             drift (Claude 2.1.251 removed --init-only), none of which proves
+             the generated settings are invalid. *)
+          Backend_process.config_check_from_process_result
+            ~backend_name:name
+            ~config_path:settings_path
+            ~cmd
+            result
         with e ->
           Agentic_backend.Config_check_unsupported
             (Printf.sprintf

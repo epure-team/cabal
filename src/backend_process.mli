@@ -29,6 +29,33 @@ type process_result = {
   session_id : string option;
 }
 
+(** [config_check_from_process_result ~backend_name ?config_path ~cmd result]
+    interprets the exit status of a backend-native config check.  A successful
+    exit is the native check's positive verdict.  Failure, timeout, and
+    cancellation carry no deterministic verdict about the config and therefore
+    return [Config_check_unsupported] with the command, status, exit code, and
+    complete stdout/stderr diagnostics.
+
+    {pre}
+    [backend_name] is non-empty and [cmd] is the argv used to obtain [result].
+
+    {post}
+    Returns [Config_valid] exactly for [Success] with exit code 0.  Never maps
+    a contradictory success/non-zero pair, [Failed], [Timeout], or [Cancelled]
+    to either config acceptance or rejection.
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val config_check_from_process_result :
+  backend_name:string ->
+  ?config_path:string ->
+  cmd:string list ->
+  process_result ->
+  Agentic_backend.config_check_result
+
 (** [validate_task_namespace spec] checks the managed namespace before any
     backend path, suffix, or temporary-file operation uses it.
 

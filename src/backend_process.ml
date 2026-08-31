@@ -17,6 +17,39 @@ type process_result = {
   session_id : string option;
 }
 
+let status_text = function
+  | Success -> "success"
+  | Failed msg -> msg
+  | Timeout -> "timed out"
+  | Cancelled -> "cancelled"
+
+let config_check_from_process_result ~backend_name ?config_path ~cmd
+    (result : process_result) =
+  match result.status with
+  | Success when result.exit_code = 0 -> Agentic_backend.Config_valid
+  | Success | Failed _ | Timeout | Cancelled ->
+      let config_location =
+        match config_path with Some path -> " on " ^ path | None -> ""
+      in
+      Agentic_backend.Config_check_unsupported
+        (Printf.sprintf
+           "%s native config validation returned no verdict%s; treating the \
+            config as unchecked.\n\
+            %s\n\
+            status: %s\n\
+            exit code: %d\n\
+            stdout:\n\
+            %s\n\
+            stderr:\n\
+            %s"
+           backend_name
+           config_location
+           (String.concat " " cmd)
+           (status_text result.status)
+           result.exit_code
+           result.stdout
+           result.stderr)
+
 let shell_quote_argv argv = argv |> String.concat " "
 
 let invalid_managed_namespace_result msg =

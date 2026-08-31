@@ -120,6 +120,81 @@ let test_write_twice_is_idempotent () =
             | Invalid_managed_namespace _ -> "Invalid_managed_namespace"
             | Written _ | Already_current -> assert false))
 
+let test_predictable_temp_symlink_cannot_redirect_write () =
+  with_project_dir (fun project ->
+      let artifact = make_artifact ~ownership:Epure_owned "safe=config\n" in
+      let target = Filename.concat project artifact.project_relative_path in
+      let target_dir = Filename.dirname target in
+      Unix.mkdir target_dir 0o755 ;
+      let victim = Filename.concat project "unrelated.txt" in
+      let oc = open_out victim in
+      output_string oc "do not clobber\n" ;
+      close_out oc ;
+      let predictable_tmp = target ^ ".cabal-tmp" in
+      Unix.symlink victim predictable_tmp ;
+      let result =
+        W.write_artifact ~project_dir:project ~force:false artifact
+      in
+      (match result with
+      | Written _ -> ()
+      | _ -> Alcotest.fail "fresh atomic write did not complete") ;
+      Alcotest.(check string)
+        "pre-created temp symlink target is untouched"
+        "do not clobber\n"
+        (read_file victim) ;
+      Alcotest.(check string)
+        "config is written to its intended path"
+        artifact.content
+        (read_file target))
+
+let test_concurrent_writers_leave_one_complete_file () =
+  with_project_dir (fun project ->
+      let writer_count = 6 in
+      let contents =
+        List.init writer_count (fun i ->
+            Printf.sprintf
+              "writer-%d\n%s"
+              i
+              (String.make (1024 * 1024) (Char.chr (Char.code 'a' + i))))
+      in
+      let ready_r, ready_w = Unix.pipe () in
+      let children =
+        List.map
+          (fun content ->
+            match Unix.fork () with
+            | 0 -> (
+                Unix.close ready_w ;
+                let byte = Bytes.create 1 in
+                ignore (Unix.read ready_r byte 0 1) ;
+                let artifact = make_artifact ~ownership:Epure_owned content in
+                try
+                  ignore
+                    (W.write_artifact
+                       ~project_dir:project
+                       ~force:false
+                       artifact) ;
+                  Stdlib.exit 0
+                with _ -> Stdlib.exit 1)
+            | pid -> pid)
+          contents
+      in
+      Unix.close ready_r ;
+      let starts = Bytes.make writer_count 'x' in
+      ignore (Unix.write ready_w starts 0 writer_count) ;
+      Unix.close ready_w ;
+      List.iter
+        (fun pid ->
+          match snd (Unix.waitpid [] pid) with
+          | Unix.WEXITED 0 -> ()
+          | _ -> Alcotest.fail "a concurrent config writer failed")
+        children ;
+      let target = Filename.concat project "config/test.cfg" in
+      let final_content = read_file target in
+      Alcotest.(check bool)
+        "the final config is one complete writer payload"
+        true
+        (List.mem final_content contents))
+
 let test_backend_project_refuses_hash_mismatch_then_force_overwrites () =
   with_project_dir (fun project ->
       let artifact = make_artifact ~ownership:W.Backend_project "first=v1\n" in
@@ -233,6 +308,14 @@ let () =
             "second identical write is idempotent"
             `Quick
             test_write_twice_is_idempotent;
+          Alcotest.test_case
+            "predictable temp symlink cannot redirect write"
+            `Quick
+            test_predictable_temp_symlink_cannot_redirect_write;
+          Alcotest.test_case
+            "concurrent writers leave one complete file"
+            `Quick
+            test_concurrent_writers_leave_one_complete_file;
           Alcotest.test_case
             "backend_project refuses user-modified, accepts under force"
             `Quick

@@ -326,12 +326,22 @@ let uses_sidecar_metadata artifact =
 
 let atomic_write_file ?(managed_namespace = default_namespace) path content =
   ensure_parent_dir path ;
-  let tmp_path = path ^ temp_suffix managed_namespace in
+  let dir = Filename.dirname path in
+  let prefix = Filename.basename path ^ "." in
+  (* The temp file must be unique and created with O_EXCL. A fixed sibling name
+     lets another writer collide with us and lets a checkout pre-place a
+     symlink that redirects [open_out] before the atomic rename. *)
+  let tmp_path, oc =
+    Filename.open_temp_file
+      ~temp_dir:dir
+      ~mode:[Open_binary]
+      prefix
+      (temp_suffix managed_namespace)
+  in
   let existing_perm =
     try Some ((Unix.stat path).Unix.st_perm land 0o777) with _ -> None
   in
   (try
-     let oc = open_out_bin tmp_path in
      (try output_string oc content
       with e ->
         close_out_noerr oc ;

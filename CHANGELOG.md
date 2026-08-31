@@ -9,9 +9,10 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Changed
-- **`Claude_code.check_project_config` no longer reports `Config_invalid`
-  when the CLI returns no verdict.** A non-zero exit, a timeout or a
-  cancellation previously all became `Config_invalid`, which asserts the
+- **`Claude_code.check_project_config` and `Opencode_cli.check_project_config`
+  no longer report `Config_invalid` when the CLI returns no verdict.** A
+  non-zero exit, a timeout, or a cancellation previously all became
+  `Config_invalid`, which asserts the
   settings file is wrong. None of them supports that: an unauthenticated
   CLI, a rate limit, and `--init-only` disappearing from a self-updating
   binary (it is absent from `claude --help` as of 2.1.251) each exit
@@ -26,6 +27,12 @@ by the date a change merged to `main`.
   that `test_backend_project_config_validation`, which has no PATH gate,
   no longer fails on a machine where `claude` is installed but cannot
   answer.
+
+### Fixed
+- Config artifacts are now written through an exclusively-created, unique
+  temporary file in the target directory before the atomic rename. This
+  prevents concurrent writers from sharing a temp path and prevents a
+  pre-created temp-path symlink from redirecting the config write.
 
 ### Added
 - **Per-backend `models` enumeration** (non-breaking, additive).
