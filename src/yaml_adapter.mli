@@ -53,6 +53,11 @@ type config = {
     (none) *)
 val make_backend : config -> Agentic_backend.t
 
+(** [binary_name config] derives the exact first executable token used by the
+    generic adapter, without executing it. It rejects empty, option-like, and
+    control-character-bearing tokens. *)
+val binary_name : config -> string option
+
 (** [config_of backend] returns the YAML config if [backend] was created via
     {!make_backend}, or [None] for native OCaml backends.
 

@@ -39,6 +39,8 @@ let make_mock ~id ~models ~models_probe : Agentic_backend.t =
 
     let name = "Mock probe backend (" ^ id ^ ")"
 
+    let implementation_origin = Agentic_backend.Custom
+
     let models = models
 
     let models_probe = models_probe

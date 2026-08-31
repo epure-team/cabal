@@ -17,6 +17,8 @@ let id = "mock-agent"
 
 let name = "Mock Agent (integration tests only)"
 
+let implementation_origin = Agentic_backend.Custom
+
 (* mock-agent has no real model selection; expose an empty list so callers
    default to whatever upstream selector they normally use. *)
 let models : string list = []
