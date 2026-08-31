@@ -39,46 +39,17 @@ let validate_task_namespace (spec : task_spec) =
     host. *)
 let default_probe_timeout_seconds = 5.0
 
-let capture_version_output ~env
+type version_probe_result = {
+  command_available : bool;
+  output : string option;
+  timed_out : bool;
+}
+
+let probe_version_command ~env
     ?(timeout_seconds = default_probe_timeout_seconds) cmd =
   let proc_mgr = Eio.Stdenv.process_mgr env in
   let clock = Eio.Stdenv.clock env in
   let stdout_buf = Buffer.create 256 in
-  let stderr_buf = Buffer.create 64 in
-  let outcome =
-    Eio.Time.with_timeout clock timeout_seconds (fun () ->
-        (try
-           Eio.Process.run
-             proc_mgr
-             ~stdout:(Eio.Flow.buffer_sink stdout_buf)
-             ~stderr:(Eio.Flow.buffer_sink stderr_buf)
-             cmd
-         with _ -> ()) ;
-        Ok ())
-  in
-  match outcome with
-  | Error `Timeout ->
-      Error
-        (Printf.sprintf
-           "timeout after %.1fs running %s"
-           timeout_seconds
-           (String.concat " " cmd))
-  | Ok () ->
-      let out = Buffer.contents stdout_buf in
-      if out <> "" then Ok out
-      else
-        let err = Buffer.contents stderr_buf in
-        if err <> "" then Ok err
-        else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
-
-(* Check if a command is available by running it.
-   Distinguishes three outcomes: clean exit, process error (missing binary
-   or non-zero exit raising Eio.Io), and timeout. *)
-let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
-    =
-  let proc_mgr = Eio.Stdenv.process_mgr env in
-  let clock = Eio.Stdenv.clock env in
-  let stdout_buf = Buffer.create 64 in
   let stderr_buf = Buffer.create 64 in
   let outcome =
     Eio.Time.with_timeout clock timeout_seconds (fun () ->
@@ -91,7 +62,38 @@ let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
           Ok true
         with Eio.Io _ -> Ok false)
   in
-  match outcome with Error `Timeout -> false | Ok ok -> ok
+  match outcome with
+  | Error `Timeout -> {command_available = false; output = None; timed_out = true}
+  | Ok command_available ->
+      let out = Buffer.contents stdout_buf in
+      if out <> "" then
+        {command_available; output = Some out; timed_out = false}
+      else
+        let err = Buffer.contents stderr_buf in
+        {
+          command_available;
+          output = (if err = "" then None else Some err);
+          timed_out = false;
+        }
+
+let capture_version_output ~env ?timeout_seconds cmd =
+  let result = probe_version_command ~env ?timeout_seconds cmd in
+  if result.timed_out then
+    Error
+      (Printf.sprintf
+         "timeout running %s"
+         (String.concat " " cmd))
+  else
+    match result.output with
+    | Some output -> Ok output
+    | None -> Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
+
+(* Check if a command is available by running it.
+   Distinguishes three outcomes: clean exit, process error (missing binary
+   or non-zero exit raising Eio.Io), and timeout. *)
+let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
+    =
+  (probe_version_command ~env ~timeout_seconds cmd).command_available
 
 (* Write MCP server configuration to a JSON file *)
 let write_mcp_config ~env ~path configs =

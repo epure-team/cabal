@@ -38,6 +38,7 @@ let make_mock ~supports_resume ~native ~responses =
 
     let name = "Test Backend Completer JSON Schema"
 
+
     let models = []
 
     let models_probe = None

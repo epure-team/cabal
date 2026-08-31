@@ -9,7 +9,6 @@
   "Backend-agnostic agent execution primitives, configuration generation, and session logging for OCaml projects.")
  (depends
   (ocaml (>= 5.3.0))
-  (dune (>= 3.13))
   yojson
   (jsonschema (>= 0.1.0))
   digestif

@@ -9,6 +9,23 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Validated runtime bootstrap and central dispatch.**
+  `Runtime_bootstrap` now offers compatibility-preserving `Extensible` loading
+  and an atomic `Hardened_builtins` profile that ignores user/project adapters,
+  keeps model probes opt-in, installs the five handwritten implementations plus
+  embedded Pi, and validates descriptor/runtime consistency before commit.
+   `Runtime_dispatch.run_task` requires caller-provided attachment limits,
+   resolves one immutable validated entry at every invocation, and rejects raw
+   runtime-only overrides before side effects rather than lending them catalog
+   claims. Input/capability preflight precedes version or availability work;
+   ordinary exceptions are sanitized while cancellation/fatal exceptions
+   propagate. Hardened entries bind independent full capability snapshots,
+   approved descriptors, explicit origins, and `Enforce_baseline`. Extensible
+   YAML entries bind conservative effective descriptors and `No_version_gate`
+   with global → project whole-entry precedence, including built-in-id overrides.
+   Custom backends can be added as validated descriptor/runtime pairs through
+   `Runtime_bootstrap.register_custom`; provenance no longer adds a required
+   field to `Agentic_backend.S`.
 - **Per-backend `models` enumeration** (non-breaking, additive).
   Every adapter implementing `Agentic_backend.S` now exposes a
   `models : string list` member listing the model ids it accepts via its

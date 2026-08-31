@@ -18,8 +18,31 @@ type config = {
   models : string list;
 }
 
-(* Maps backend id → config for config_of lookup. *)
-let config_table : (string, config) Hashtbl.t = Hashtbl.create 8
+(* Preserve only the latest exact package/config association per id. Physical
+   package identity avoids misclassifying handwritten replacements, while
+   same-id replacement and [Registry.clear] keep retention lifecycle-bounded. *)
+let backend_configs : (Agentic_backend.t * config) list ref = ref []
+
+let clear_config_cache () = backend_configs := []
+
+let invocation_argv cfg =
+  List.filter
+    (fun value -> value <> "")
+    (String.split_on_char ' ' (String.trim cfg.invocation_command))
+
+let safe_binary_token value =
+  value <> ""
+  && value.[0] <> '-'
+  && String.for_all
+       (fun character ->
+         let code = Char.code character in
+         code >= 0x20 && code <> 0x7f)
+       value
+
+let binary_name cfg =
+  match invocation_argv cfg with
+  | command :: _ when safe_binary_token command -> Some command
+  | _ -> None
 
 (* Pi's [--mode json] is NDJSON.  The terminal assistant message contains a
    content array; retain only text blocks so callers receive the model answer,
@@ -103,15 +126,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
 
     let available ~sw:_ ~env =
       (* Check availability by running the command with --version. *)
-      let cmd =
-        match
-          List.filter
-            (fun s -> String.length s > 0)
-            (String.split_on_char ' ' (String.trim cfg.invocation_command))
-        with
-        | c :: _ -> c
-        | [] -> cfg.invocation_command
-      in
+      let cmd = Option.value ~default:cfg.invocation_command (binary_name cfg) in
       Backend_process.check_available ~env [cmd; "--version"]
 
     let supports_session_resume = false
@@ -143,11 +158,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
       | _ -> None
 
     let run_task ~sw ~env ?on_raw_line:_ (spec : task_spec) =
-      let args =
-        List.filter
-          (fun s -> String.length s > 0)
-          (String.split_on_char ' ' (String.trim cfg.invocation_command))
-      in
+      let args = invocation_argv cfg in
       let full_prompt =
         if String.length spec.instructions > 0 then
           spec.prompt ^ "\n\n---\nProject Instructions:\n" ^ spec.instructions
@@ -174,9 +185,15 @@ let make_backend (cfg : config) : Agentic_backend.t =
         run_once ()
       else first
   end in
-  Hashtbl.replace config_table cfg.name cfg ;
-  (module M : Agentic_backend.S)
+  let backend = (module M : Agentic_backend.S) in
+  backend_configs :=
+    (backend, cfg)
+    :: List.filter
+         (fun (_, existing) -> existing.name <> cfg.name)
+         !backend_configs ;
+  backend
 
 let config_of backend =
-  let id = Agentic_backend.id backend in
-  Hashtbl.find_opt config_table id
+  List.find_map
+    (fun (candidate, config) -> if candidate == backend then Some config else None)
+    !backend_configs

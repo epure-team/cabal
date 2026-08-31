@@ -81,15 +81,37 @@ val load_string :
 *)
 val load_dir : string -> (string * (yaml_adapter_config, string) result) list
 
+(** [embedded_backends ()] constructs the compiled-in YAML runtime candidates
+    without reading [HOME], project directories, or invoking model probes. The
+    function does not mutate {!Registry}; callers may validate the complete
+    candidate set before committing it.
+
+    @return [Error _] if any embedded adapter cannot be parsed or validated. *)
+val embedded_backends : unit -> (Agentic_backend.t list, string) result
+
+(** [resolve_registered_model_probes ~sw ~env ()] explicitly runs the existing
+    protected model-probe layer for every currently registered backend and
+    publishes probe/static resolution in {!Registry}. Probe errors and
+    exceptions retain the backend's static model list. *)
+val resolve_registered_model_probes :
+  sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> unit -> unit
+
 (** [register_all ()] loads and registers backends in priority order:
 
     1. Built-in YAML configs embedded at compile time ([source = "builtin"])
     2. User-global overrides: [~/.cabal/adapters/*.yaml]
     3. Project-local overrides: [.cabal/adapters/*.yaml] (highest priority)
 
-    Later registrations for the same [name] replace earlier ones in the
-    {!Registry}.  Errors from individual files are printed to stderr but do
-    not abort registration of other files.
+    Later registrations for the same [name] atomically replace the complete
+    earlier validated entry. Every generic YAML runtime binds a conservative
+    effective descriptor (no structured/streaming/media/web/native-schema/resume/
+    read-only/MCP/config/file-reading claims) and
+    {!Runtime_entry.No_version_gate}. This applies equally to custom ids and
+    built-in-id overrides, so YAML never inherits the approved static catalog's
+    positive claims. Global → project precedence replaces backend, effective
+    descriptor, origin, and policy together. The static descriptor catalog is
+    not mutated. Errors from individual files leave the previous entry unchanged
+    and do not abort other files.
 
     When [~sw] and [~env] are both supplied, every registered backend that
     declares a [models_probe] is invoked under exception protection and the

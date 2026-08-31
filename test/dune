@@ -20,6 +20,16 @@
  (modules test_task_preflight))
 
 (test
+ (name test_runtime_bootstrap)
+ (libraries cabal alcotest eio eio_posix unix)
+ (modules test_runtime_bootstrap))
+
+(test
+ (name test_runtime_dispatch)
+ (libraries cabal alcotest eio eio_posix unix)
+ (modules test_runtime_dispatch))
+
+(test
  (name test_backend_version)
  (libraries cabal alcotest eio eio_posix unix)
  (modules test_backend_version))

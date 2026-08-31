@@ -66,6 +66,13 @@ val parse_from_output : string -> (semver, string) result
     (none) *)
 val of_string : string -> (semver, string) result
 
+(** [is_valid_version_string value] accepts exactly three dot-separated,
+    non-negative integer components that fit in an OCaml [int]. It rejects
+    prefixes, suffixes, whitespace, prerelease/build metadata, and overflow.
+    Use this for persisted descriptor/evidence metadata; use
+    {!parse_from_output} for loose CLI output capture. *)
+val is_valid_version_string : string -> bool
+
 (** [is_prerelease v] returns [true] when [v.prerelease] is [Some _], i.e.\ the
     version string contained a hyphen-separated pre-release identifier such as
     [-alpha], [-beta], [-rc.1], or [-dev].  Build-metadata-only suffixes

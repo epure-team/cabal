@@ -55,6 +55,11 @@ val fresh_retry_template : string
 (** [run_task ~sw ~env ?on_raw_line ~backend spec] executes [spec] with
     optional JSON schema enforcement.
 
+    This remains a low-level compatibility API. It intentionally accepts an
+    explicit backend snapshot and does not resolve registries or run CBL-03
+    preflight. Hosts should normally call [Runtime_dispatch.run_task]; direct
+    use is appropriate only when the caller owns those checks.
+
     {pre}
     [backend] must be available.  [sw] must be an open switch with sufficient
     lifetime for up to two backend calls.

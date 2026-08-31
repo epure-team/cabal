@@ -25,7 +25,9 @@ let parse_digits s i =
       while !j < n && Char.code s.[!j] >= 48 && Char.code s.[!j] <= 57 do
         incr j
       done ;
-      Some (int_of_string (String.sub s i (!j - i)), !j)
+      Option.map
+        (fun value -> (value, !j))
+        (int_of_string_opt (String.sub s i (!j - i)))
     end
 
 (* Extract the prerelease identifier after position [pos] in [s].
@@ -77,6 +79,17 @@ let parse_from_output s =
   scan 0
 
 let of_string s = parse_from_output s
+
+let is_valid_version_string value =
+  let valid_component component =
+    component <> ""
+    && String.for_all (function '0' .. '9' -> true | _ -> false) component
+    && Option.is_some (int_of_string_opt component)
+  in
+  match String.split_on_char '.' value with
+  | [major; minor; patch] ->
+      valid_component major && valid_component minor && valid_component patch
+  | _ -> false
 
 let compare a b =
   let c = Int.compare a.major b.major in

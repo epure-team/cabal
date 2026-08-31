@@ -63,10 +63,15 @@ type input_error =
     be rerouted or reduced. *)
 type capability_error =
   | Native_json_schema_support_without_evidence
+  | Native_json_schema_evidence_without_support
+  | Invalid_native_json_schema_evidence
+  | Invalid_native_json_schema_evidence_version
   | Media_support_without_evidence
   | Web_support_without_evidence
   | Invalid_media_support_evidence
   | Invalid_web_support_evidence
+  | Invalid_media_support_evidence_version
+  | Invalid_web_support_evidence_version
   | Unsupported_media_type of Backend_types.media_type
   | Unsupported_web_access of {
       requested : Backend_types.web_access;
@@ -116,6 +121,23 @@ val render_error : error -> string
 val validate_inputs :
   limits:limits -> Backend_types.task_spec -> (unit, error) result
 
+(** [validate_descriptor descriptor] validates capability-evidence invariants
+    without inspecting a task or performing I/O. Positive native-schema, media,
+    and web claims require complete, reproducible evidence whose
+    [tested_at_version] is an exact [major.minor.patch] value; native-schema
+    evidence is rejected when the corresponding capability is disabled.
+
+    {b Preconditions.} None.
+
+    {b Postconditions.} Returns [Ok ()] exactly when the descriptor's evidence
+    relationships and payloads are structurally valid.
+
+    {b Violators.} None.
+
+    {b Violates.} None. *)
+val validate_descriptor :
+  Backend_registry.descriptor -> (unit, error) result
+
 (** [validate_capabilities ~descriptor spec] verifies descriptor proof
     invariants and checks that [descriptor] supports every requested media type,
     the requested web level, read-only mode, and session resume. A non-native
@@ -123,7 +145,8 @@ val validate_inputs :
     validate-and-retry fallback.
 
     {b Preconditions.} [descriptor] is the descriptor selected for the
-    prospective invocation.
+    prospective invocation. Descriptor evidence is checked through
+    {!validate_descriptor} before requested capabilities are evaluated.
 
     {b Postconditions.} Returns [Ok ()] when proof invariants and requested
     capabilities are satisfied, otherwise a typed [Capability _] failure.

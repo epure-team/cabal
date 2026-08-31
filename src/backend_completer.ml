@@ -25,7 +25,8 @@ let complete_with_workspace completer ~workspace ~system_prompt ~prompt
     ~json_schema
     ~resume_session_id
 
-let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
+let make_with_runner ~run ~working_dir ?model ?mcp_servers ?(read_only = false)
+    () =
  fun ~system_prompt ~prompt ~json_schema ~resume_session_id ->
   let full_prompt =
     match resume_session_id with
@@ -47,11 +48,12 @@ let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
       ?model
       ?json_schema
       ?resume_session_id
+      ~read_only
       ()
   in
-  match Json_schema_enforcer.run_task ~sw ~env ~backend spec with
+  match run spec with
   | Error e -> Error e
-  | Ok result -> (
+  | Ok (result : Backend_types.task_result) -> (
       let with_stderr msg =
         let stderr = String.trim result.stderr in
         if stderr = "" then msg
@@ -77,6 +79,14 @@ let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
       | Backend_types.Timeout -> Error "Backend timeout"
       | Backend_types.Cancelled -> Error "Backend cancelled")
 
+let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
+  make_with_runner
+    ~run:(fun spec -> Json_schema_enforcer.run_task ~sw ~env ~backend spec)
+    ~working_dir
+    ?model
+    ?mcp_servers
+    ()
+
 (* Map a built-in backend id to the argv that prints its version.
    Returns [None] for unknown backends — the gate is skipped for those. *)
 let version_cmd_for_backend backend_name =
@@ -100,24 +110,43 @@ let run_version_gate ~env ~backend_name =
       | Error _ -> Ok ()
       | Ok output -> run_gate_for_output ~backend_name ~version_output:output)
 
+let legacy_zero_attachment_limits : Task_preflight.limits =
+  {max_attachments = 0; max_file_size_bytes = 0; max_total_size_bytes = 0}
+
+let make_by_name_with_read_only ~read_only ~sw ~env ~backend_name ~working_dir
+    ?model ?mcp_servers () =
+  if not (Runtime_bootstrap.valid_runtime_id backend_name) then
+    Error "backend routing id is structurally invalid"
+  else
+    Ok
+      (make_with_runner
+         ~run:(fun spec ->
+           match
+             Runtime_dispatch.run_task
+               ~sw
+               ~env
+               ~limits:legacy_zero_attachment_limits
+               ~backend_id:backend_name
+               spec
+           with
+           | Ok result -> Ok result
+           | Error error -> Error (Runtime_dispatch.render_error error))
+         ~working_dir
+         ?model
+         ?mcp_servers
+         ~read_only
+         ())
+
 let make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers () =
-  match Registry.get backend_name with
-  | None ->
-      let available = Registry.list_ids () in
-      let msg =
-        Printf.sprintf
-          "Backend '%s' not found. Registered: %s"
-          backend_name
-          (String.concat ", " available)
-      in
-      Error msg
-  | Some backend ->
-      if not (Agentic_backend.available ~sw ~env backend) then
-        Error
-          (Printf.sprintf
-             "Backend '%s' is not available (CLI tool not installed?)"
-             backend_name)
-      else Ok (make ~sw ~env ~backend ~working_dir ?model ?mcp_servers ())
+  make_by_name_with_read_only
+    ~read_only:false
+    ~sw
+    ~env
+    ~backend_name
+    ~working_dir
+    ?model
+    ?mcp_servers
+    ()
 
 let check_read_only_routing ?(role_str = "validator") ~backend_name () =
   if not (Backend_registry.supports_read_only backend_name) then
@@ -137,4 +166,12 @@ let make_validator_by_name ~sw ~env ~backend_name ~working_dir ?model
   match check_read_only_routing ~backend_name () with
   | Error _ as e -> e
   | Ok () ->
-      make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers ()
+      make_by_name_with_read_only
+        ~read_only:true
+        ~sw
+        ~env
+        ~backend_name
+        ~working_dir
+        ?model
+        ?mcp_servers
+        ()
