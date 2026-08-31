@@ -9,6 +9,16 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Validated runtime bootstrap and central dispatch.**
+  `Runtime_bootstrap` now offers compatibility-preserving `Extensible` loading
+  and an atomic `Hardened_builtins` profile that ignores user/project adapters,
+  keeps model probes opt-in, installs the five handwritten implementations plus
+  embedded Pi, and validates descriptor/runtime consistency before commit.
+  `Runtime_dispatch.run_task` requires caller-provided attachment limits,
+  resolves registry overrides at every invocation, runs input/capability
+  preflight, and keeps one resolved backend snapshot across schema retries.
+  Custom backends can be added as validated descriptor/runtime pairs through
+  `Runtime_bootstrap.register_custom`.
 - **Per-backend `models` enumeration** (non-breaking, additive).
   Every adapter implementing `Agentic_backend.S` now exposes a
   `models : string list` member listing the model ids it accepts via its

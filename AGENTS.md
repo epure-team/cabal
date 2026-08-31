@@ -220,9 +220,8 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - The generic native-path E2E test (Story #628) lives in
   `libs/cabal/test/test_native_json_schema_backends.ml`, also gated by
   `CABAL_E2E_TESTS=1`.  It iterates every backend in `Backend_registry.all ()`
-  with `native_json_schema_output = true`, mirrors host registration by calling
-  `Adapter_loader.register_all ()` and then registering the handwritten built-ins
-  (`Claude_code`, `Gemini_cli`, `Codex_cli`, `Opencode_cli`, `Copilot_cli`), and
+  with `native_json_schema_output = true`, mirrors hardened host registration via
+  `Runtime_bootstrap.Hardened_builtins`, and
   fails closed if a descriptor-native backend resolves to a runtime backend whose
   `Agentic_backend.native_json_schema_output` is false.  Only after that runtime
   capability check may it skip a backend whose CLI binary is unavailable on
@@ -242,7 +241,24 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `native_json_schema_output_evidence = Some _`.
 - `Adapter_loader.register_all ()` alone registers YAML-backed adapters and does
   not install handwritten runtime modules or their native capability values. The
-  Story #628 E2E and structural guards register handwritten built-ins after the
-  loader before calling `Registry.get`, matching host usage without changing
-  adapter-loader semantics.
+  Story #628 E2E and structural guards use `Runtime_bootstrap.Hardened_builtins`
+  before calling `Registry.get`; adapter-loader semantics remain unchanged.
 - `libs/cabal/README.md` documents all env vars and links to both test files.
+
+## Runtime bootstrap and dispatch — CBL-03
+
+- `Runtime_bootstrap.Hardened_builtins` requires an empty runtime registry,
+  ignores HOME/project adapters, retains Pi as embedded YAML, installs the five
+  handwritten built-ins, validates all final pairs before commit, and leaves
+  model probes off unless explicitly requested with both `sw` and `env`.
+- Pi does not transport resume; both its descriptor and YAML runtime report
+  `session_resume = false`.
+- `Runtime_dispatch.run_task` is the central invocation path. It requires caller
+  limits, resolves runtime and descriptor at each call, validates consistency and
+  preflight, and passes one resolved backend snapshot through schema retries.
+- `Backend_completer.make_by_name` and `make_validator_by_name` use central
+  dispatch with a private attachment-free/Web-disabled compatibility policy.
+  `Backend_completer.make`, `Agentic_backend.run_task`, and
+  `Json_schema_enforcer.run_task` remain documented low-level bypasses.
+- Custom backends are registered additively as a validated descriptor/runtime
+  pair through `Runtime_bootstrap.register_custom`; collisions replace nothing.
