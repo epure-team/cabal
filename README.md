@@ -13,10 +13,11 @@ CLI, and OpenCode.
 Cabal owns the host-neutral backend layer:
 
 - backend descriptors, capability metadata, and registry lookup;
+- cancellable task handles, absolute deadlines, and normalized lifecycle events;
 - backend process execution and version probing;
 - project config generation for supported backend CLIs;
 - YAML adapter loading;
-- normalized backend result/cost/session event types;
+- normalized backend result/cost/session and task-lifecycle event types;
 - local session-event logging and redaction helpers.
 
 Cabal explicitly does **not** own:
@@ -107,7 +108,11 @@ on `PATH` (or set
   runtime backend registry.
 - `src/backend_registry.*` — static backend descriptors and capability metadata.
 - `src/runtime_bootstrap.*` — extensible or validated hardened runtime assembly.
-- `src/runtime_dispatch.*` — call-time backend resolution and central preflight.
+- `src/runtime_dispatch.*` and `src/task_runtime.*` — call-time backend
+  resolution, central preflight, cancellable task handles, and whole-task
+  deadlines.
+- `src/task_event.*` — sequenced backend-neutral lifecycle and public-output
+  events.
 - `src/task_preflight.*` — attachment integrity/workspace checks and requested
   capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
@@ -171,6 +176,46 @@ let () =
         (List.length result.files_changed)
 ```
 
+### Cancellable tasks, deadlines, and events
+
+`Runtime_dispatch.run_task` remains the synchronous compatibility API, but it
+now starts and awaits the same handle state machine exposed as `Task_runtime`:
+
+```ocaml
+let handle =
+  Task_runtime.start_task
+    ~sw ~env ~limits ~backend_id:"claude-code"
+    ~on_event:(fun event ->
+      Printf.printf "seq=%d attempt=%d t=%.3f\n%!"
+        event.Task_event.seq event.attempt event.timestamp)
+    spec
+in
+(* Safe and idempotent, including from another fiber. *)
+Task_runtime.cancel handle;
+let result = Task_runtime.await handle
+```
+
+`await` is repeatable and supports concurrent waiters. Each handle owns a
+private cancellation scope, so cancelling one task does not cancel siblings;
+cancelling the caller's parent switch still propagates to its tasks. Cleanup
+and process-group reaping complete before `await` returns a normalized
+`Cancelled` or `Timeout` result.
+
+`task_spec.timeout` is one absolute monotonic budget covering registry
+resolution, preflight, version and availability checks, every schema-enforcement
+attempt, backend setup, process execution, parsing, and finalization. Retries do
+not reset it. Negative and NaN values are rejected before backend calls;
+`max_float`, the legacy default, remains effectively unbounded.
+
+`Task_event` assigns task-local increasing sequence numbers, attempt numbers,
+and start-relative monotonic timestamps. Exactly one terminal event is emitted.
+Normalized streams include lifecycle, retry, process ownership, session,
+public assistant text/tool identity, and token-usage events. Raw backend lines
+remain available only through `on_raw_line`; raw reasoning, tool arguments,
+paths, prompts, and callback exception text are not promoted into normalized
+events. Event callback exceptions are isolated and reported through a sanitized
+`Diagnostics` warning.
+
 ### Media and web preflight
 
 `Backend_types.task_spec` can carry workspace-relative PNG/JPEG attachment
@@ -193,8 +238,8 @@ fail before any version process or availability side effect. After preflight,
 dispatch runs one bounded version command, rejects parseable versions below the
 descriptor baseline, and checks runtime availability before execution. Missing
 or unparseable version output keeps the compatibility skip policy; availability
-must still pass. Eio cancellation propagates rather than becoming an ordinary
-dispatch error.
+must still pass. Eio cancellation is normalized to `Cancelled` only after
+task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
 All built-in descriptors currently declare no media support and `Web_disabled`
 pending backend-specific transport evidence. Direct calls to
