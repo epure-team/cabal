@@ -275,6 +275,19 @@ let test_invalid_preflight_never_spawns_or_calls_backend () =
   | Ok _ -> Alcotest.fail "negative limits must fail") ;
   check_no_side_effects "invalid limits" ;
 
+  let missing_workspace = Filename.concat temp_dir "missing-workspace" in
+  (match run ~env ~sw ~backend_id:id (spec ~working_dir:missing_workspace ()) with
+  | Error
+      (Runtime_dispatch.Preflight_failed
+        (Task_preflight.Input Task_preflight.Workspace_unavailable)) ->
+      ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected workspace error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "missing workspace must fail") ;
+  check_no_side_effects "invalid workspace" ;
+
   let attachment =
     Backend_types.
       {
