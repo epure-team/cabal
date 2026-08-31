@@ -57,7 +57,7 @@ val valid_runtime_id : string -> bool
     validates all structural fields and evidence, exact equality between the
     effective descriptor and the independently supplied full runtime capability
     snapshot, and the two capability booleans represented directly by
-    {!Agentic_backend.S}. It performs no I/O or registry mutation. *)
+    [Agentic_backend.S] module type. It performs no I/O or registry mutation. *)
 val create :
   backend:Agentic_backend.t ->
   descriptor:Backend_registry.descriptor ->
