@@ -347,24 +347,18 @@ let unsupported_capability_notes_data =
     };
   ]
 
-type descriptor_owner = Compatibility | Host_custom
-
-type extra_descriptor = {descriptor : descriptor; owner : descriptor_owner}
-
 (* Extra descriptors registered at runtime. Used by tests, explicit host
    registration. Not included in [all ()] or
    [read_only_safe_backend_ids ()], which remain builtin-only. *)
-let extra_descriptors : extra_descriptor list ref = ref []
+let extra_descriptors : descriptor list ref = ref []
 
 let find_builtin id = List.find_opt (fun d -> d.id = id) builtin_backends
 
-let find_extra id =
-  List.find_opt (fun entry -> entry.descriptor.id = id) !extra_descriptors
+let find_extra id = List.find_opt (fun d -> d.id = id) !extra_descriptors
 
 let register_descriptor d =
   if Option.is_none (find_builtin d.id) && Option.is_none (find_extra d.id) then
-    extra_descriptors :=
-      {descriptor = d; owner = Compatibility} :: !extra_descriptors
+    extra_descriptors := d :: !extra_descriptors
 
 let all () = builtin_backends
 
@@ -373,14 +367,13 @@ let unsupported_capability_notes () = unsupported_capability_notes_data
 let find id =
   match find_builtin id with
   | Some _ as r -> r
-  | None -> Option.map (fun entry -> entry.descriptor) (find_extra id)
+  | None -> find_extra id
 
 let add_descriptor d =
   match find d.id with
   | Some _ -> Error Descriptor_id_already_registered
   | None ->
-      extra_descriptors :=
-        {descriptor = d; owner = Host_custom} :: !extra_descriptors ;
+      extra_descriptors := d :: !extra_descriptors ;
       Ok ()
 
 let supports_file_reading backend_id =
