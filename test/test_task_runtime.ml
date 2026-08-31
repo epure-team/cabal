@@ -549,6 +549,7 @@ let test_real_process_cancellation_reaps_before_terminal () =
   with_registry @@ fun () ->
   register_backend
     ~id:"real-process"
+    ~version_policy:Runtime_entry.Enforce_baseline
     ~available:(fun ~sw:_ ~env:_ -> true)
     (fun ~sw ~env ?context ?on_raw_line:_ spec ->
       let process =
@@ -614,6 +615,24 @@ let test_real_process_cancellation_reaps_before_terminal () =
     in
     loop 0 payloads
   in
+  let ordered_lifecycle =
+    [ index (function Task_event.Backend_selected _ -> true | _ -> false);
+      index (function Task_event.Preflight_started -> true | _ -> false);
+      index (function Task_event.Preflight_completed -> true | _ -> false);
+      index (function Task_event.Version_probe_started -> true | _ -> false);
+      index (function Task_event.Version_probe_completed -> true | _ -> false);
+      index (function Task_event.Availability_check_started -> true | _ -> false);
+      index (function Task_event.Availability_check_completed -> true | _ -> false);
+      index (function Task_event.Attempt_started _ -> true | _ -> false);
+      index (function Task_event.Process_started _ -> true | _ -> false);
+      index (function Task_event.Process_exited _ -> true | _ -> false);
+      index (function Task_event.Terminal _ -> true | _ -> false);
+    ]
+  in
+  Alcotest.(check (list int))
+    "validated lifecycle ordering"
+    (List.sort_uniq compare ordered_lifecycle)
+    ordered_lifecycle ;
   let exited = index (function Task_event.Process_exited _ -> true | _ -> false) in
   let terminal = index (function Task_event.Terminal _ -> true | _ -> false) in
   Alcotest.(check bool) "cleanup event precedes terminal" true (exited < terminal)

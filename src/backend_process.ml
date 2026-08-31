@@ -336,9 +336,6 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             cmd
         in
         target := Some process_group ;
-        emit
-          (Task_event.Process_started
-             {pid = Some (Process_group.pid process_group)}) ;
         (* The child owns these ends after spawn. *)
         close_noerr stdout_w ;
         close_noerr stderr_w ;
@@ -346,6 +343,9 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
         match handshake_failure_message (Process_group.handshake process_group) with
         | Some message -> Error (`Handshake_failed message)
         | None ->
+            emit
+              (Task_event.Process_started
+                 {pid = Some (Process_group.pid process_group)}) ;
             Option.iter
               (fun g ->
                 Resource_guardian.register_target g process_group ;

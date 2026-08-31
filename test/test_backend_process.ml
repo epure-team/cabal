@@ -930,10 +930,22 @@ let test_missing_exec_handshake_cannot_report_backend_success () =
       with_env "CABAL_PROCESS_GROUP_LAUNCHER" (helper_path ()) @@ fun () ->
       Eio_posix.run @@ fun env ->
       Eio.Switch.run @@ fun sw ->
+      let clock = Eio.Stdenv.clock env in
+      let events = ref [] in
+      let sink =
+        Task_event.create_sink
+          ~now:(fun () -> 0.0)
+          ~on_event:(fun event -> events := event :: !events)
+          ()
+      in
+      let context =
+        Task_execution_context.create ~remaining_time:(fun () -> None) sink
+      in
       let result =
         Backend_process.run_process
           ~sw
           ~env
+          ~context
           ~cmd:
             [ helper_path ();
               "--process-descendant-helper";
@@ -956,7 +968,19 @@ let test_missing_exec_handshake_cannot_report_backend_success () =
         "failure identifies the invalid EXEC handshake"
         true
         (contains failure "handshake" && contains failure "EXEC") ;
-      let clock = Eio.Stdenv.clock env in
+      let process_started_count =
+        List.fold_left
+          (fun count event ->
+            match event.Task_event.payload with
+            | Task_event.Process_started _ -> count + 1
+            | _ -> count)
+          0
+          !events
+      in
+      Alcotest.(check int)
+        "unvalidated ownership emits no Process_started"
+        0
+        process_started_count ;
       wait_for_file ~clock marker ;
       wait_for_file ~clock (marker ^ ".terminated") ;
       Alcotest.(check bool)
