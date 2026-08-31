@@ -62,6 +62,10 @@ type unsupported_capability_note = {
 
 type descriptor_registration_error = Descriptor_id_already_registered
 
+type yaml_descriptor_registration_error =
+  | Immutable_builtin_descriptor
+  | Descriptor_not_owned_by_yaml_loader
+
 let builtin_backends =
   [
     {
@@ -347,31 +351,62 @@ let unsupported_capability_notes_data =
     };
   ]
 
-(* Extra descriptors registered at runtime. Used by tests to wire custom
-   backends (e.g. "test-backend") with explicit capability declarations so
-   they pass the read-only gate. Not included in all() or
-   read_only_safe_backend_ids() — those remain builtin-only. *)
-let extra_descriptors : descriptor list ref = ref []
+type descriptor_owner = Compatibility | Host_custom | Yaml_loader
+
+type extra_descriptor = {descriptor : descriptor; owner : descriptor_owner}
+
+(* Extra descriptors registered at runtime. Used by tests, explicit host
+   registration, and the extensible YAML loader. Not included in [all ()] or
+   [read_only_safe_backend_ids ()], which remain builtin-only. *)
+let extra_descriptors : extra_descriptor list ref = ref []
+
+let find_builtin id = List.find_opt (fun d -> d.id = id) builtin_backends
+
+let find_extra id =
+  List.find_opt (fun entry -> entry.descriptor.id = id) !extra_descriptors
 
 let register_descriptor d =
-  if not (List.exists (fun e -> e.id = d.id) !extra_descriptors) then
-    extra_descriptors := d :: !extra_descriptors
+  if Option.is_none (find_builtin d.id) && Option.is_none (find_extra d.id) then
+    extra_descriptors :=
+      {descriptor = d; owner = Compatibility} :: !extra_descriptors
 
 let all () = builtin_backends
 
 let unsupported_capability_notes () = unsupported_capability_notes_data
 
 let find id =
-  match List.find_opt (fun d -> d.id = id) builtin_backends with
+  match find_builtin id with
   | Some _ as r -> r
-  | None -> List.find_opt (fun d -> d.id = id) !extra_descriptors
+  | None -> Option.map (fun entry -> entry.descriptor) (find_extra id)
 
 let add_descriptor d =
   match find d.id with
   | Some _ -> Error Descriptor_id_already_registered
   | None ->
-      extra_descriptors := d :: !extra_descriptors ;
+      extra_descriptors :=
+        {descriptor = d; owner = Host_custom} :: !extra_descriptors ;
       Ok ()
+
+let upsert_yaml_descriptor descriptor =
+  if Option.is_some (find_builtin descriptor.id) then
+    Error Immutable_builtin_descriptor
+  else
+    match find_extra descriptor.id with
+    | Some {owner = (Compatibility | Host_custom); _} ->
+        Error Descriptor_not_owned_by_yaml_loader
+    | Some {owner = Yaml_loader; _} ->
+        extra_descriptors :=
+          List.map
+            (fun entry ->
+              if entry.descriptor.id = descriptor.id then
+                {descriptor; owner = Yaml_loader}
+              else entry)
+            !extra_descriptors ;
+        Ok ()
+    | None ->
+        extra_descriptors :=
+          {descriptor; owner = Yaml_loader} :: !extra_descriptors ;
+        Ok ()
 
 let supports_file_reading backend_id =
   match find backend_id with

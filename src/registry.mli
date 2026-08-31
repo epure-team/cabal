@@ -36,6 +36,12 @@
     (none) *)
 val register : Agentic_backend.t -> unit
 
+(** [register_from_adapter_loader backend] installs or replaces a YAML runtime
+    without emitting replacement diagnostics. This narrow startup primitive is
+    reserved for {!Adapter_loader}'s descriptor/runtime pair transaction, after
+    descriptor ownership validation has succeeded. *)
+val register_from_adapter_loader : Agentic_backend.t -> unit
+
 (** {1 Lookup} *)
 
 (** [get id] returns the backend with the given ID, or [None] if not found.

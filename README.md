@@ -150,8 +150,14 @@ Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec
 
 Preflight is host-neutral and does not choose limits. Render dispatch failures
 with `Runtime_dispatch.render_error`; its diagnostics exclude attachment paths,
-digests, and bytes. All built-in descriptors currently declare no media support
-and `Web_disabled` pending backend-specific transport evidence. Direct calls to
+digests, bytes, and exception payloads. Before preflight/execution, dispatch also
+runs one bounded version command, rejects parseable versions below the descriptor
+baseline, and checks runtime availability. Missing or unparseable version output
+keeps the compatibility skip policy; availability must still pass. Eio
+cancellation propagates rather than becoming an ordinary dispatch error.
+
+All built-in descriptors currently declare no media support and `Web_disabled`
+pending backend-specific transport evidence. Direct calls to
 `Agentic_backend.run_task` and `Json_schema_enforcer.run_task` remain compatible
 low-level paths but intentionally bypass these central guarantees.
 
@@ -174,9 +180,20 @@ priority first:
 3. Project-local: `.cabal/adapters/*.yaml` (only when `?project_dir` is
    passed).
 
-Project-local adapters override user-global, which override built-ins by
-id. `Runtime_bootstrap.Extensible` preserves this behavior exactly, including
-the existing probe behavior when both `sw` and `env` are supplied.
+Project-local adapters override user-global, which override built-ins by id when
+the override satisfies the descriptor trust boundary.
+`Runtime_bootstrap.Extensible` preserves the existing probe behavior when both
+`sw` and `env` are supplied. Non-built-in YAML ids receive conservative
+loader-owned descriptors before their runtimes are installed: baseline `0.0.0`,
+the executable token derived without execution, and no positive
+media/web/native-schema/session-resume/read-only claims. Project overrides update
+both the runtime and loader-owned descriptor. Descriptor ownership failures
+leave the prior pair unchanged.
+
+Built-in descriptors are immutable. A user/project YAML override of a built-in
+must retain its binary identity and match every runtime-represented capability;
+otherwise the override is rejected and the previous runtime remains installed.
+Compatibility and explicit host descriptors cannot be replaced by YAML.
 
 `Adapter_loader.register_all` registers YAML-backed adapters only. It does not
 by itself install handwritten backend modules such as `Claude_code`. It remains
@@ -191,7 +208,9 @@ the approved embedded YAML backend, and installs the other five handwritten
 implementations. Model probes are disabled unless explicitly requested with
 both `sw` and `env`. Custom backends remain supported additively through
 `Runtime_bootstrap.register_custom ~descriptor ~backend`; collisions and
-invalid capability/evidence pairs mutate neither registry.
+invalid capability/evidence pairs mutate neither registry. Runtime origin is
+explicitly inspectable through `Agentic_backend.implementation_origin`; hardened
+mode pins five `Handwritten` backends and one `Yaml` backend (Pi).
 
 ### Known limitations
 

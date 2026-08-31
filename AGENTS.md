@@ -254,11 +254,26 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Pi does not transport resume; both its descriptor and YAML runtime report
   `session_resume = false`.
 - `Runtime_dispatch.run_task` is the central invocation path. It requires caller
-  limits, resolves runtime and descriptor at each call, validates consistency and
-  preflight, and passes one resolved backend snapshot through schema retries.
+  limits, resolves runtime and descriptor at each call, validates consistency,
+  enforces parseable installed versions against the descriptor baseline, checks
+  availability, runs preflight, and passes one resolved backend snapshot through
+  schema retries. Missing/unparseable version output keeps the compatibility
+  skip policy; below-baseline parseable output fails before backend execution.
+  Ordinary probe/backend exceptions render as payload-free typed errors, while
+  Eio cancellation propagates.
 - `Backend_completer.make_by_name` and `make_validator_by_name` use central
   dispatch with a private attachment-free/Web-disabled compatibility policy.
+  Construction performs no registry lookup or adapter command; dynamic checks
+  happen only when the returned completer is invoked.
   `Backend_completer.make`, `Agentic_backend.run_task`, and
   `Json_schema_enforcer.run_task` remain documented low-level bypasses.
+- Extensible non-built-in YAML adapters receive conservative loader-owned
+  descriptors (`0.0.0`, no media/web/native/resume/read-only claims) before the
+  runtime is installed. Global → project overrides may replace only metadata
+  already owned by the YAML loader. Built-in and host descriptors are immutable
+  across this path; mismatched built-in YAML overrides fail closed.
+- `Agentic_backend.implementation_origin` is the runtime-origin proof:
+  hardened mode must map Claude/Codex/Copilot/Gemini/OpenCode to `Handwritten`
+  and Pi to `Yaml`; host/test implementations use `Custom`.
 - Custom backends are registered additively as a validated descriptor/runtime
   pair through `Runtime_bootstrap.register_custom`; collisions replace nothing.

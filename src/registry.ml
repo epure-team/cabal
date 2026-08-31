@@ -46,6 +46,13 @@ let register backend =
      overwrite this with [Probe]-tagged data after invoking the probe. *)
   Hashtbl.replace resolved_models_tbl id (Agentic_backend.models backend, Static)
 
+let register_from_adapter_loader backend =
+  let id = Agentic_backend.id backend in
+  if not (Hashtbl.mem backends id) then
+    registration_order := id :: !registration_order ;
+  Hashtbl.replace backends id backend ;
+  Hashtbl.replace resolved_models_tbl id (Agentic_backend.models backend, Static)
+
 let get id = Hashtbl.find_opt backends id
 
 let get_exn id =

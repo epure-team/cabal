@@ -205,6 +205,101 @@ let embedded_backends () =
   in
   load [] Builtin.all
 
+(* --- Descriptor/runtime pair registration -------------------------------- *)
+
+let nonempty_text value =
+  String.trim value <> ""
+  && String.for_all
+       (fun character ->
+         let code = Char.code character in
+         code >= 0x20 && code <> 0x7f)
+       value
+
+let valid_runtime_id value =
+  nonempty_text value
+  && value = String.trim value
+  && String.length value <= 128
+  && String.for_all
+       (function
+         | 'a' .. 'z' | '0' .. '9' | '-' | '_' | '.' -> true
+         | _ -> false)
+       value
+
+let conservative_descriptor cfg binary_name : Backend_registry.descriptor =
+  {
+    id = cfg.name;
+    display_name = cfg.display_name;
+    binary_name;
+    baseline_version = "0.0.0";
+    capabilities =
+      {
+        structured_output = false;
+        streaming_output = false;
+        session_resume = false;
+        mcp_support = Backend_registry.Mcp_none;
+        read_only_support = false;
+        project_config_surface = Backend_registry.Config_none;
+        precedence_confidence = Backend_registry.Low;
+        generated_lsp_config = false;
+        file_reading = false;
+        media_support = {media_types = []; evidence = None};
+        web_support = {maximum = Backend_types.Web_disabled; evidence = None};
+        native_json_schema_output = false;
+        native_json_schema_output_evidence = None;
+      };
+  }
+
+let builtin_descriptor id =
+  List.find_opt
+    (fun descriptor -> descriptor.Backend_registry.id = id)
+    (Backend_registry.all ())
+
+let validate_builtin_override cfg descriptor binary_name =
+  if binary_name <> descriptor.Backend_registry.binary_name then
+    Error "binary identity differs from the immutable built-in descriptor"
+  else if descriptor.capabilities.session_resume then
+    Error "generic YAML cannot satisfy built-in session-resume capability"
+  else if descriptor.capabilities.native_json_schema_output then
+    Error "generic YAML cannot satisfy built-in native-schema capability"
+  else Ok ()
+
+let register_external_config cfg =
+  let* binary_name =
+    match Yaml_adapter.binary_name cfg with
+    | Some binary_name -> Ok binary_name
+    | None -> Error "invocation command has no safe binary identity"
+  in
+  if not (valid_runtime_id cfg.name) then
+    Error "adapter id is structurally invalid"
+  else if not (nonempty_text cfg.display_name) then
+    Error "adapter display name is structurally invalid"
+  else
+    match builtin_descriptor cfg.name with
+    | Some descriptor ->
+        let* () = validate_builtin_override cfg descriptor binary_name in
+        Registry.register_from_adapter_loader (Yaml_adapter.make_backend cfg) ;
+        Ok ()
+    | None ->
+        let descriptor = conservative_descriptor cfg binary_name in
+        let* () =
+          match Backend_registry.upsert_yaml_descriptor descriptor with
+          | Ok () -> Ok ()
+          | Error Backend_registry.Immutable_builtin_descriptor ->
+              Error "built-in descriptor is immutable"
+          | Error Backend_registry.Descriptor_not_owned_by_yaml_loader ->
+              Error "descriptor id is owned by the host"
+        in
+        Registry.register_from_adapter_loader (Yaml_adapter.make_backend cfg) ;
+        Ok ()
+
+let register_external_result filename = function
+  | Error message -> Diagnostics.warn "[adapter_loader] %s: %s" filename message
+  | Ok cfg -> (
+      match register_external_config cfg with
+      | Ok () -> ()
+      | Error message ->
+          Diagnostics.warn "[adapter_loader] %s: %s" filename message)
+
 (* --- Probe runner --------------------------------------------------------- *)
 
 (** [run_probe ~sw ~env backend] invokes the backend's [models_probe] (if any)
@@ -263,7 +358,7 @@ let register_all ?project_dir ?sw ?env () =
       match load_string ~source:"builtin" content with
       | Ok cfg ->
           let backend = Yaml_adapter.make_backend cfg in
-          Registry.register backend
+          Registry.register_from_adapter_loader backend
       | Error msg ->
           Diagnostics.warn
             "[adapter_loader] builtin adapter parse error: %s"
@@ -276,12 +371,7 @@ let register_all ?project_dir ?sw ?env () =
       Filename.concat home (Filename.concat ".cabal" "adapters")
     in
     List.iter
-      (fun (filename, result) ->
-        match result with
-        | Ok cfg ->
-            let backend = Yaml_adapter.make_backend cfg in
-            Registry.register backend
-        | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
+      (fun (filename, result) -> register_external_result filename result)
       (load_dir global_dir)
   end ;
   (* 3. Project-local: .cabal/adapters/*.yaml — highest priority *)
@@ -291,12 +381,7 @@ let register_all ?project_dir ?sw ?env () =
         Filename.concat pd (Filename.concat ".cabal" "adapters")
       in
       List.iter
-        (fun (filename, result) ->
-          match result with
-          | Ok cfg ->
-              let backend = Yaml_adapter.make_backend cfg in
-              Registry.register backend
-          | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
+        (fun (filename, result) -> register_external_result filename result)
         (load_dir local_dir)
   | None -> ()) ;
   (* 4. Probe layer — when an Eio environment is available, ask each

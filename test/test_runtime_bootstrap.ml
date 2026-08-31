@@ -30,17 +30,21 @@ let with_empty_registry f =
   Registry.clear () ;
   Fun.protect ~finally:Registry.clear f
 
-let temp_counter = ref 0
+let rec remove_tree path =
+  if Sys.file_exists path then
+    if Sys.is_directory path then begin
+      Array.iter
+        (fun name -> remove_tree (Filename.concat path name))
+        (Sys.readdir path) ;
+      Unix.rmdir path
+    end
+    else Unix.unlink path
 
-let fresh_temp_dir label =
-  incr temp_counter ;
-  let path =
-    Filename.concat
-      (Filename.get_temp_dir_name ())
-      (Printf.sprintf "cabal-cbl03-%s-%d-%d" label (Unix.getpid ()) !temp_counter)
-  in
-  Unix.mkdir path 0o700 ;
-  path
+let with_temp_dir label f =
+  let path = Filename.temp_dir ("cabal-cbl03-" ^ label ^ "-") "" in
+  Fun.protect
+    ~finally:(fun () -> remove_tree path)
+    (fun () -> f path)
 
 let mkdir path = if not (Sys.file_exists path) then Unix.mkdir path 0o700
 
@@ -50,21 +54,26 @@ let write_file path contents =
     ~finally:(fun () -> close_out_noerr channel)
     (fun () -> output_string channel contents)
 
-let adapter_yaml ~id ~display_name =
+let adapter_yaml ?(invocation_command = "false") ~id ~display_name () =
   Printf.sprintf
-    "name: %s\ndisplay_name: %s\ninvocation_command: \"false\"\ntemplate_set: \
+    "name: %s\ndisplay_name: %s\ninvocation_command: \"%s\"\ntemplate_set: \
      default\n"
     id
     display_name
+    invocation_command
 
-let write_adapter ~root ~id ~display_name =
+let write_adapter ?invocation_command ~root ~id ~display_name () =
   let cabal_dir = Filename.concat root ".cabal" in
   let adapters_dir = Filename.concat cabal_dir "adapters" in
   mkdir cabal_dir ;
   mkdir adapters_dir ;
   write_file
     (Filename.concat adapters_dir (id ^ ".yaml"))
-    (adapter_yaml ~id ~display_name)
+    (adapter_yaml ?invocation_command ~id ~display_name ())
+
+let write_executable path contents =
+  write_file path contents ;
+  Unix.chmod path 0o700
 
 let with_home home f =
   let previous = Sys.getenv_opt "HOME" in
@@ -115,6 +124,7 @@ let make_backend ?(session_resume = false) ?(native = false) ?(name = "Custom")
   let module Backend = struct
     let id = id
     let name = name
+    let implementation_origin = Agentic_backend.Custom
     let models = []
     let models_probe = None
     let available ~sw:_ ~env:_ = true
@@ -186,11 +196,25 @@ let test_hardened_registers_exact_approved_runtime () =
             (Runtime_bootstrap.validate_backend ~descriptor ~backend)
       | _ -> Alcotest.failf "%s is missing a runtime or descriptor" id)
     expected ;
+  let expected_origins =
+    [
+      ("claude-code", Agentic_backend.Handwritten);
+      ("codex", Agentic_backend.Handwritten);
+      ("copilot-cli", Agentic_backend.Handwritten);
+      ("gemini-cli", Agentic_backend.Handwritten);
+      ("opencode", Agentic_backend.Handwritten);
+      ("pi", Agentic_backend.Yaml);
+    ]
+  in
+  List.iter
+    (fun (id, expected_origin) ->
+      let backend = Registry.get_exn id in
+      Alcotest.(check bool)
+        (id ^ " has the approved implementation origin")
+        true
+        (Agentic_backend.implementation_origin backend = expected_origin))
+    expected_origins ;
   let pi = Registry.get_exn "pi" in
-  (match Yaml_adapter.config_of pi with
-  | Some config ->
-      Alcotest.(check string) "Pi remains embedded YAML" "builtin" config.source
-  | None -> Alcotest.fail "Pi must remain the approved embedded YAML backend") ;
   let pi_descriptor =
     match Backend_registry.find "pi" with
     | Some descriptor -> descriptor
@@ -207,10 +231,10 @@ let test_hardened_registers_exact_approved_runtime () =
 
 let test_hardened_ignores_home_and_project_adapters () =
   with_empty_registry @@ fun () ->
-  let home = fresh_temp_dir "home" in
-  let project = fresh_temp_dir "project" in
-  write_adapter ~root:home ~id:"pi" ~display_name:"Global override" ;
-  write_adapter ~root:project ~id:"pi" ~display_name:"Project override" ;
+  with_temp_dir "home" @@ fun home ->
+  with_temp_dir "project" @@ fun project ->
+  write_adapter ~root:home ~id:"pi" ~display_name:"Global override" () ;
+  write_adapter ~root:project ~id:"pi" ~display_name:"Project override" () ;
   with_home home @@ fun () ->
   expect_ok
     (Runtime_bootstrap.register_runtime
@@ -229,16 +253,30 @@ let test_hardened_ignores_home_and_project_adapters () =
 
 let test_extensible_preserves_global_project_precedence () =
   with_empty_registry @@ fun () ->
-  let home = fresh_temp_dir "extensible-home" in
-  let project = fresh_temp_dir "extensible-project" in
+  with_temp_dir "extensible-home" @@ fun home ->
+  with_temp_dir "extensible-project" @@ fun project ->
+  let executable = Filename.concat project "custom-adapter" in
+  write_executable
+    executable
+    {|#!/bin/sh
+if [ "${1-}" = "--version" ]; then
+  printf '%s\n' '1.0.0'
+else
+  printf '%s\n' "${1-unknown}"
+fi
+|} ;
   write_adapter
     ~root:home
     ~id:"custom-precedence"
-    ~display_name:"Global custom" ;
+    ~display_name:"Global custom"
+    ~invocation_command:(executable ^ " global")
+    () ;
   write_adapter
     ~root:project
     ~id:"custom-precedence"
-    ~display_name:"Project custom" ;
+    ~display_name:"Project custom"
+    ~invocation_command:(executable ^ " project")
+    () ;
   with_home home @@ fun () ->
   expect_ok
     (Runtime_bootstrap.register_runtime
@@ -246,7 +284,7 @@ let test_extensible_preserves_global_project_precedence () =
        ~profile:Runtime_bootstrap.Extensible
        ()) ;
   let backend = Registry.get_exn "custom-precedence" in
-  match Yaml_adapter.config_of backend with
+  (match Yaml_adapter.config_of backend with
   | Some config ->
       Alcotest.(check string)
         "project adapter has highest precedence"
@@ -256,7 +294,106 @@ let test_extensible_preserves_global_project_precedence () =
         "source is the project adapter"
         true
         (contains config.source project)
-  | None -> Alcotest.fail "custom adapter was not YAML-backed"
+  | None -> Alcotest.fail "custom adapter was not YAML-backed") ;
+  Alcotest.(check bool)
+    "custom adapter origin is explicit"
+    true
+    (Agentic_backend.implementation_origin backend = Agentic_backend.Yaml) ;
+  let descriptor =
+    match Backend_registry.find "custom-precedence" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "custom YAML descriptor was not installed"
+  in
+  Alcotest.(check string)
+    "project descriptor replaces global metadata"
+    "Project custom"
+    descriptor.display_name ;
+  Alcotest.(check string)
+    "descriptor binary is derived without execution"
+    executable
+    descriptor.binary_name ;
+  Alcotest.(check string)
+    "generated baseline is structurally valid"
+    "0.0.0"
+    descriptor.baseline_version ;
+  Alcotest.(check bool)
+    "generated descriptor has no positive media claim"
+    true
+    (descriptor.capabilities.media_support.media_types = []) ;
+  Alcotest.(check bool)
+    "generated descriptor disables web"
+    true
+    (descriptor.capabilities.web_support.maximum = Backend_types.Web_disabled) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let completer =
+    match
+      Backend_completer.make_by_name
+        ~sw
+        ~env
+        ~backend_name:"custom-precedence"
+        ~working_dir:project
+        ()
+    with
+    | Ok completer -> completer
+    | Error error -> Alcotest.fail error
+  in
+  match
+    completer
+      ~system_prompt:"system"
+      ~prompt:"prompt"
+      ~json_schema:None
+      ~resume_session_id:None
+  with
+  | Ok result ->
+      Alcotest.(check string)
+        "project adapter is invoked through central dispatch"
+        "project"
+        (String.trim result.text)
+  | Error error -> Alcotest.fail error
+
+let test_extensible_descriptor_failure_is_atomic () =
+  with_empty_registry @@ fun () ->
+  with_temp_dir "descriptor-failure-home" @@ fun home ->
+  let id = "yaml-descriptor-owned-by-host" in
+  let host_descriptor = descriptor_for id in
+  Backend_registry.register_descriptor host_descriptor ;
+  write_adapter ~root:home ~id ~display_name:"Rejected YAML" () ;
+  with_home home @@ fun () ->
+  expect_ok
+    (Runtime_bootstrap.register_runtime ~profile:Runtime_bootstrap.Extensible ()) ;
+  Alcotest.(check bool)
+    "failed descriptor install leaves runtime absent"
+    true
+    (Option.is_none (Registry.get id)) ;
+  match Backend_registry.find id with
+  | Some descriptor ->
+      Alcotest.(check string)
+        "host descriptor remains unchanged"
+        host_descriptor.display_name
+        descriptor.display_name
+  | None -> Alcotest.fail "host descriptor was removed"
+
+let test_extensible_builtin_override_mismatch_fails_closed () =
+  with_empty_registry @@ fun () ->
+  with_temp_dir "builtin-override-home" @@ fun home ->
+  write_adapter
+    ~root:home
+    ~id:"claude-code"
+    ~display_name:"Untrusted Claude override"
+    ~invocation_command:"malicious-claude"
+    () ;
+  with_home home @@ fun () ->
+  expect_ok
+    (Runtime_bootstrap.register_runtime ~profile:Runtime_bootstrap.Extensible ()) ;
+  let backend = Registry.get_exn "claude-code" in
+  match Yaml_adapter.config_of backend with
+  | Some config ->
+      Alcotest.(check string)
+        "mismatched built-in override is rejected"
+        "builtin"
+        config.source
+  | None -> Alcotest.fail "embedded fallback should remain YAML-backed"
 
 let test_hardened_probes_are_off_by_default () =
   with_empty_registry @@ fun () ->
@@ -358,7 +495,20 @@ let test_validate_backend_rejects_id_and_capability_mismatches () =
     "native schema mismatch rejected"
     true
     (Result.is_error
-       (Runtime_bootstrap.validate_backend ~descriptor ~backend:wrong_native))
+       (Runtime_bootstrap.validate_backend ~descriptor ~backend:wrong_native)) ;
+  let malformed_baseline =
+    {descriptor with Backend_registry.baseline_version = "release-latest"}
+  in
+  Alcotest.(check bool)
+    "malformed baseline rejected"
+    true
+    (match
+       Runtime_bootstrap.validate_backend
+         ~descriptor:malformed_baseline
+         ~backend:(make_backend ~session_resume:true ~native:true "expected")
+     with
+    | Error Runtime_bootstrap.Invalid_descriptor_baseline_version -> true
+    | _ -> false)
 
 let test_custom_registration_is_atomic () =
   with_empty_registry @@ fun () ->
@@ -475,7 +625,11 @@ let test_custom_registration_is_atomic () =
   Alcotest.(check bool)
     "built-in collision leaves runtime absent"
     true
-    (Option.is_none (Registry.get "claude-code"))
+    (Option.is_none (Registry.get "claude-code")) ;
+  Alcotest.(check bool)
+    "custom backend origin is explicit"
+    true
+    (Agentic_backend.implementation_origin success_backend = Agentic_backend.Custom)
 
 let () =
   Alcotest.run
@@ -507,9 +661,17 @@ let () =
       ( "extensible",
         [
           Alcotest.test_case
-            "preserves global/project precedence"
+            "custom YAML dispatch preserves global/project precedence"
             `Quick
             test_extensible_preserves_global_project_precedence;
+          Alcotest.test_case
+            "descriptor installation failure is atomic"
+            `Quick
+            test_extensible_descriptor_failure_is_atomic;
+          Alcotest.test_case
+            "built-in YAML mismatch fails closed"
+            `Quick
+            test_extensible_builtin_override_mismatch_fails_closed;
         ] );
       ( "validation and custom registration",
         [
