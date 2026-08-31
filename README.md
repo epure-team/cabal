@@ -150,11 +150,13 @@ Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec
 
 Preflight is host-neutral and does not choose limits. Render dispatch failures
 with `Runtime_dispatch.render_error`; its diagnostics exclude attachment paths,
-digests, bytes, and exception payloads. Before preflight/execution, dispatch also
-runs one bounded version command, rejects parseable versions below the descriptor
-baseline, and checks runtime availability. Missing or unparseable version output
-keeps the compatibility skip policy; availability must still pass. Eio
-cancellation propagates rather than becoming an ordinary dispatch error.
+digests, bytes, and exception payloads. Invalid limits, inputs, or capabilities
+fail before any version process or availability side effect. After preflight,
+dispatch runs one bounded version command, rejects parseable versions below the
+descriptor baseline, and checks runtime availability before execution. Missing
+or unparseable version output keeps the compatibility skip policy; availability
+must still pass. Eio cancellation propagates rather than becoming an ordinary
+dispatch error.
 
 All built-in descriptors currently declare no media support and `Web_disabled`
 pending backend-specific transport evidence. Direct calls to

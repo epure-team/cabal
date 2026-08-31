@@ -255,12 +255,13 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `session_resume = false`.
 - `Runtime_dispatch.run_task` is the central invocation path. It requires caller
   limits, resolves runtime and descriptor at each call, validates consistency,
+  runs input/capability preflight before any process or availability side effect,
   enforces parseable installed versions against the descriptor baseline, checks
-  availability, runs preflight, and passes one resolved backend snapshot through
-  schema retries. Missing/unparseable version output keeps the compatibility
-  skip policy; below-baseline parseable output fails before backend execution.
-  Ordinary probe/backend exceptions render as payload-free typed errors, while
-  Eio cancellation propagates.
+  availability, and passes one resolved backend snapshot through schema retries.
+  Missing/unparseable version output keeps the compatibility skip policy;
+  below-baseline parseable output fails before backend execution. Ordinary
+  probe/backend exceptions render as payload-free typed errors, while Eio
+  cancellation propagates.
 - `Backend_completer.make_by_name` and `make_validator_by_name` use central
   dispatch with a private attachment-free/Web-disabled compatibility policy.
   Construction performs no registry lookup or adapter command; dynamic checks

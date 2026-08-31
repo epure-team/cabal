@@ -136,8 +136,8 @@ val run_version_gate :
 
 (** [make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers ()]
     performs only side-effect-free routing-id validation at construction, then
-    creates a completer whose every invocation resolves, validates, version- and
-    availability-checks, preflights, and invokes [backend_name] through
+    creates a completer whose every invocation resolves, validates, preflights,
+    version- and availability-checks, and invokes [backend_name] through
     {!Runtime_dispatch.run_task}. No runtime lookup or adapter command occurs at
     construction. A later registry override is therefore used by the next call
     rather than the backend present at construction time.
@@ -156,7 +156,7 @@ val run_version_gate :
 
     {post}
     Returns [Ok completer] for a structurally valid id. Dynamic registration,
-    consistency, version, availability, and preflight failures are reported by
+    consistency, preflight, version, and availability failures are reported by
     the returned completer at invocation time.
 
     {violators}

@@ -88,8 +88,6 @@ let run_task ~sw ~env ~limits ~backend_id ?on_raw_line spec =
     | Ok () -> Ok ()
     | Error error -> Error (Runtime_descriptor_invalid error)
   in
-  let* version_probe = check_version ~env descriptor in
-  let* () = check_availability ~sw ~env ~backend ~version_probe in
   let* () =
     match Task_preflight.validate_inputs ~limits spec with
     | Ok () -> Ok ()
@@ -100,6 +98,8 @@ let run_task ~sw ~env ~limits ~backend_id ?on_raw_line spec =
     | Ok () -> Ok ()
     | Error error -> Error (Preflight_failed error)
   in
+  let* version_probe = check_version ~env descriptor in
+  let* () = check_availability ~sw ~env ~backend ~version_probe in
   let* execution =
     protect Backend_execution_failed (fun () ->
         Json_schema_enforcer.run_task ~sw ~env ?on_raw_line ~backend spec)

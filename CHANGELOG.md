@@ -16,9 +16,10 @@ by the date a change merged to `main`.
   embedded Pi, and validates descriptor/runtime consistency before commit.
    `Runtime_dispatch.run_task` requires caller-provided attachment limits,
    resolves registry overrides at every invocation, enforces runtime consistency
-   and installed-version baselines, runs input/capability preflight, sanitizes
-   ordinary probe/execution exceptions, and keeps one resolved backend snapshot
-   across schema retries. By-name completers defer all dynamic checks until
+   and runs input/capability preflight before version or availability side
+   effects, then enforces installed-version baselines, sanitizes ordinary
+   probe/execution exceptions, and keeps one resolved backend snapshot across
+   schema retries. By-name completers defer all dynamic checks until
    invocation. Extensible custom YAML adapters now receive conservative,
    loader-owned descriptors with global → project pair precedence.
    Custom backends can be added as validated descriptor/runtime pairs through

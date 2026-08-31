@@ -212,18 +212,42 @@ let test_runtime_descriptor_mismatches_fail_before_call () =
     (Result.is_error (run ~env ~sw ~backend_id:native_id (spec ()))) ;
   Alcotest.(check int) "native mismatch call count" 0 !native_calls
 
-let test_invalid_limits_inputs_and_capabilities_never_call_backend () =
+let test_invalid_preflight_never_spawns_or_calls_backend () =
   with_registry @@ fun () ->
+  with_temp_dir "preflight-order" @@ fun temp_dir ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let calls = ref 0 in
+  let availability_calls = ref 0 in
   let id = "dispatch-preflight" in
+  let version_marker = Filename.concat temp_dir "version-probed" in
+  let binary_name = Filename.concat temp_dir "preflight-backend" in
+  write_executable
+    binary_name
+    (Printf.sprintf
+       "#!/bin/sh\nprintf 'probed\\n' >> %s\nprintf '%%s\\n' '1.0.0'\n"
+       (Filename.quote version_marker)) ;
   register_pair
+    ~binary_name
     ~id
     (make_backend
        ~id
        ~calls
+       ~availability:(fun ~sw:_ ~env:_ ->
+         incr availability_calls ;
+         true)
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+  let check_no_side_effects label =
+    Alcotest.(check bool)
+      (label ^ " version process marker")
+      false
+      (Sys.file_exists version_marker) ;
+    Alcotest.(check int)
+      (label ^ " availability call count")
+      0
+      !availability_calls ;
+    Alcotest.(check int) (label ^ " backend call count") 0 !calls
+  in
   let invalid_limits = {limits with max_attachments = -1} in
   let result =
     run
@@ -234,14 +258,22 @@ let test_invalid_limits_inputs_and_capabilities_never_call_backend () =
       (spec ~working_dir:"/private/limit-secret" ())
   in
   (match result with
-  | Error error ->
+  | Error
+      ((Runtime_dispatch.Preflight_failed
+          (Task_preflight.Input
+            (Task_preflight.Negative_limit Task_preflight.Max_attachments))) as
+       error) ->
       let diagnostic = Runtime_dispatch.render_error error in
       Alcotest.(check bool)
         "limit diagnostic is sanitized"
         false
         (contains diagnostic "limit-secret")
+  | Error error ->
+      Alcotest.failf
+        "unexpected invalid-limit error: %s"
+        (Runtime_dispatch.render_error error)
   | Ok _ -> Alcotest.fail "negative limits must fail") ;
-  Alcotest.(check int) "invalid limits call count" 0 !calls ;
+  check_no_side_effects "invalid limits" ;
 
   let attachment =
     Backend_types.
@@ -266,7 +298,10 @@ let test_invalid_limits_inputs_and_capabilities_never_call_backend () =
       (spec ~attachments:[attachment] ())
   in
   (match result with
-  | Error error ->
+  | Error
+      ((Runtime_dispatch.Preflight_failed
+          (Task_preflight.Input (Task_preflight.Absolute_attachment_path _))) as
+       error) ->
       let diagnostic = Runtime_dispatch.render_error error in
       Alcotest.(check bool)
         "attachment path is absent"
@@ -276,15 +311,24 @@ let test_invalid_limits_inputs_and_capabilities_never_call_backend () =
         "attachment id is absent"
         false
         (contains diagnostic "secret-id")
+  | Error error ->
+      Alcotest.failf
+        "unexpected invalid-input error: %s"
+        (Runtime_dispatch.render_error error)
   | Ok _ -> Alcotest.fail "absolute attachment path must fail") ;
-  Alcotest.(check int) "invalid input call count" 0 !calls ;
+  check_no_side_effects "invalid input" ;
 
-  let result = run ~env ~sw ~backend_id:id (spec ~read_only:true ()) in
-  Alcotest.(check bool)
-    "unsupported capability fails"
-    true
-    (Result.is_error result) ;
-  Alcotest.(check int) "invalid capability call count" 0 !calls
+  (match run ~env ~sw ~backend_id:id (spec ~read_only:true ()) with
+  | Error
+      (Runtime_dispatch.Preflight_failed
+        (Task_preflight.Capability Task_preflight.Read_only_unsupported)) ->
+      ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected capability error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "unsupported capability must fail") ;
+  check_no_side_effects "invalid capability"
 
 let test_enforcer_uses_resolved_backend_snapshot_for_retry () =
   with_registry @@ fun () ->
@@ -416,10 +460,19 @@ let test_dispatch_enforces_installed_version_policy () =
   with_temp_dir "versions" @@ fun temp_dir ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let run_case ~label ~version_script ~expected_ok =
+  let run_case ~label ~version_output ~expected_ok =
     let id = "dispatch-version-" ^ label in
     let binary_name = Filename.concat temp_dir (label ^ "-backend") in
-    Option.iter (write_executable binary_name) version_script ;
+    let version_marker = Filename.concat temp_dir (label ^ "-version-probed") in
+    Option.iter
+      (fun output ->
+        write_executable
+          binary_name
+          (Printf.sprintf
+             "#!/bin/sh\nprintf 'probed\\n' >> %s\nprintf '%%s\\n' %s\n"
+             (Filename.quote version_marker)
+             (Filename.quote output)))
+      version_output ;
     let calls = ref 0 in
     let availability_calls = ref 0 in
     register_pair
@@ -430,11 +483,30 @@ let test_dispatch_enforces_installed_version_policy () =
          ~id
          ~calls
          ~availability:(fun ~sw:_ ~env:_ ->
+           Option.iter
+             (fun _ ->
+               Alcotest.(check bool)
+                 (label ^ " version precedes availability")
+                 true
+                 (Sys.file_exists version_marker))
+             version_output ;
            incr availability_calls ;
            true)
-         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+           Option.iter
+             (fun _ ->
+               Alcotest.(check bool)
+                 (label ^ " version precedes backend")
+                 true
+                 (Sys.file_exists version_marker))
+             version_output ;
+           success ())) ;
     let result = run ~env ~sw ~backend_id:id (spec ()) in
     Alcotest.(check bool) (label ^ " result") expected_ok (Result.is_ok result) ;
+    Alcotest.(check bool)
+      (label ^ " version process ran")
+      (Option.is_some version_output)
+      (Sys.file_exists version_marker) ;
     Alcotest.(check int)
       (label ^ " backend calls")
       (if expected_ok then 1 else 0)
@@ -446,21 +518,21 @@ let test_dispatch_enforces_installed_version_policy () =
   in
   run_case
     ~label:"below"
-    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' '1.2.2'\n")
+    ~version_output:(Some "1.2.2")
     ~expected_ok:false ;
   run_case
     ~label:"current"
-    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' '1.2.3'\n")
+    ~version_output:(Some "1.2.3")
     ~expected_ok:true ;
   run_case
     ~label:"above"
-    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' '2.0.0'\n")
+    ~version_output:(Some "2.0.0")
     ~expected_ok:true ;
   run_case
     ~label:"unparseable"
-    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' 'unknown version'\n")
+    ~version_output:(Some "unknown version")
     ~expected_ok:true ;
-  run_case ~label:"missing" ~version_script:None ~expected_ok:true
+  run_case ~label:"missing" ~version_output:None ~expected_ok:true
 
 let test_dispatch_sanitizes_backend_exceptions () =
   with_registry @@ fun () ->
@@ -584,9 +656,9 @@ let () =
             `Quick
             test_runtime_descriptor_mismatches_fail_before_call;
           Alcotest.test_case
-            "invalid limits, inputs, capabilities never call"
+            "invalid preflight never spawns or calls"
             `Quick
-            test_invalid_limits_inputs_and_capabilities_never_call_backend;
+            test_invalid_preflight_never_spawns_or_calls_backend;
         ] );
       ( "resolution",
         [
