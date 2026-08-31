@@ -19,7 +19,7 @@
     - AC4: For each such backend the evidence record fields are valid:
            [tested_at_version] and [json_schema_draft] are non-empty strings,
            and when [test_method = Manual_probe s] the string [s] is non-empty.
-    - AC5: The generic native E2E's host-style runtime registration resolves
+    - AC5: The generic native E2E's hardened runtime bootstrap resolves
            descriptor-native backends to runtime-native handwritten modules,
            not generic YAML adapters. *)
 
@@ -27,12 +27,13 @@ open Cabal
 
 let register_host_runtime_backends () =
   Registry.clear () ;
-  Adapter_loader.register_all () ;
-  Registry.register (module Claude_code) ;
-  Registry.register (module Gemini_cli) ;
-  Registry.register (module Codex_cli) ;
-  Registry.register (module Opencode_cli) ;
-  Registry.register (module Copilot_cli)
+  match
+    Runtime_bootstrap.register_runtime
+      ~profile:Runtime_bootstrap.Hardened_builtins
+      ()
+  with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)
 
 (** {1 AC1 & AC2 — capability_evidence type shape and test_method variant}
 
@@ -159,11 +160,10 @@ let test_native_backend_evidence_fields_valid () =
                   (s <> "")))
     (Backend_registry.all ())
 
-(** {1 AC5 — Generic E2E runtime registration proves the native path}
+(** {1 AC5 — Hardened runtime bootstrap proves the native path}
 
-    [Adapter_loader.register_all ()] alone installs YAML-backed adapters whose
-    runtime capability values are generic.  The Story #628 E2E mirrors host
-    usage by registering handwritten built-ins afterward; this structural guard
+    [Runtime_bootstrap.Hardened_builtins] installs validated handwritten
+    replacements after staging approved embedded adapters. This structural guard
     fails if any descriptor-native backend would resolve to a non-native runtime
     backend before the live credential-gated call can run. *)
 

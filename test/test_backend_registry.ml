@@ -27,12 +27,13 @@ let find_desc id =
 
 let register_host_runtime_backends () =
   Registry.clear () ;
-  Adapter_loader.register_all () ;
-  Registry.register (module Claude_code) ;
-  Registry.register (module Gemini_cli) ;
-  Registry.register (module Codex_cli) ;
-  Registry.register (module Opencode_cli) ;
-  Registry.register (module Copilot_cli)
+  match
+    Runtime_bootstrap.register_runtime
+      ~profile:Runtime_bootstrap.Hardened_builtins
+      ()
+  with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)
 
 let with_host_runtime_backends f =
   Registry.clear () ;
@@ -289,9 +290,8 @@ let test_unknown_backend_no_file_reading () =
 
 (** {1 AC5 — Static-vs-runtime consistency property} *)
 
-(** For every static descriptor in [Backend_registry], the runtime registry
-    populated using host order ([Adapter_loader.register_all] followed by the
-    handwritten built-ins) must hold a backend whose [Agentic_backend.id]
+(** For every static descriptor in [Backend_registry], the hardened runtime
+    populated by [Runtime_bootstrap] must hold a backend whose [Agentic_backend.id]
     matches and whose [name] is non-empty. This catches drift between the
     static facts and the actually-registered modules (e.g., a backend deleted
     in code but left in the registry table). *)
@@ -338,7 +338,7 @@ let test_runtime_ids_have_descriptors () =
 
 (** Native-schema capability must agree between static descriptors and the
     runtime modules hosts actually execute.  In particular, claude-code must be
-    the handwritten native backend after host-order registration; a generic
+    the handwritten native backend after hardened bootstrap; a generic
     YAML replacement with [native_json_schema_output = false] is not enough to
     prove Story #628's native path. *)
 let test_runtime_native_schema_capabilities_match_descriptors () =

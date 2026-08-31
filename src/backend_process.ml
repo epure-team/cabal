@@ -455,30 +455,41 @@ let run_probe ~env ~timeout_seconds cmd =
   Eio.Switch.run @@ fun sw ->
   run_process ~sw ~env ~cmd ~working_dir:(Sys.getcwd ()) ~timeout_seconds ()
 
-let capture_version_output ~env
+type version_probe_result = {
+  command_available : bool;
+  output : string option;
+  timed_out : bool;
+}
+
+let probe_version_command ~env
     ?(timeout_seconds = default_probe_timeout_seconds) cmd =
   try
     let result = run_probe ~env ~timeout_seconds cmd in
-    match result.status with
-    | Timeout ->
-        Error
-          (Printf.sprintf
-             "timeout after %.1fs running %s"
-             timeout_seconds
-             (String.concat " " cmd))
-    | _ ->
-        if result.stdout <> "" then Ok result.stdout
-        else if result.stderr <> "" then Ok result.stderr
-        else Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
-  with _ -> Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
+    let timed_out = result.status = Timeout in
+    let output =
+      if timed_out then None
+      else if result.stdout <> "" then Some result.stdout
+      else if result.stderr <> "" then Some result.stderr
+      else None
+    in
+    {command_available = result.status = Success; output; timed_out}
+  with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | Out_of_memory | Stack_overflow | Sys.Break as exn -> raise exn
+  | _ -> {command_available = false; output = None; timed_out = false}
+
+let capture_version_output ~env ?timeout_seconds cmd =
+  let result = probe_version_command ~env ?timeout_seconds cmd in
+  if result.timed_out then
+    Error (Printf.sprintf "timeout running %s" (String.concat " " cmd))
+  else
+    match result.output with
+    | Some output -> Ok output
+    | None -> Error (Printf.sprintf "no output from %s" (String.concat " " cmd))
 
 let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
     =
-  try
-    match (run_probe ~env ~timeout_seconds cmd).status with
-    | Success -> true
-    | Failed _ | Timeout | Cancelled -> false
-  with _ -> false
+  (probe_version_command ~env ~timeout_seconds cmd).command_available
 
 (* Standard task execution flow shared by all backends.
    Uses Fun.protect to ensure MCP config cleanup even on exception. *)

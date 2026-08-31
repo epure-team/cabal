@@ -714,7 +714,7 @@ let base_descriptor () =
 
 let feature_evidence : Backend_types.feature_evidence =
   {
-    tested_at_version = "test-version";
+    tested_at_version = "1.2.3";
     test_method = Backend_types.E2e_test;
     evidence_url = None;
     notes = "Reproduced by test/test_task_preflight.ml";
@@ -751,6 +751,8 @@ let malformed_feature_evidence_cases =
   [
     ( "empty tested_at_version",
       {feature_evidence with tested_at_version = " "} );
+    ( "malformed tested_at_version",
+      {feature_evidence with tested_at_version = "release-latest"} );
     ( "empty E2E notes/test reference",
       {feature_evidence with notes = " "} );
     ( "empty Manual_probe command",
@@ -767,7 +769,7 @@ let valid_feature_evidence_cases =
     ("E2e_test", feature_evidence);
     ( "Manual_probe",
       {
-        Backend_types.tested_at_version = "test-version";
+        Backend_types.tested_at_version = "1.2.3";
         test_method =
           Backend_types.Manual_probe "backend --version && backend --probe";
         evidence_url = Some "https://example.test/backend-evidence";
@@ -787,7 +789,10 @@ let test_malformed_media_feature_evidence () =
         (label ^ " rejected for media")
         true
         (match result with
-        | Error (Task_preflight.Capability Invalid_media_support_evidence) ->
+        | Error
+            (Task_preflight.Capability
+              ( Invalid_media_support_evidence
+              | Invalid_media_support_evidence_version )) ->
             true
         | _ -> false))
     malformed_feature_evidence_cases
@@ -804,7 +809,11 @@ let test_malformed_web_feature_evidence () =
         (label ^ " rejected for web")
         true
         (match result with
-        | Error (Task_preflight.Capability Invalid_web_support_evidence) -> true
+        | Error
+            (Task_preflight.Capability
+              ( Invalid_web_support_evidence
+              | Invalid_web_support_evidence_version )) ->
+            true
         | _ -> false))
     malformed_feature_evidence_cases
 
@@ -877,6 +886,34 @@ let test_native_schema_support_still_requires_evidence () =
   expect_capability_error
     (function
       | Task_preflight.Native_json_schema_support_without_evidence -> true
+      | _ -> false)
+    (validate_capabilities descriptor (spec "/tmp"))
+
+let test_malformed_native_evidence_version_is_rejected () =
+  let descriptor =
+    match Backend_registry.find "claude-code" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "claude-code descriptor missing"
+  in
+  let evidence =
+    match descriptor.capabilities.native_json_schema_output_evidence with
+    | Some evidence ->
+        {evidence with Backend_types.tested_at_version = "release-latest"}
+    | None -> Alcotest.fail "claude-code evidence missing"
+  in
+  let descriptor =
+    {
+      descriptor with
+      capabilities =
+        {
+          descriptor.capabilities with
+          native_json_schema_output_evidence = Some evidence;
+        };
+    }
+  in
+  expect_capability_error
+    (function
+      | Task_preflight.Invalid_native_json_schema_evidence_version -> true
       | _ -> false)
     (validate_capabilities descriptor (spec "/tmp"))
 
@@ -1028,6 +1065,9 @@ let capability_tests =
     ("malformed web feature evidence", `Quick, test_malformed_web_feature_evidence);
     ("valid feature evidence", `Quick, test_valid_feature_evidence);
     ("native schema support still requires evidence", `Quick, test_native_schema_support_still_requires_evidence);
+    ( "malformed native evidence version is rejected",
+      `Quick,
+      test_malformed_native_evidence_version_is_rejected );
     ("every requested media type is required", `Quick, test_every_requested_media_type_is_required);
     ("web access hierarchy", `Quick, test_web_access_hierarchy);
     ("read-only gate", `Quick, test_read_only_gate);

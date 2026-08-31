@@ -18,12 +18,13 @@ let with_tmpdir f =
 
 let register_builtin_runtime_backends () =
   Registry.clear () ;
-  Adapter_loader.register_all () ;
-  Registry.register (module Claude_code) ;
-  Registry.register (module Codex_cli) ;
-  Registry.register (module Opencode_cli) ;
-  Registry.register (module Gemini_cli) ;
-  Registry.register (module Copilot_cli)
+  match
+    Runtime_bootstrap.register_runtime
+      ~profile:Runtime_bootstrap.Hardened_builtins
+      ()
+  with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)
 
 let epure_mcp_server () =
   Backend_types.make_mcp_server_config

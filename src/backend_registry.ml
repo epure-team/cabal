@@ -60,6 +60,8 @@ type unsupported_capability_note = {
   note : string;
 }
 
+type descriptor_registration_error = Descriptor_id_already_registered
+
 let builtin_backends =
   [
     {
@@ -345,14 +347,17 @@ let unsupported_capability_notes_data =
     };
   ]
 
-(* Extra descriptors registered at runtime. Used by tests to wire custom
-   backends (e.g. "test-backend") with explicit capability declarations so
-   they pass the read-only gate. Not included in all() or
-   read_only_safe_backend_ids() — those remain builtin-only. *)
+(* Extra descriptors registered at runtime. Used by tests, explicit host
+   registration. Not included in [all ()] or
+   [read_only_safe_backend_ids ()], which remain builtin-only. *)
 let extra_descriptors : descriptor list ref = ref []
 
+let find_builtin id = List.find_opt (fun d -> d.id = id) builtin_backends
+
+let find_extra id = List.find_opt (fun d -> d.id = id) !extra_descriptors
+
 let register_descriptor d =
-  if not (List.exists (fun e -> e.id = d.id) !extra_descriptors) then
+  if Option.is_none (find_builtin d.id) && Option.is_none (find_extra d.id) then
     extra_descriptors := d :: !extra_descriptors
 
 let all () = builtin_backends
@@ -360,9 +365,16 @@ let all () = builtin_backends
 let unsupported_capability_notes () = unsupported_capability_notes_data
 
 let find id =
-  match List.find_opt (fun d -> d.id = id) builtin_backends with
+  match find_builtin id with
   | Some _ as r -> r
-  | None -> List.find_opt (fun d -> d.id = id) !extra_descriptors
+  | None -> find_extra id
+
+let add_descriptor d =
+  match find d.id with
+  | Some _ -> Error Descriptor_id_already_registered
+  | None ->
+      extra_descriptors := d :: !extra_descriptors ;
+      Ok ()
 
 let supports_file_reading backend_id =
   match find backend_id with

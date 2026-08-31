@@ -53,6 +53,11 @@ type config = {
     (none) *)
 val make_backend : config -> Agentic_backend.t
 
+(** [binary_name config] derives the exact first executable token used by the
+    generic adapter, without executing it. It rejects empty, option-like, and
+    control-character-bearing tokens. *)
+val binary_name : config -> string option
+
 (** [config_of backend] returns the YAML config if [backend] was created via
     {!make_backend}, or [None] for native OCaml backends.
 
@@ -68,6 +73,10 @@ val make_backend : config -> Agentic_backend.t
     {violates}
     (none) *)
 val config_of : Agentic_backend.t -> config option
+
+(** [clear_config_cache ()] releases loader package/config associations.
+    {!Registry.clear} calls this as part of its test/reset lifecycle. *)
+val clear_config_cache : unit -> unit
 
 (** [parse_pi_json_events stdout] extracts the assistant's answer from Pi's
     NDJSON [--mode json] stream, keeping text blocks only so a caller never

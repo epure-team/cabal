@@ -9,8 +9,8 @@
 
     Iterates every backend in [Backend_registry.all ()] whose
     [capabilities.native_json_schema_output = true], mirrors host runtime
-    registration ([Adapter_loader.register_all ()] followed by handwritten
-    built-in modules), fails closed if the runtime backend is not native, skips
+    registration through [Runtime_bootstrap.Hardened_builtins], fails closed if
+    the runtime backend is not native, skips
     unavailable backend binaries, and exercises the native path via
     [Json_schema_enforcer.run_task] against backend-specific default models.
 
@@ -60,12 +60,13 @@ let emit_ambient_auth_note_if_needed backend_id =
 
 let register_host_runtime_backends () =
   Registry.clear () ;
-  Adapter_loader.register_all () ;
-  Registry.register (module Claude_code) ;
-  Registry.register (module Gemini_cli) ;
-  Registry.register (module Codex_cli) ;
-  Registry.register (module Opencode_cli) ;
-  Registry.register (module Copilot_cli)
+  match
+    Runtime_bootstrap.register_runtime
+      ~profile:Runtime_bootstrap.Hardened_builtins
+      ()
+  with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)
 
 let runtime_backend_for_native_descriptor (d : Backend_registry.descriptor) =
   match Registry.get d.id with

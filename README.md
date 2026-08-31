@@ -106,6 +106,8 @@ on `PATH` (or set
 - `src/agentic_backend.*` and `src/registry.*` — backend module signature and
   runtime backend registry.
 - `src/backend_registry.*` — static backend descriptors and capability metadata.
+- `src/runtime_bootstrap.*` — extensible or validated hardened runtime assembly.
+- `src/runtime_dispatch.*` — call-time backend resolution and central preflight.
 - `src/task_preflight.*` — attachment integrity/workspace checks and requested
   capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
@@ -125,34 +127,27 @@ on `PATH` (or set
 
 ## Using Cabal from a host application
 
-Cabal is intentionally minimal — host applications wire backends into the
-runtime registry, drive `run_task`, and own everything around it (storage,
-prompt policy, retry, UI).
+Cabal is intentionally minimal — host applications choose a runtime bootstrap
+profile and explicit task-input limits, while retaining ownership of storage,
+prompt policy, product orchestration, and UI.
 
 ```ocaml
 open Cabal
 
 let () =
-  (* 1. Load YAML adapters, then register handwritten built-ins when the host
-        needs their backend-specific runtime capabilities. *)
-  Adapter_loader.register_all () ;
-  Registry.register (module Claude_code) ;
-  Registry.register (module Gemini_cli) ;
-  Registry.register (module Codex_cli) ;
-  Registry.register (module Opencode_cli) ;
-  Registry.register (module Copilot_cli) ;
-
-  (* 2. Pick a backend by canonical id — the same id used in
-        Backend_registry and Backend_config_gen. *)
-  let backend =
-    match Registry.get "claude-code" with
-    | Some b -> b
-    | None -> failwith "claude-code backend is not registered"
-  in
+  (* 1. Hardened bootstrap ignores HOME/project adapters, stages the six
+        approved embedded ids, and installs handwritten backends last. *)
+  (match
+     Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins
+       ()
+   with
+  | Ok () -> ()
+  | Error error -> failwith (Runtime_bootstrap.render_error error)) ;
 
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  (* 3. Construct a task. make_task_spec validates the managed namespace
+  (* 2. Construct a task. make_task_spec validates the managed namespace
         for you; for type-level enforcement, use Backend_types.validate_namespace. *)
   let spec =
     Backend_types.make_task_spec
@@ -164,36 +159,47 @@ let () =
       ()
   in
 
-  (* 4. Run the task. Backends never raise — they always return a
-        task_result with a status (Success / Failed _ / Timeout). *)
-  let result = Agentic_backend.run_task backend ~sw ~env spec in
-  Printf.printf "status=%s files_changed=%d\n"
-    (Backend_types.show_result_status result.status)
-    (List.length result.files_changed)
+  (* 3. The host supplies policy; Cabal has no attachment-size defaults. *)
+  let limits : Task_preflight.limits =
+    {max_attachments = 0; max_file_size_bytes = 0; max_total_size_bytes = 0}
+  in
+  match Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec with
+  | Error error -> prerr_endline (Runtime_dispatch.render_error error)
+  | Ok result ->
+      Printf.printf "status=%s files_changed=%d\n"
+        (Backend_types.show_result_status result.status)
+        (List.length result.files_changed)
 ```
 
 ### Media and web preflight
 
 `Backend_types.task_spec` can carry workspace-relative PNG/JPEG attachment
 metadata and an explicit web policy. Existing callers default to no attachments
-and `Web_disabled`. Before dispatch, hosts can apply their own size/count policy
-and validate both the files and the selected static descriptor:
+and `Web_disabled`. `Runtime_dispatch.run_task` requires the host's size/count
+policy and validates files plus requested capabilities against one bound,
+validated runtime entry before the backend is called:
 
 ```ocaml
 let limits : Task_preflight.limits =
   {max_attachments = 4; max_file_size_bytes = 10_000_000; max_total_size_bytes = 20_000_000}
 in
-let ( let* ) = Result.bind in
-let* () = Task_preflight.validate_inputs ~limits spec in
-Task_preflight.validate_capabilities ~descriptor spec
+Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec
 ```
 
-Preflight is host-neutral and does not invoke a backend, access the network, or
-choose limits. Render failures with `Task_preflight.render_error`; its messages
-exclude attachment paths and bytes. CBL-01 does not centrally wire preflight
-into `run_task`, and all built-in descriptors currently declare no media support
-and `Web_disabled` pending backend-specific transport evidence.
+Preflight is host-neutral and does not choose limits. Render dispatch failures
+with `Runtime_dispatch.render_error`; its diagnostics exclude attachment paths,
+digests, bytes, and exception payloads. Invalid limits, inputs, or capabilities
+fail before any version process or availability side effect. After preflight,
+dispatch runs one bounded version command, rejects parseable versions below the
+descriptor baseline, and checks runtime availability before execution. Missing
+or unparseable version output keeps the compatibility skip policy; availability
+must still pass. Eio cancellation propagates rather than becoming an ordinary
+dispatch error.
 
+All built-in descriptors currently declare no media support and `Web_disabled`
+pending backend-specific transport evidence. Direct calls to
+`Agentic_backend.run_task` and `Json_schema_enforcer.run_task` remain compatible
+low-level paths but intentionally bypass these central guarantees.
 ### Redaction contract for hosts logging backend output
 
 Cabal's `Session_event_log` redacts events **before** writing them. Hosts
@@ -213,25 +219,54 @@ priority first:
 3. Project-local: `.cabal/adapters/*.yaml` (only when `?project_dir` is
    passed).
 
-Project-local adapters override user-global, which override built-ins by
-id. Hosts that don't want to honour user-supplied adapters should call
-`register_all` without `?project_dir` and validate `$HOME` themselves.
+Project-local adapters override user-global, which override built-ins by id when
+the override produces a structurally valid conservative entry.
+`Runtime_bootstrap.Extensible` preserves the existing probe behavior when both
+`sw` and `env` are supplied. Every generic YAML adapter, including one that
+overrides a built-in id, receives a conservative effective descriptor: baseline
+metadata `0.0.0`, the executable token derived without execution, and no positive
+structured/streaming/media/web/native-schema/session-resume/read-only/MCP/config/
+file-reading claims. The entry explicitly uses `No_version_gate`, so arbitrary
+or prerelease YAML CLI version formats remain compatible while availability is
+still checked. Project overrides replace backend, effective descriptor, YAML
+origin, and policy together.
+
+Built-in and explicit host descriptors remain immutable catalog entries; YAML
+does not replace or inherit them. Central dispatch uses only the effective
+descriptor bound to the validated runtime entry.
 
 `Adapter_loader.register_all` registers YAML-backed adapters only. It does not
-by itself install handwritten backend modules such as `Claude_code`, so hosts
-that require backend-specific runtime behavior (native JSON schema enforcement,
-read-only flags, resume semantics, config validation, MCP handling, or safety
-checks) should register the handwritten built-ins afterward to override the same
-backend ids.
+by itself install handwritten backend modules such as `Claude_code`. It remains
+public for compatibility and for hosts intentionally composing an extensible
+YAML runtime; strict built-in hosts should not recreate handwritten override
+sequences themselves.
+
+Service hosts should use `Runtime_bootstrap.Hardened_builtins`: it requires an
+empty runtime registry, does not read `HOME` or project adapter directories,
+validates all six entries against an independent bootstrap-owned full capability
+mapping and their approved static descriptors before one atomic commit, keeps Pi
+as the approved embedded YAML backend, and installs the other five handwritten
+implementations. All six use `Enforce_baseline`. Model probes are disabled unless
+explicitly requested with both `sw` and `env`. Custom backends remain supported
+additively through `Runtime_bootstrap.register_custom ~descriptor ~backend`;
+their explicit descriptor is the host's full capability attestation and uses the
+safe `Enforce_baseline` default. Collisions and invalid capability/evidence pairs
+mutate neither registry. Origin is registry-entry metadata, so
+`Agentic_backend.S` imposes no provenance field on downstream modules.
+
+`Registry.register` remains the legacy runtime-only compatibility API. It always
+installs a raw, untrusted entry and clears any validated pairing for the same id;
+`Runtime_dispatch` rejects it before preflight side effects, version/availability
+processes, project config, or backend execution. Trusted call-time replacement
+must replace the whole validated entry.
 
 ### Known limitations
 
-1. `Adapter_loader.register_all` alone executes built-ins through the generic YAML-backed adapter path; hosts that need strict backend-specific behavior (native schema output, read-only semantics, resume, config validation, MCP handling, or safety checks) should register handwritten built-ins after the loader and validate which backend path is active before execution.
-2. Provider model-discovery probes may pass credentials in subprocess argv or URL arguments. Avoid running probe-enabled providers with live API keys in shared or untrusted environments until this path is hardened.
-3. Config artifact paths are treated as trusted project-relative paths. Hosts should sanitize and validate user-supplied paths before passing artifacts into Cabal.
-4. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
-5. Timeout coverage is still incomplete for all subprocess phases, including spawn and stdin-write edge cases.
-6. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.
+1. Provider model-discovery probes may pass credentials in subprocess argv or URL arguments. Avoid running probe-enabled providers with live API keys in shared or untrusted environments until this path is hardened.
+2. Config artifact paths are treated as trusted project-relative paths. Hosts should sanitize and validate user-supplied paths before passing artifacts into Cabal.
+3. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
+4. Timeout coverage is still incomplete for all subprocess phases, including spawn and stdin-write edge cases.
+5. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.
 
 Tracking for ongoing work is available in issue #5.
 ## Live sessions and client-neutral composition
@@ -288,7 +323,7 @@ in CI:
 | Binary | Purpose |
 |---|---|
 | [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the enforcer path against all default backends, or an optional filtered backend |
-| [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true`, mirrors host registration by loading YAML adapters and then handwritten built-ins, and exercises the native schema path (Story #628) |
+| [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true`, uses hardened runtime bootstrap, and exercises the native schema path (Story #628) |
 
 Both are built and run via `@e2e`. With only `CABAL_E2E_TESTS=1`, the alias is
 a multi-backend run: `test_demo_627` iterates the default backend set
@@ -326,9 +361,8 @@ CABAL_E2E_TESTS=1 \
 ```
 
 `test_native_json_schema_backends` iterates all registry entries with
-`native_json_schema_output = true`. It calls `Adapter_loader.register_all ()`
-and then registers the handwritten built-ins (`Claude_code`, `Gemini_cli`,
-`Codex_cli`, `Opencode_cli`, `Copilot_cli`) to mirror host usage; if a
+`native_json_schema_output = true`. It calls
+`Runtime_bootstrap.register_runtime ~profile:Hardened_builtins ()`; if a
 descriptor-native backend resolves to a runtime backend whose
 `Agentic_backend.native_json_schema_output` is false, the test fails closed.
 After that runtime-capability check, both E2E binaries skip backends whose CLI

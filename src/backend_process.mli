@@ -219,6 +219,25 @@ val cleanup_mcp_config : env:Eio_unix.Stdenv.base -> string -> unit
 
 (** {1 Availability Check} *)
 
+(** Result of one combined version/availability process probe. *)
+type version_probe_result = {
+  command_available : bool;
+      (** [true] exactly when the version command exited successfully. *)
+  output : string option;
+      (** Captured stdout, or stderr when stdout was empty. *)
+  timed_out : bool;  (** Whether the command exceeded the probe timeout. *)
+}
+
+(** [probe_version_command ~env cmd] runs one bounded process and reports both
+    clean-exit availability and optional version output. Non-zero exits may
+    still carry output. Missing commands and timeouts return unavailable with
+    no output. Eio cancellation is propagated. *)
+val probe_version_command :
+  env:Eio_unix.Stdenv.base ->
+  ?timeout_seconds:float ->
+  string list ->
+  version_probe_result
+
 (** [capture_version_output ~env cmd] runs [cmd] and returns the captured
     stdout as [Ok output], or stderr as [Ok output] if stdout is empty.
     Returns [Error _] only when the binary produces no output at all (not

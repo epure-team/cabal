@@ -195,6 +195,84 @@ let load_dir dir =
         (filename, result))
       yaml_files
 
+let embedded_backends () =
+  let rec load loaded = function
+    | [] -> Ok (List.rev loaded)
+    | (_name, content) :: rest -> (
+        match load_string ~source:"builtin" content with
+        | Error message -> Error message
+        | Ok config -> load (Yaml_adapter.make_backend config :: loaded) rest)
+  in
+  load [] Builtin.all
+
+(* --- Validated YAML entry registration ------------------------------------ *)
+
+let nonempty_text value =
+  String.trim value <> ""
+  && String.for_all
+       (fun character ->
+         let code = Char.code character in
+         code >= 0x20 && code <> 0x7f)
+       value
+
+let conservative_descriptor cfg binary_name : Backend_registry.descriptor =
+  {
+    id = cfg.name;
+    display_name = cfg.display_name;
+    binary_name;
+    baseline_version = "0.0.0";
+    capabilities =
+      {
+        structured_output = false;
+        streaming_output = false;
+        session_resume = false;
+        mcp_support = Backend_registry.Mcp_none;
+        read_only_support = false;
+        project_config_surface = Backend_registry.Config_none;
+        precedence_confidence = Backend_registry.Low;
+        generated_lsp_config = false;
+        file_reading = false;
+        media_support = {media_types = []; evidence = None};
+        web_support = {maximum = Backend_types.Web_disabled; evidence = None};
+        native_json_schema_output = false;
+        native_json_schema_output_evidence = None;
+      };
+  }
+
+let register_external_config cfg =
+  let* binary_name =
+    match Yaml_adapter.binary_name cfg with
+    | Some binary_name -> Ok binary_name
+    | None -> Error "invocation command has no safe binary identity"
+  in
+  if not (Runtime_entry.valid_runtime_id cfg.name) then
+    Error "adapter id is structurally invalid"
+  else if not (nonempty_text cfg.display_name) then
+    Error "adapter display name is structurally invalid"
+  else
+    let descriptor = conservative_descriptor cfg binary_name in
+    let backend = Yaml_adapter.make_backend cfg in
+    match
+      Runtime_entry.create
+        ~backend
+        ~descriptor
+        ~runtime_capabilities:descriptor.capabilities
+        ~origin:Runtime_entry.Yaml
+        ~version_policy:Runtime_entry.No_version_gate
+    with
+    | Error error -> Error (Runtime_entry.render_validation_error error)
+    | Ok entry ->
+        Registry.register_validated entry ;
+        Ok ()
+
+let register_external_result filename = function
+  | Error message -> Diagnostics.warn "[adapter_loader] %s: %s" filename message
+  | Ok cfg -> (
+      match register_external_config cfg with
+      | Ok () -> ()
+      | Error message ->
+          Diagnostics.warn "[adapter_loader] %s: %s" filename message)
+
 (* --- Probe runner --------------------------------------------------------- *)
 
 (** [run_probe ~sw ~env backend] invokes the backend's [models_probe] (if any)
@@ -228,8 +306,8 @@ let run_probe ~sw ~env backend =
 (** [resolve_probes_for_registered ~sw ~env ()] walks every registered
     backend and, for each one with a [models_probe], publishes the
     probe-resolved view into the registry side table.  Backends without a
-    probe (or whose probe falls back) keep the [Static] view that
-    [Registry.register] seeded. *)
+    probe (or whose probe falls back) keep the [Static] view seeded when their
+    raw or validated registry entry was installed. *)
 let resolve_probes_for_registered ~sw ~env () =
   List.iter
     (fun backend ->
@@ -242,6 +320,8 @@ let resolve_probes_for_registered ~sw ~env () =
             (Agentic_backend.models backend, Registry.Static))
     (Registry.list ())
 
+let resolve_registered_model_probes = resolve_probes_for_registered
+
 (* --- Register all ---------------------------------------------------------- *)
 
 let register_all ?project_dir ?sw ?env () =
@@ -249,9 +329,13 @@ let register_all ?project_dir ?sw ?env () =
   List.iter
     (fun (_name, content) ->
       match load_string ~source:"builtin" content with
-      | Ok cfg ->
-          let backend = Yaml_adapter.make_backend cfg in
-          Registry.register backend
+      | Ok cfg -> (
+          match register_external_config cfg with
+          | Ok () -> ()
+          | Error msg ->
+              Diagnostics.warn
+                "[adapter_loader] builtin adapter validation error: %s"
+                msg)
       | Error msg ->
           Diagnostics.warn
             "[adapter_loader] builtin adapter parse error: %s"
@@ -264,12 +348,7 @@ let register_all ?project_dir ?sw ?env () =
       Filename.concat home (Filename.concat ".cabal" "adapters")
     in
     List.iter
-      (fun (filename, result) ->
-        match result with
-        | Ok cfg ->
-            let backend = Yaml_adapter.make_backend cfg in
-            Registry.register backend
-        | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
+      (fun (filename, result) -> register_external_result filename result)
       (load_dir global_dir)
   end ;
   (* 3. Project-local: .cabal/adapters/*.yaml — highest priority *)
@@ -279,18 +358,13 @@ let register_all ?project_dir ?sw ?env () =
         Filename.concat pd (Filename.concat ".cabal" "adapters")
       in
       List.iter
-        (fun (filename, result) ->
-          match result with
-          | Ok cfg ->
-              let backend = Yaml_adapter.make_backend cfg in
-              Registry.register backend
-          | Error msg -> Diagnostics.warn "[adapter_loader] %s: %s" filename msg)
+        (fun (filename, result) -> register_external_result filename result)
         (load_dir local_dir)
   | None -> ()) ;
   (* 4. Probe layer — when an Eio environment is available, ask each
      backend's [models_probe] for the live model list and cache the
-     outcome in the registry.  Without [~sw]/[~env] the static seed from
-     [Registry.register] remains in place. *)
+     outcome in the registry. Without [~sw]/[~env] the registration-time static
+     seed remains in place. *)
   match (sw, env) with
   | Some sw, Some env -> resolve_probes_for_registered ~sw ~env ()
   | _ -> ()

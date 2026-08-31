@@ -26,6 +26,18 @@
  (modules test_task_preflight))
 
 (test
+ (name test_runtime_bootstrap)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
+ (modules test_runtime_bootstrap))
+
+(test
+ (name test_runtime_dispatch)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
+ (modules test_runtime_dispatch))
+
+(test
  (name test_backend_version)
  (libraries cabal alcotest eio eio_posix unix)
  (deps ../bin/process_group_launcher.exe)
