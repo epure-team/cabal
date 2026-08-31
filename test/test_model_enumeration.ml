@@ -494,15 +494,16 @@ let with_temp_dir f =
 
 let test_project_local_models_override () =
   with_temp_dir (fun tmpdir ->
+      let id = "custom-model-enumeration" in
       let adapters_dir =
         Filename.concat tmpdir (Filename.concat ".cabal" "adapters")
       in
       write_file
-        (Filename.concat adapters_dir "gemini-cli.yaml")
+        (Filename.concat adapters_dir (id ^ ".yaml"))
         {|
-name: gemini-cli
-display_name: Gemini Override
-invocation_command: "gemini-custom --flag -p -"
+name: custom-model-enumeration
+display_name: Custom Model Enumeration
+invocation_command: "custom-model-enumeration --flag -p -"
 template_set: custom
 models:
   - foo
@@ -513,8 +514,8 @@ models:
         ~finally:(fun () -> Registry.clear ())
         (fun () ->
           Adapter_loader.register_all ~project_dir:tmpdir () ;
-          match Registry.list_models "gemini-cli" with
-          | None -> Alcotest.fail "gemini-cli not registered"
+          match Registry.list_models id with
+          | None -> Alcotest.fail "custom adapter not registered"
           | Some models ->
               Alcotest.(check string_list)
                 "project-local override surfaces its model list"
