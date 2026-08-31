@@ -11,8 +11,6 @@ let id = "opencode"
 
 let name = "OpenCode"
 
-let implementation_origin = Agentic_backend.Handwritten
-
 (* OpenCode is provider-agnostic; the canonical pair below mirrors the
    model slugs documented for `opencode run --model`. *)
 let models =

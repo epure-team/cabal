@@ -14,14 +14,10 @@ type config_check_result =
   | Config_invalid of string
   | Config_check_unsupported of string
 
-type implementation_origin = Handwritten | Yaml | Custom
-
 module type S = sig
   val id : string
 
   val name : string
-
-  val implementation_origin : implementation_origin
 
   val models : string list
 
@@ -59,8 +55,6 @@ type t = (module S)
 let id (module B : S) = B.id
 
 let name (module B : S) = B.name
-
-let implementation_origin (module B : S) = B.implementation_origin
 
 let models (module B : S) = B.models
 

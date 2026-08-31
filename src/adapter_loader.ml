@@ -205,7 +205,7 @@ let embedded_backends () =
   in
   load [] Builtin.all
 
-(* --- Descriptor/runtime pair registration -------------------------------- *)
+(* --- Validated YAML entry registration ------------------------------------ *)
 
 let nonempty_text value =
   String.trim value <> ""
@@ -213,16 +213,6 @@ let nonempty_text value =
        (fun character ->
          let code = Char.code character in
          code >= 0x20 && code <> 0x7f)
-       value
-
-let valid_runtime_id value =
-  nonempty_text value
-  && value = String.trim value
-  && String.length value <= 128
-  && String.for_all
-       (function
-         | 'a' .. 'z' | '0' .. '9' | '-' | '_' | '.' -> true
-         | _ -> false)
        value
 
 let conservative_descriptor cfg binary_name : Backend_registry.descriptor =
@@ -249,47 +239,30 @@ let conservative_descriptor cfg binary_name : Backend_registry.descriptor =
       };
   }
 
-let builtin_descriptor id =
-  List.find_opt
-    (fun descriptor -> descriptor.Backend_registry.id = id)
-    (Backend_registry.all ())
-
-let validate_builtin_override cfg descriptor binary_name =
-  if binary_name <> descriptor.Backend_registry.binary_name then
-    Error "binary identity differs from the immutable built-in descriptor"
-  else if descriptor.capabilities.session_resume then
-    Error "generic YAML cannot satisfy built-in session-resume capability"
-  else if descriptor.capabilities.native_json_schema_output then
-    Error "generic YAML cannot satisfy built-in native-schema capability"
-  else Ok ()
-
 let register_external_config cfg =
   let* binary_name =
     match Yaml_adapter.binary_name cfg with
     | Some binary_name -> Ok binary_name
     | None -> Error "invocation command has no safe binary identity"
   in
-  if not (valid_runtime_id cfg.name) then
+  if not (Runtime_entry.valid_runtime_id cfg.name) then
     Error "adapter id is structurally invalid"
   else if not (nonempty_text cfg.display_name) then
     Error "adapter display name is structurally invalid"
   else
-    match builtin_descriptor cfg.name with
-    | Some descriptor ->
-        let* () = validate_builtin_override cfg descriptor binary_name in
-        Registry.register_from_adapter_loader (Yaml_adapter.make_backend cfg) ;
-        Ok ()
-    | None ->
-        let descriptor = conservative_descriptor cfg binary_name in
-        let* () =
-          match Backend_registry.upsert_yaml_descriptor descriptor with
-          | Ok () -> Ok ()
-          | Error Backend_registry.Immutable_builtin_descriptor ->
-              Error "built-in descriptor is immutable"
-          | Error Backend_registry.Descriptor_not_owned_by_yaml_loader ->
-              Error "descriptor id is owned by the host"
-        in
-        Registry.register_from_adapter_loader (Yaml_adapter.make_backend cfg) ;
+    let descriptor = conservative_descriptor cfg binary_name in
+    let backend = Yaml_adapter.make_backend cfg in
+    match
+      Runtime_entry.create
+        ~backend
+        ~descriptor
+        ~runtime_capabilities:descriptor.capabilities
+        ~origin:Runtime_entry.Yaml
+        ~version_policy:Runtime_entry.No_version_gate
+    with
+    | Error error -> Error (Runtime_entry.render_validation_error error)
+    | Ok entry ->
+        Registry.register_validated entry ;
         Ok ()
 
 let register_external_result filename = function
@@ -333,8 +306,8 @@ let run_probe ~sw ~env backend =
 (** [resolve_probes_for_registered ~sw ~env ()] walks every registered
     backend and, for each one with a [models_probe], publishes the
     probe-resolved view into the registry side table.  Backends without a
-    probe (or whose probe falls back) keep the [Static] view that
-    [Registry.register] seeded. *)
+    probe (or whose probe falls back) keep the [Static] view seeded when their
+    raw or validated registry entry was installed. *)
 let resolve_probes_for_registered ~sw ~env () =
   List.iter
     (fun backend ->
@@ -356,9 +329,13 @@ let register_all ?project_dir ?sw ?env () =
   List.iter
     (fun (_name, content) ->
       match load_string ~source:"builtin" content with
-      | Ok cfg ->
-          let backend = Yaml_adapter.make_backend cfg in
-          Registry.register_from_adapter_loader backend
+      | Ok cfg -> (
+          match register_external_config cfg with
+          | Ok () -> ()
+          | Error msg ->
+              Diagnostics.warn
+                "[adapter_loader] builtin adapter validation error: %s"
+                msg)
       | Error msg ->
           Diagnostics.warn
             "[adapter_loader] builtin adapter parse error: %s"
@@ -386,8 +363,8 @@ let register_all ?project_dir ?sw ?env () =
   | None -> ()) ;
   (* 4. Probe layer — when an Eio environment is available, ask each
      backend's [models_probe] for the live model list and cache the
-     outcome in the registry.  Without [~sw]/[~env] the static seed from
-     [Registry.register] remains in place. *)
+     outcome in the registry. Without [~sw]/[~env] the registration-time static
+     seed remains in place. *)
   match (sw, env) with
   | Some sw, Some env -> resolve_probes_for_registered ~sw ~env ()
   | _ -> ()

@@ -365,6 +365,36 @@ let test_validate_empty_name () =
   | Error f -> Alcotest.failf "expected 'name' error, got '%s'" f
   | Ok () -> Alcotest.fail "expected Error"
 
+let test_yaml_config_metadata_is_bounded_and_cleared () =
+  Registry.clear () ;
+  let config source : Yaml_adapter.config =
+    {
+      name = "metadata-lifecycle";
+      display_name = source;
+      invocation_command = "false";
+      template_set = "default";
+      env_mappings = [];
+      timeout_seconds = 1.0;
+      source;
+      models = [];
+    }
+  in
+  let first = Yaml_adapter.make_backend (config "first") in
+  let second = Yaml_adapter.make_backend (config "second") in
+  Alcotest.(check bool)
+    "replacement drops stale same-id package metadata"
+    true
+    (Option.is_none (Yaml_adapter.config_of first)) ;
+  Alcotest.(check bool)
+    "latest same-id package metadata remains"
+    true
+    (Option.is_some (Yaml_adapter.config_of second)) ;
+  Registry.clear () ;
+  Alcotest.(check bool)
+    "registry reset clears YAML package metadata"
+    true
+    (Option.is_none (Yaml_adapter.config_of second))
+
 (* --- test suite ------------------------------------------------------------ *)
 
 let () =
@@ -422,5 +452,12 @@ let () =
         [
           Alcotest.test_case "valid config" `Quick test_validate_ok;
           Alcotest.test_case "empty name" `Quick test_validate_empty_name;
+        ] );
+      ( "metadata lifecycle",
+        [
+          Alcotest.test_case
+            "same-id replacement is bounded and clear resets"
+            `Quick
+            test_yaml_config_metadata_is_bounded_and_cleared;
         ] );
     ]

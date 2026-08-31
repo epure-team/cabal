@@ -11,8 +11,6 @@ let id = "claude-code"
 
 let name = "Claude Code"
 
-let implementation_origin = Agentic_backend.Handwritten
-
 (* Static fallback — used when the Anthropic Models API is unreachable or
    ANTHROPIC_API_KEY is absent.  Keep in sync with
    https://docs.anthropic.com/en/docs/about-claude/models/overview *)

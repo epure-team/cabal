@@ -26,6 +26,12 @@ let expect_validation_ok = function
   | Error error ->
       Alcotest.fail (Runtime_bootstrap.render_validation_error error)
 
+let validated_entry id =
+  match Registry.find_entry id with
+  | Some (Registry.Validated entry) -> entry
+  | Some (Registry.Raw _) -> Alcotest.failf "%s is only raw-registered" id
+  | None -> Alcotest.failf "%s is not registered" id
+
 let with_empty_registry f =
   Registry.clear () ;
   Fun.protect ~finally:Registry.clear f
@@ -124,7 +130,6 @@ let make_backend ?(session_resume = false) ?(native = false) ?(name = "Custom")
   let module Backend = struct
     let id = id
     let name = name
-    let implementation_origin = Agentic_backend.Custom
     let models = []
     let models_probe = None
     let available ~sw:_ ~env:_ = true
@@ -190,36 +195,49 @@ let test_hardened_registers_exact_approved_runtime () =
     (List.sort String.compare (Registry.list_ids ())) ;
   List.iter
     (fun id ->
-      match Registry.get id, Backend_registry.find id with
-      | Some backend, Some descriptor ->
+      match Backend_registry.find id with
+      | Some descriptor ->
+          let entry = validated_entry id in
           expect_validation_ok
-            (Runtime_bootstrap.validate_backend ~descriptor ~backend)
-      | _ -> Alcotest.failf "%s is missing a runtime or descriptor" id)
+            (Runtime_bootstrap.validate_backend_capabilities
+               ~runtime_capabilities:entry.runtime_capabilities
+               ~descriptor:entry.effective_descriptor
+               ~backend:entry.backend) ;
+          Alcotest.(check bool)
+            (id ^ " binds the approved static descriptor")
+            true
+            (entry.effective_descriptor = descriptor) ;
+          Alcotest.(check bool)
+            (id ^ " runtime capability snapshot exactly matches")
+            true
+            (entry.runtime_capabilities = descriptor.capabilities) ;
+          Alcotest.(check bool)
+            (id ^ " enforces its stable baseline")
+            true
+            (entry.version_policy = Runtime_entry.Enforce_baseline)
+      | None -> Alcotest.failf "%s is missing its approved descriptor" id)
     expected ;
   let expected_origins =
     [
-      ("claude-code", Agentic_backend.Handwritten);
-      ("codex", Agentic_backend.Handwritten);
-      ("copilot-cli", Agentic_backend.Handwritten);
-      ("gemini-cli", Agentic_backend.Handwritten);
-      ("opencode", Agentic_backend.Handwritten);
-      ("pi", Agentic_backend.Yaml);
+      ("claude-code", Runtime_entry.Handwritten);
+      ("codex", Runtime_entry.Handwritten);
+      ("copilot-cli", Runtime_entry.Handwritten);
+      ("gemini-cli", Runtime_entry.Handwritten);
+      ("opencode", Runtime_entry.Handwritten);
+      ("pi", Runtime_entry.Yaml);
     ]
   in
   List.iter
     (fun (id, expected_origin) ->
-      let backend = Registry.get_exn id in
+      let entry = validated_entry id in
       Alcotest.(check bool)
         (id ^ " has the approved implementation origin")
         true
-        (Agentic_backend.implementation_origin backend = expected_origin))
+        (entry.origin = expected_origin))
     expected_origins ;
-  let pi = Registry.get_exn "pi" in
-  let pi_descriptor =
-    match Backend_registry.find "pi" with
-    | Some descriptor -> descriptor
-    | None -> Alcotest.fail "Pi descriptor missing"
-  in
+  let pi_entry = validated_entry "pi" in
+  let pi = pi_entry.backend in
+  let pi_descriptor = pi_entry.effective_descriptor in
   Alcotest.(check bool)
     "Pi descriptor truthfully disables resume"
     false
@@ -260,7 +278,7 @@ let test_extensible_preserves_global_project_precedence () =
     executable
     {|#!/bin/sh
 if [ "${1-}" = "--version" ]; then
-  printf '%s\n' '1.0.0'
+  printf '%s\n' '1.0.0-beta'
 else
   printf '%s\n' "${1-unknown}"
 fi
@@ -284,6 +302,7 @@ fi
        ~profile:Runtime_bootstrap.Extensible
        ()) ;
   let backend = Registry.get_exn "custom-precedence" in
+  let entry = validated_entry "custom-precedence" in
   (match Yaml_adapter.config_of backend with
   | Some config ->
       Alcotest.(check string)
@@ -298,12 +317,16 @@ fi
   Alcotest.(check bool)
     "custom adapter origin is explicit"
     true
-    (Agentic_backend.implementation_origin backend = Agentic_backend.Yaml) ;
-  let descriptor =
-    match Backend_registry.find "custom-precedence" with
-    | Some descriptor -> descriptor
-    | None -> Alcotest.fail "custom YAML descriptor was not installed"
-  in
+    (entry.origin = Runtime_entry.Yaml) ;
+  Alcotest.(check bool)
+    "YAML adapter explicitly skips stable baseline gating"
+    true
+    (entry.version_policy = Runtime_entry.No_version_gate) ;
+  Alcotest.(check bool)
+    "YAML effective descriptor does not enter the static catalog"
+    true
+    (Option.is_none (Backend_registry.find "custom-precedence")) ;
+  let descriptor = entry.effective_descriptor in
   Alcotest.(check string)
     "project descriptor replaces global metadata"
     "Project custom"
@@ -324,6 +347,10 @@ fi
     "generated descriptor disables web"
     true
     (descriptor.capabilities.web_support.maximum = Backend_types.Web_disabled) ;
+  Alcotest.(check bool)
+    "runtime snapshot exactly matches conservative descriptor"
+    true
+    (entry.runtime_capabilities = descriptor.capabilities) ;
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let completer =
@@ -352,7 +379,7 @@ fi
         (String.trim result.text)
   | Error error -> Alcotest.fail error
 
-let test_extensible_descriptor_failure_is_atomic () =
+let test_extensible_yaml_does_not_inherit_host_catalog_descriptor () =
   with_empty_registry @@ fun () ->
   with_temp_dir "descriptor-failure-home" @@ fun home ->
   let id = "yaml-descriptor-owned-by-host" in
@@ -362,38 +389,91 @@ let test_extensible_descriptor_failure_is_atomic () =
   with_home home @@ fun () ->
   expect_ok
     (Runtime_bootstrap.register_runtime ~profile:Runtime_bootstrap.Extensible ()) ;
+  let entry = validated_entry id in
+  Alcotest.(check string)
+    "YAML runtime binds its own effective descriptor"
+    "Rejected YAML"
+    entry.effective_descriptor.display_name ;
   Alcotest.(check bool)
-    "failed descriptor install leaves runtime absent"
+    "YAML runtime cannot inherit structured output"
+    false
+    entry.effective_descriptor.capabilities.structured_output ;
+  Alcotest.(check bool)
+    "YAML runtime uses explicit no-gate policy"
     true
-    (Option.is_none (Registry.get id)) ;
+    (entry.version_policy = Runtime_entry.No_version_gate) ;
   match Backend_registry.find id with
   | Some descriptor ->
       Alcotest.(check string)
-        "host descriptor remains unchanged"
+        "host catalog descriptor remains unchanged"
         host_descriptor.display_name
         descriptor.display_name
   | None -> Alcotest.fail "host descriptor was removed"
 
-let test_extensible_builtin_override_mismatch_fails_closed () =
+let test_extensible_builtin_yaml_override_is_conservative () =
   with_empty_registry @@ fun () ->
   with_temp_dir "builtin-override-home" @@ fun home ->
+  with_temp_dir "builtin-override-project" @@ fun project ->
   write_adapter
     ~root:home
     ~id:"claude-code"
-    ~display_name:"Untrusted Claude override"
-    ~invocation_command:"malicious-claude"
+    ~display_name:"Global Claude YAML"
+    ~invocation_command:"false global"
+    () ;
+  write_adapter
+    ~root:project
+    ~id:"claude-code"
+    ~display_name:"Project Claude YAML"
+    ~invocation_command:"false project"
     () ;
   with_home home @@ fun () ->
   expect_ok
-    (Runtime_bootstrap.register_runtime ~profile:Runtime_bootstrap.Extensible ()) ;
+    (Runtime_bootstrap.register_runtime
+       ~project_dir:project
+       ~profile:Runtime_bootstrap.Extensible
+       ()) ;
   let backend = Registry.get_exn "claude-code" in
-  match Yaml_adapter.config_of backend with
+  (match Yaml_adapter.config_of backend with
   | Some config ->
       Alcotest.(check string)
-        "mismatched built-in override is rejected"
-        "builtin"
-        config.source
-  | None -> Alcotest.fail "embedded fallback should remain YAML-backed"
+        "project built-in override has highest precedence"
+        "Project Claude YAML"
+        config.display_name ;
+      Alcotest.(check bool)
+        "project source is retained"
+        true
+        (contains config.source project)
+  | None -> Alcotest.fail "built-in override should remain YAML-backed") ;
+  let entry = validated_entry "claude-code" in
+  Alcotest.(check bool)
+    "built-in YAML override origin"
+    true
+    (entry.origin = Runtime_entry.Yaml) ;
+  Alcotest.(check bool)
+    "built-in YAML override skips baseline gate"
+    true
+    (entry.version_policy = Runtime_entry.No_version_gate) ;
+  Alcotest.(check bool)
+    "effective read-only claim is conservative"
+    false
+    entry.effective_descriptor.capabilities.read_only_support ;
+  Alcotest.(check bool)
+    "effective file-reading claim is conservative"
+    false
+    entry.effective_descriptor.capabilities.file_reading ;
+  Alcotest.(check bool)
+    "effective structured-output claim is conservative"
+    false
+    entry.effective_descriptor.capabilities.structured_output ;
+  let static_descriptor =
+    match Backend_registry.find "claude-code" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "static Claude descriptor missing"
+  in
+  Alcotest.(check bool)
+    "approved static descriptor remains unchanged"
+    true
+    static_descriptor.capabilities.read_only_support
 
 let test_hardened_probes_are_off_by_default () =
   with_empty_registry @@ fun () ->
@@ -496,6 +576,24 @@ let test_validate_backend_rejects_id_and_capability_mismatches () =
     true
     (Result.is_error
        (Runtime_bootstrap.validate_backend ~descriptor ~backend:wrong_native)) ;
+  let positive_descriptor = descriptor_for ~read_only:true "capability-snapshot" in
+  let conservative_runtime_capabilities =
+    {
+      positive_descriptor.capabilities with
+      Backend_registry.read_only_support = false;
+    }
+  in
+  Alcotest.(check bool)
+    "full runtime capability mismatch rejected"
+    true
+    (match
+       Runtime_bootstrap.validate_backend_capabilities
+         ~runtime_capabilities:conservative_runtime_capabilities
+         ~descriptor:positive_descriptor
+         ~backend:(make_backend "capability-snapshot")
+     with
+    | Error Runtime_bootstrap.Runtime_capabilities_mismatch -> true
+    | _ -> false) ;
   let malformed_baseline =
     {descriptor with Backend_registry.baseline_version = "release-latest"}
   in
@@ -527,6 +625,40 @@ let test_custom_registration_is_atomic () =
     "custom descriptor registered"
     true
     (Option.is_some (Backend_registry.find success_id)) ;
+  let success_entry = validated_entry success_id in
+  Alcotest.(check bool)
+    "custom registration records explicit origin"
+    true
+    (success_entry.origin = Runtime_entry.Custom) ;
+  Alcotest.(check bool)
+    "custom registration safely enforces baseline by default"
+    true
+    (success_entry.version_policy = Runtime_entry.Enforce_baseline) ;
+  Alcotest.(check bool)
+    "custom runtime snapshot matches its effective descriptor"
+    true
+    (success_entry.runtime_capabilities = success_descriptor.capabilities) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let limits : Task_preflight.limits =
+    {max_attachments = 0; max_file_size_bytes = 0; max_total_size_bytes = 0}
+  in
+  let spec =
+    Backend_types.make_task_spec ~prompt:"custom" ~working_dir:"." ()
+  in
+  (match
+     Runtime_dispatch.run_task
+       ~sw
+       ~env
+       ~limits
+       ~backend_id:success_id
+       spec
+   with
+  | Ok _ -> ()
+  | Error error ->
+      Alcotest.failf
+        "validated custom pair did not dispatch: %s"
+        (Runtime_dispatch.render_error error)) ;
 
   let mismatch_id = "custom-atomic-mismatch" in
   let mismatch_descriptor = descriptor_for ~session_resume:true mismatch_id in
@@ -625,11 +757,7 @@ let test_custom_registration_is_atomic () =
   Alcotest.(check bool)
     "built-in collision leaves runtime absent"
     true
-    (Option.is_none (Registry.get "claude-code")) ;
-  Alcotest.(check bool)
-    "custom backend origin is explicit"
-    true
-    (Agentic_backend.implementation_origin success_backend = Agentic_backend.Custom)
+    (Option.is_none (Registry.get "claude-code"))
 
 let () =
   Alcotest.run
@@ -665,13 +793,13 @@ let () =
             `Quick
             test_extensible_preserves_global_project_precedence;
           Alcotest.test_case
-            "descriptor installation failure is atomic"
+            "YAML does not inherit host catalog descriptor"
             `Quick
-            test_extensible_descriptor_failure_is_atomic;
+            test_extensible_yaml_does_not_inherit_host_catalog_descriptor;
           Alcotest.test_case
-            "built-in YAML mismatch fails closed"
+            "built-in YAML override is conservative"
             `Quick
-            test_extensible_builtin_override_mismatch_fails_closed;
+            test_extensible_builtin_yaml_override_is_conservative;
         ] );
       ( "validation and custom registration",
         [

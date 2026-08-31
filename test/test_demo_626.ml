@@ -52,7 +52,6 @@ let make_mock ~supports_resume ~responses =
 
     let name = "Test Mock Backend"
 
-    let implementation_origin = Agentic_backend.Custom
 
     let models = []
 

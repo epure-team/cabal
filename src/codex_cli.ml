@@ -11,8 +11,6 @@ let id = "codex"
 
 let name = "OpenAI Codex"
 
-let implementation_origin = Agentic_backend.Handwritten
-
 (* Static fallback — used when OPENAI_API_KEY is absent or the probe fails. *)
 let models =
   ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]

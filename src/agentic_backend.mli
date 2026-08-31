@@ -34,13 +34,6 @@ type config_check_result =
       (** No deterministic validation is available in the current environment.
           The string documents why the check was skipped. *)
 
-(** Provenance of a runtime implementation. This describes code origin, not
-    descriptor trust or registration ownership. *)
-type implementation_origin =
-  | Handwritten  (** One of Cabal's native, backend-specific implementations. *)
-  | Yaml  (** The generic {!Yaml_adapter} implementation. *)
-  | Custom  (** A host-supplied, test, or other non-built-in implementation. *)
-
 (** {1 Module Type} *)
 
 (** The signature that all agentic backends must implement. *)
@@ -50,9 +43,6 @@ module type S = sig
 
   (** Human-readable name for this backend (e.g., "Claude Code"). *)
   val name : string
-
-  (** Unambiguous implementation provenance for bootstrap/runtime inspection. *)
-  val implementation_origin : implementation_origin
 
   (** Model identifiers this backend declares as selectable. The list is
       advisory: an empty list means "let the adapter pick its default", and
@@ -173,10 +163,6 @@ val id : t -> string
     (none)
 *)
 val name : t -> string
-
-(** [implementation_origin backend] returns the implementation provenance
-    declared by [backend]. *)
-val implementation_origin : t -> implementation_origin
 
 (** [models backend] returns the model list declared by [backend], or [] when
     unset.

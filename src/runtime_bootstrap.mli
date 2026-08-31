@@ -10,8 +10,8 @@
     [Extensible] preserves {!Adapter_loader.register_all} precedence and probe
     behavior. [Hardened_builtins] ignores user/project adapters, stages only the
     six approved embedded ids, replaces the five handwritten implementations,
-    validates the final runtime/descriptor pairs, and commits only after the
-    complete set passes validation.
+    validates each against an independent full runtime-capability mapping and
+    approved static descriptor, and atomically publishes the complete set.
 
     Registry state is startup state for one OCaml domain. Bootstrap and custom
     registration must finish before concurrent task execution. *)
@@ -33,7 +33,7 @@ type option_error =
           which would change [Adapter_loader.register_all] semantics. *)
 
 (** Structural runtime/descriptor inconsistency. *)
-type validation_error =
+type validation_error = Runtime_entry.validation_error =
   | Invalid_runtime_id
   | Runtime_id_mismatch
   | Invalid_runtime_display_name
@@ -41,6 +41,7 @@ type validation_error =
   | Invalid_descriptor_binary_name
   | Invalid_descriptor_baseline_version
   | Descriptor_evidence_invalid of Task_preflight.error
+  | Runtime_capabilities_mismatch
   | Session_resume_mismatch
   | Native_json_schema_output_mismatch
 
@@ -66,11 +67,20 @@ val render_error : error -> string
     syntax accepted by bootstrap and by-name routing. *)
 val valid_runtime_id : string -> bool
 
-(** [validate_backend ~descriptor ~backend] verifies exact id equality,
-    display/binary/version structure, descriptor evidence invariants, and every
-    capability represented by {!Agentic_backend.S}: session resume and native
-    JSON schema output. It performs no I/O or registry mutation. *)
+(** [validate_backend ~descriptor ~backend] delegates to {!Runtime_entry.create}
+    and discards the resulting token. For source compatibility, it treats
+    [descriptor.capabilities] as an explicit caller attestation. It performs no
+    I/O or registry mutation. *)
 val validate_backend :
+  descriptor:Backend_registry.descriptor ->
+  backend:Agentic_backend.t ->
+  (unit, validation_error) result
+
+(** [validate_backend_capabilities] additionally requires an independently
+    supplied full runtime capability snapshot and checks exact equality with the
+    effective descriptor. *)
+val validate_backend_capabilities :
+  runtime_capabilities:Backend_registry.capabilities ->
   descriptor:Backend_registry.descriptor ->
   backend:Agentic_backend.t ->
   (unit, validation_error) result
@@ -79,18 +89,20 @@ val validate_backend :
     composes and registers a runtime.
 
     [Extensible] calls {!Adapter_loader.register_all} with embedded → global →
-    project precedence, including conservative descriptors for non-built-in YAML
-    adapters and immutable built-in/host descriptor ownership. Supplying [sw]
-    and [env] preserves its current automatic probe behavior; explicitly
-    disabling probes in that combination is rejected rather than silently
-    changing semantics.
+    project precedence. Every YAML runtime, including a built-in-id override,
+    binds a conservative effective descriptor and explicit
+    {!Runtime_entry.No_version_gate} policy without mutating or inheriting the
+    static descriptor catalog. Supplying [sw] and [env] preserves its current
+    automatic probe behavior; explicitly disabling probes in that combination
+    is rejected rather than silently changing semantics.
 
     [Hardened_builtins] requires an empty {!Registry}, never reads [HOME] or
     [project_dir], and disables model probes unless [probe_models=true] is
     explicitly paired with both [sw] and [env]. Static version metadata is
     validated, but no CLI installation, authentication, or network access is
-    required when probes are disabled. Any pre-commit failure leaves runtime
-    and descriptor registries unchanged. *)
+    required when probes are disabled. Approved entries use
+    {!Runtime_entry.Enforce_baseline}. Any pre-commit failure leaves runtime and
+    descriptor registries unchanged. *)
 val register_runtime :
   ?project_dir:string ->
   ?sw:Eio.Switch.t ->
@@ -101,12 +113,16 @@ val register_runtime :
   (unit, error) result
 
 (** [register_custom ~descriptor ~backend] additively registers one custom
-    runtime/descriptor pair. The pair is fully validated before either registry
-    is mutated. Existing runtime ids and built-in/additive descriptor ids are
-    collisions and are never replaced.
+    runtime/descriptor pair. The explicit host descriptor is also its complete
+    runtime-capability attestation; entry construction validates all structure,
+    evidence, and module-represented booleans before mutation. Custom entries use
+    the safe {!Runtime_entry.Enforce_baseline} default. Existing runtime ids and
+    built-in/additive descriptor ids are collisions and are never replaced.
 
     Registration is an explicit startup operation on single-domain registry
-    state; it must not race with other registry mutations. *)
+    state; it must not race with other registry mutations. The catalog is added
+    only after token construction; committing that already validated immutable
+    token to {!Registry} is a no-fail whole-entry mutation. *)
 val register_custom :
   descriptor:Backend_registry.descriptor ->
   backend:Agentic_backend.t ->

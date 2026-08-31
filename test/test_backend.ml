@@ -19,8 +19,6 @@ module Mock_backend : Agentic_backend.S = struct
 
   let name = "Mock Backend"
 
-  let implementation_origin = Agentic_backend.Custom
-
   let models : string list = []
 
   let models_probe = None
@@ -66,8 +64,6 @@ module Unavailable_backend : Agentic_backend.S = struct
   let id = "unavailable"
 
   let name = "Unavailable Backend"
-
-  let implementation_origin = Agentic_backend.Custom
 
   let models : string list = []
 
@@ -574,13 +570,6 @@ let test_backend_name () =
   let backend = (module Mock_backend : Agentic_backend.S) in
   Alcotest.(check string) "name" "Mock Backend" (Agentic_backend.name backend)
 
-let test_backend_implementation_origin () =
-  let backend = (module Mock_backend : Agentic_backend.S) in
-  Alcotest.(check bool)
-    "custom origin"
-    true
-    (Agentic_backend.implementation_origin backend = Agentic_backend.Custom)
-
 let test_backend_available () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -646,7 +635,6 @@ let agentic_backend_tests =
   [
     ("backend id", `Quick, test_backend_id);
     ("backend name", `Quick, test_backend_name);
-    ("backend implementation origin", `Quick, test_backend_implementation_origin);
     ("backend available", `Quick, test_backend_available);
     ("backend unavailable", `Quick, test_backend_unavailable);
     ("backend run_task", `Quick, test_backend_run_task);

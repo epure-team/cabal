@@ -102,17 +102,16 @@ val resolve_registered_model_probes :
     2. User-global overrides: [~/.cabal/adapters/*.yaml]
     3. Project-local overrides: [.cabal/adapters/*.yaml] (highest priority)
 
-    Later registrations for the same [name] replace earlier loader-owned pairs.
-    For each non-built-in YAML id, the loader first installs or updates a
-    conservative descriptor (no media, web, native-schema, resume, or read-only
-    claims) and only then installs the runtime, so descriptor ownership failures
-    cannot leave a runtime-only partial pair. Global → project precedence applies
-    to both runtime and loader-owned descriptor metadata.
-
-    Built-in descriptors remain immutable. User/project YAML overrides of a
-    built-in must match its binary identity and runtime-represented capabilities;
-    mismatches are rejected while the previous runtime remains installed.
-    Errors from individual files are reported but do not abort other files.
+    Later registrations for the same [name] atomically replace the complete
+    earlier validated entry. Every generic YAML runtime binds a conservative
+    effective descriptor (no structured/streaming/media/web/native-schema/resume/
+    read-only/MCP/config/file-reading claims) and
+    {!Runtime_entry.No_version_gate}. This applies equally to custom ids and
+    built-in-id overrides, so YAML never inherits the approved static catalog's
+    positive claims. Global → project precedence replaces backend, effective
+    descriptor, origin, and policy together. The static descriptor catalog is
+    not mutated. Errors from individual files leave the previous entry unchanged
+    and do not abort other files.
 
     When [~sw] and [~env] are both supplied, every registered backend that
     declares a [models_probe] is invoked under exception protection and the

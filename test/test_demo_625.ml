@@ -49,7 +49,6 @@ let make_native_mock ?(supports_resume = false) ~responses () =
 
     let name = "Test Native Mock Backend"
 
-    let implementation_origin = Agentic_backend.Custom
 
     let models = []
 

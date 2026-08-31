@@ -11,8 +11,6 @@ let id = "copilot-cli"
 
 let name = "GitHub Copilot"
 
-let implementation_origin = Agentic_backend.Handwritten
-
 (* GitHub Copilot CLI is a meta-CLI that proxies to several upstream model
    providers; we expose the canonical pair selectable via its --model flag. *)
 let models =

@@ -19,15 +19,25 @@
 
 (** {1 Registration} *)
 
-(** [register backend] adds a backend to the registry. If a backend with
-    the same ID already exists, it is replaced (with a warning).
+(** Trust state stored for one backend id. *)
+type entry =
+  | Raw of Agentic_backend.t
+      (** Legacy runtime-only registration. Central dispatch must reject it. *)
+  | Validated of Runtime_entry.t
+      (** Immutable backend/descriptor/capability/origin/version-policy binding. *)
+
+(** [register backend] adds a legacy raw backend. If the same ID already has a
+    validated entry, the entire entry is replaced and its trusted descriptor,
+    provenance, capability snapshot, and version policy are discarded. This
+    preserves low-level compatibility without allowing a runtime-only override
+    to inherit trusted dispatch metadata.
 
     {pre}
     (none)
 
     {post}
-    Adds [backend] to the global registry; replaces any existing backend
-    with the same ID and logs a warning.
+    Adds [backend] as {!Raw}; replaces any existing entry with the same ID and
+    logs a warning.
 
     {violators}
     (none)
@@ -36,13 +46,23 @@
     (none) *)
 val register : Agentic_backend.t -> unit
 
-(** [register_from_adapter_loader backend] installs or replaces a YAML runtime
-    without emitting replacement diagnostics. This narrow startup primitive is
-    reserved for {!Adapter_loader}'s descriptor/runtime pair transaction, after
-    descriptor ownership validation has succeeded. *)
-val register_from_adapter_loader : Agentic_backend.t -> unit
+(** [register_validated entry] atomically installs or replaces one complete
+    entry previously constructed by {!Runtime_entry.create}. No independent
+    descriptor lookup participates in later dispatch. This is a narrow startup
+    primitive for {!Runtime_bootstrap} and {!Adapter_loader}. *)
+val register_validated : Runtime_entry.t -> unit
+
+(** [replace_all_validated entries] builds replacement registry/model tables
+    off to the side and publishes both plus deterministic order as one logical
+    single-domain startup mutation. All entries must have distinct ids. *)
+val replace_all_validated : Runtime_entry.t list -> unit
 
 (** {1 Lookup} *)
+
+(** [find_entry id] returns the complete raw or validated registration snapshot
+    for [id]. Central dispatch uses this single lookup rather than combining
+    independently mutable runtime and descriptor registries. *)
+val find_entry : string -> entry option
 
 (** [get id] returns the backend with the given ID, or [None] if not found.
 

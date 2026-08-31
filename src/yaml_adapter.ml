@@ -18,10 +18,12 @@ type config = {
   models : string list;
 }
 
-(* Preserve the exact generated package/config association. Keying only by id
-   misclassified handwritten replacements whenever a YAML config with the same
-   id had been loaded earlier. *)
+(* Preserve only the latest exact package/config association per id. Physical
+   package identity avoids misclassifying handwritten replacements, while
+   same-id replacement and [Registry.clear] keep retention lifecycle-bounded. *)
 let backend_configs : (Agentic_backend.t * config) list ref = ref []
+
+let clear_config_cache () = backend_configs := []
 
 let invocation_argv cfg =
   List.filter
@@ -116,8 +118,6 @@ let make_backend (cfg : config) : Agentic_backend.t =
 
     let name = cfg.display_name
 
-    let implementation_origin = Agentic_backend.Yaml
-
     let models = cfg.models
 
     (* YAML-loaded adapters declare a static list only — they have no
@@ -186,7 +186,11 @@ let make_backend (cfg : config) : Agentic_backend.t =
       else first
   end in
   let backend = (module M : Agentic_backend.S) in
-  backend_configs := (backend, cfg) :: !backend_configs ;
+  backend_configs :=
+    (backend, cfg)
+    :: List.filter
+         (fun (_, existing) -> existing.name <> cfg.name)
+         !backend_configs ;
   backend
 
 let config_of backend =

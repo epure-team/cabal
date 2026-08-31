@@ -74,6 +74,10 @@ val binary_name : config -> string option
     (none) *)
 val config_of : Agentic_backend.t -> config option
 
+(** [clear_config_cache ()] releases loader package/config associations.
+    {!Registry.clear} calls this as part of its test/reset lifecycle. *)
+val clear_config_cache : unit -> unit
+
 (** [parse_pi_json_events stdout] extracts the assistant's answer from Pi's
     NDJSON [--mode json] stream, keeping text blocks only so a caller never
     receives the reasoning or event stream.

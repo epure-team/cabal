@@ -13,7 +13,9 @@
 
     Static facts (what Épure supports at the stable baseline) live here.
     Runtime detection (installed version, available binary) is separate and
-    never mutates this data.
+    never mutates this data. Central dispatch does not independently consult this
+    catalog: it uses the effective descriptor bound into a validated
+    {!Registry.entry} snapshot.
 
     Note that [Adapter_loader.register_all ()] remains the extensible YAML-only
     loader. Hosts and tests that need strict built-in runtime semantics should
@@ -172,7 +174,6 @@ type unsupported_capability_note = {
 
     Not reflected in [all ()] or [read_only_safe_backend_ids ()], which remain
     built-in-only. Affects [find] and all capability queries ([supports_*]).
-    Loader-owned YAML descriptors use a separate, replacement-restricted path.
 
     Idempotent: re-registering the same [d.id] is a no-op. Not thread-safe;
     intended for single-threaded startup or test setup. New production code
@@ -193,24 +194,6 @@ type descriptor_registration_error = Descriptor_id_already_registered
     @return [Error Descriptor_id_already_registered] on any collision. *)
 val add_descriptor :
   descriptor -> (unit, descriptor_registration_error) result
-
-(** Loader-owned descriptor update failure. *)
-type yaml_descriptor_registration_error =
-  | Immutable_builtin_descriptor
-      (** Built-in descriptors are immutable and cannot be replaced by YAML. *)
-  | Descriptor_not_owned_by_yaml_loader
-      (** The id belongs to a compatibility or explicit host descriptor. *)
-
-(** [upsert_yaml_descriptor descriptor] installs metadata for a non-built-in
-    YAML adapter, or replaces metadata previously installed by this same loader.
-    It never replaces a built-in, compatibility, or host-custom descriptor.
-
-    This is a loader trust boundary, not a general descriptor replacement API.
-    The adapter loader validates and constructs its conservative descriptor
-    before calling it. Typed failures do not mutate descriptor state. Registry
-    mutation remains single-domain startup state. *)
-val upsert_yaml_descriptor :
-  descriptor -> (unit, yaml_descriptor_registration_error) result
 
 (** [all ()] returns descriptors for all built-in backends in canonical order.
 
@@ -235,7 +218,7 @@ val all : unit -> descriptor list
 
     {post}
     Returns [Some desc] when [id] matches a built-in backend or an extra
-    compatibility, host-custom, or loader-owned YAML descriptor. Returns [None]
+    compatibility or host-custom descriptor. Returns [None]
     otherwise.
     Lookup is O(n) over the built-in list then O(m) over extra descriptors.
 

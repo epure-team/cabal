@@ -11,8 +11,6 @@ let id = "gemini-cli"
 
 let name = "Gemini CLI"
 
-let implementation_origin = Agentic_backend.Handwritten
-
 (* Static fallback — used when GOOGLE_API_KEY / GEMINI_API_KEY is absent. *)
 let models = ["gemini-2.5-pro"; "gemini-2.5-flash"; "gemini-2.0-flash"]
 

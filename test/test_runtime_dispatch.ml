@@ -73,7 +73,6 @@ let make_backend ?(session_resume = false) ?(native = false) ?availability ~id
   let module Backend = struct
     let id = id
     let name = "Dispatch test backend"
-    let implementation_origin = Agentic_backend.Custom
     let models = []
     let models_probe = None
 
@@ -98,7 +97,8 @@ let with_registry f =
   Fun.protect ~finally:Registry.clear f
 
 let register_pair ?session_resume ?native ?read_only ?binary_name
-    ?baseline_version ~id backend =
+    ?baseline_version ?(origin = Runtime_entry.Custom)
+    ?(version_policy = Runtime_entry.Enforce_baseline) ~id backend =
   let descriptor =
     descriptor_for
       ?session_resume
@@ -108,8 +108,20 @@ let register_pair ?session_resume ?native ?read_only ?binary_name
       ?baseline_version
       id
   in
-  Backend_registry.register_descriptor descriptor ;
-  Registry.register backend
+  let entry =
+    match
+      Runtime_entry.create
+        ~backend
+        ~descriptor
+        ~runtime_capabilities:descriptor.capabilities
+        ~origin
+        ~version_policy
+    with
+    | Ok entry -> entry
+    | Error error ->
+        Alcotest.fail (Runtime_entry.render_validation_error error)
+  in
+  Registry.register_validated entry
 
 let rec remove_tree path =
   if Sys.file_exists path then
@@ -124,6 +136,18 @@ let with_temp_dir label f =
   Fun.protect
     ~finally:(fun () -> remove_tree path)
     (fun () -> f path)
+
+let with_path_prefix directory f =
+  let previous = Sys.getenv_opt "PATH" in
+  let path =
+    match previous with
+    | Some value when value <> "" -> directory ^ ":" ^ value
+    | _ -> directory
+  in
+  Unix.putenv "PATH" path ;
+  Fun.protect
+    ~finally:(fun () -> Unix.putenv "PATH" (Option.value ~default:"" previous))
+    f
 
 let write_executable path contents =
   let channel = open_out path in
@@ -148,49 +172,64 @@ let spec ?(working_dir = ".") ?(read_only = false) ?resume_session_id
 let run ~env ~sw ~backend_id ?(limits = limits) spec =
   Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id spec
 
-let test_missing_runtime_and_descriptor_fail_before_call () =
+let test_missing_and_raw_registrations_fail_before_call () =
   with_registry @@ fun () ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let calls = ref 0 in
   let runtime_missing_id = "dispatch-runtime-missing" in
   Backend_registry.register_descriptor (descriptor_for runtime_missing_id) ;
-  let result = run ~env ~sw ~backend_id:runtime_missing_id (spec ()) in
-  Alcotest.(check bool) "missing runtime fails" true (Result.is_error result) ;
-  let descriptor_missing_id = "dispatch-descriptor-missing" in
+  (match run ~env ~sw ~backend_id:runtime_missing_id (spec ()) with
+  | Error Runtime_dispatch.Backend_not_registered -> ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected missing-runtime error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "missing runtime must fail") ;
+  let raw_id = "dispatch-raw-runtime" in
   Registry.register
     (make_backend
-       ~id:descriptor_missing_id
+       ~id:raw_id
        ~calls
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
-  let result = run ~env ~sw ~backend_id:descriptor_missing_id (spec ()) in
-  Alcotest.(check bool)
-    "missing descriptor fails"
-    true
-    (Result.is_error result) ;
+  (match run ~env ~sw ~backend_id:raw_id (spec ()) with
+  | Error Runtime_dispatch.Runtime_registration_untrusted -> ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected raw-registration error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "raw registration must fail") ;
   Alcotest.(check int) "backend never called" 0 !calls
 
-let test_runtime_descriptor_mismatches_fail_before_call () =
+let test_runtime_descriptor_mismatches_cannot_be_registered () =
   with_registry @@ fun () ->
-  Eio_posix.run @@ fun env ->
-  Eio.Switch.run @@ fun sw ->
   let session_calls = ref 0 in
   let availability_calls = ref 0 in
   let session_id = "dispatch-session-mismatch" in
-  register_pair
-    ~session_resume:true
-    ~id:session_id
-    (make_backend
-       ~id:session_id
-       ~calls:session_calls
-       ~availability:(fun ~sw:_ ~env:_ ->
-         incr availability_calls ;
-         failwith "availability must not run for a mismatched runtime")
-       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+  let session_descriptor = descriptor_for ~session_resume:true session_id in
+  let session_backend =
+    make_backend
+      ~id:session_id
+      ~calls:session_calls
+      ~availability:(fun ~sw:_ ~env:_ ->
+        incr availability_calls ;
+        failwith "availability must not run for a mismatched runtime")
+      (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())
+  in
   Alcotest.(check bool)
-    "session mismatch fails"
+    "session mismatch cannot produce a validated entry"
     true
-    (Result.is_error (run ~env ~sw ~backend_id:session_id (spec ()))) ;
+    (Result.is_error
+       (Runtime_entry.create
+          ~backend:session_backend
+          ~descriptor:session_descriptor
+          ~runtime_capabilities:session_descriptor.capabilities
+          ~origin:Runtime_entry.Custom
+          ~version_policy:Runtime_entry.Enforce_baseline)) ;
+  Alcotest.(check bool)
+    "session mismatch leaves registry empty"
+    true
+    (Option.is_none (Registry.find_entry session_id)) ;
   Alcotest.(check int) "session mismatch call count" 0 !session_calls ;
   Alcotest.(check int)
     "mismatch rejected before availability"
@@ -199,18 +238,88 @@ let test_runtime_descriptor_mismatches_fail_before_call () =
 
   let native_calls = ref 0 in
   let native_id = "dispatch-native-mismatch" in
-  register_pair
-    ~native:true
-    ~id:native_id
-    (make_backend
-       ~id:native_id
-       ~calls:native_calls
-       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+  let native_descriptor = descriptor_for ~native:true native_id in
+  let native_backend =
+    make_backend
+      ~id:native_id
+      ~calls:native_calls
+      (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())
+  in
   Alcotest.(check bool)
-    "native mismatch fails"
+    "native mismatch cannot produce a validated entry"
     true
-    (Result.is_error (run ~env ~sw ~backend_id:native_id (spec ()))) ;
+    (Result.is_error
+       (Runtime_entry.create
+          ~backend:native_backend
+          ~descriptor:native_descriptor
+          ~runtime_capabilities:native_descriptor.capabilities
+          ~origin:Runtime_entry.Custom
+          ~version_policy:Runtime_entry.Enforce_baseline)) ;
   Alcotest.(check int) "native mismatch call count" 0 !native_calls
+
+let test_raw_claude_override_invalidates_validated_pair () =
+  with_registry @@ fun () ->
+  with_temp_dir "raw-claude-override" @@ fun temp_dir ->
+  let version_marker = Filename.concat temp_dir "version-process-ran" in
+  let fake_claude = Filename.concat temp_dir "claude" in
+  write_executable
+    fake_claude
+    (Printf.sprintf
+       "#!/bin/sh\nprintf 'spawned\\n' >> %s\nprintf '%%s\\n' '99.0.0'\n"
+       (Filename.quote version_marker)) ;
+  with_path_prefix temp_dir @@ fun () ->
+  (match
+     Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins
+       ()
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
+  let static_claude =
+    match Backend_registry.find "claude-code" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "static Claude descriptor missing"
+  in
+  Alcotest.(check bool)
+    "attack precondition has positive read-only claim"
+    true
+    static_claude.capabilities.read_only_support ;
+  Alcotest.(check bool)
+    "attack precondition has positive file-reading claim"
+    true
+    static_claude.capabilities.file_reading ;
+  let availability_calls = ref 0 in
+  let backend_calls = ref 0 in
+  Registry.register
+    (make_backend
+       ~session_resume:true
+       ~native:true
+       ~id:"claude-code"
+       ~calls:backend_calls
+       ~availability:(fun ~sw:_ ~env:_ ->
+         incr availability_calls ;
+         true)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+  (match Registry.find_entry "claude-code" with
+  | Some (Registry.Raw _) -> ()
+  | Some (Registry.Validated _) ->
+      Alcotest.fail "raw override retained the validated Claude pairing"
+  | None -> Alcotest.fail "raw override was not registered") ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  (match run ~env ~sw ~backend_id:"claude-code" (spec ~read_only:true ()) with
+  | Error Runtime_dispatch.Runtime_registration_untrusted -> ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected raw-override error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "raw same-id override inherited trusted capabilities") ;
+  Alcotest.(check bool)
+    "raw override rejected before version process"
+    false
+    (Sys.file_exists version_marker) ;
+  Alcotest.(check int) "raw override availability calls" 0 !availability_calls ;
+  Alcotest.(check int) "raw override backend calls" 0 !backend_calls
 
 let test_invalid_preflight_never_spawns_or_calls_backend () =
   with_registry @@ fun () ->
@@ -425,7 +534,7 @@ let test_by_name_wrapper_resolves_override_at_each_call () =
         captured := Some task ;
         success ~text:"second" ())
   in
-  Registry.register second ;
+  register_pair ~id second ;
   (match
      completer
        ~system_prompt:"system"
@@ -547,6 +656,50 @@ let test_dispatch_enforces_installed_version_policy () =
     ~expected_ok:true ;
   run_case ~label:"missing" ~version_output:None ~expected_ok:true
 
+let test_hardened_below_baseline_stops_before_backend () =
+  with_registry @@ fun () ->
+  with_temp_dir "hardened-version" @@ fun temp_dir ->
+  let version_marker = Filename.concat temp_dir "version-probed" in
+  let backend_marker = Filename.concat temp_dir "backend-ran" in
+  let fake_claude = Filename.concat temp_dir "claude" in
+  write_executable
+    fake_claude
+    (Printf.sprintf
+       "#!/bin/sh\nif [ \"${1-}\" = \"--version\" ]; then\n  printf 'version\\n' >> %s\n  printf '%%s\\n' '2.1.116'\nelse\n  printf 'backend\\n' >> %s\n  printf '%%s\\n' '{}'\nfi\n"
+       (Filename.quote version_marker)
+       (Filename.quote backend_marker)) ;
+  with_path_prefix temp_dir @@ fun () ->
+  (match
+     Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins
+       ()
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  (match
+     run
+       ~env
+       ~sw
+       ~backend_id:"claude-code"
+       (spec ~working_dir:temp_dir ())
+   with
+  | Error Runtime_dispatch.Backend_version_unsupported -> ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected hardened version error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "below-baseline hardened backend must not run") ;
+  Alcotest.(check bool)
+    "hardened version gate ran"
+    true
+    (Sys.file_exists version_marker) ;
+  Alcotest.(check bool)
+    "hardened backend did not run"
+    false
+    (Sys.file_exists backend_marker)
+
 let test_dispatch_sanitizes_backend_exceptions () =
   with_registry @@ fun () ->
   Eio_posix.run @@ fun env ->
@@ -591,6 +744,68 @@ let test_dispatch_sanitizes_backend_exceptions () =
   assert_sanitized "run_task" (run ~env ~sw ~backend_id:run_id (spec ())) ;
   Alcotest.(check int) "run attempted once" 1 !run_calls
 
+let test_dispatch_reraises_fatal_exceptions () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let fatal_cases =
+    [
+      ("out-of-memory", Out_of_memory);
+      ("stack-overflow", Stack_overflow);
+      ("sys-break", Sys.Break);
+    ]
+  in
+  let same_fatal expected actual =
+    match expected, actual with
+    | Out_of_memory, Out_of_memory
+    | Stack_overflow, Stack_overflow
+    | Sys.Break, Sys.Break ->
+        true
+    | _ -> false
+  in
+  let expect_fatal label expected invoke =
+    match invoke () with
+    | exception actual when same_fatal expected actual -> ()
+    | exception actual ->
+        Alcotest.failf
+          "%s raised the wrong exception: %s"
+          label
+          (Printexc.to_string actual)
+    | Ok _ -> Alcotest.failf "%s unexpectedly succeeded" label
+    | Error error ->
+        Alcotest.failf
+          "%s was sanitized as %s"
+          label
+          (Runtime_dispatch.render_error error)
+  in
+  List.iter
+    (fun (label, fatal) ->
+      let availability_id = "dispatch-fatal-availability-" ^ label in
+      register_pair
+        ~id:availability_id
+        (make_backend
+           ~id:availability_id
+           ~calls:(ref 0)
+           ~availability:(fun ~sw:_ ~env:_ -> raise fatal)
+           (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+      expect_fatal
+        (label ^ " availability")
+        fatal
+        (fun () -> run ~env ~sw ~backend_id:availability_id (spec ())) ;
+
+      let execution_id = "dispatch-fatal-execution-" ^ label in
+      register_pair
+        ~id:execution_id
+        (make_backend
+           ~id:execution_id
+           ~calls:(ref 0)
+           (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> raise fatal)) ;
+      expect_fatal
+        (label ^ " execution")
+        fatal
+        (fun () -> run ~env ~sw ~backend_id:execution_id (spec ())))
+    fatal_cases
+
 let test_dispatch_preserves_cancellation () =
   with_registry @@ fun () ->
   Eio_posix.run @@ fun env ->
@@ -626,7 +841,13 @@ let test_validator_wrapper_dispatches_read_only_task () =
         captured := Some task ;
         success ())
   in
-  register_pair ~read_only:true ~id backend ;
+  (match
+     Runtime_bootstrap.register_custom
+       ~descriptor:(descriptor_for ~read_only:true id)
+       ~backend
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
   let completer =
     match
       Backend_completer.make_validator_by_name
@@ -661,13 +882,17 @@ let () =
       ( "preflight",
         [
           Alcotest.test_case
-            "missing runtime/descriptor fail before call"
+            "missing and raw registrations fail before call"
             `Quick
-            test_missing_runtime_and_descriptor_fail_before_call;
+            test_missing_and_raw_registrations_fail_before_call;
           Alcotest.test_case
-            "runtime/descriptor mismatches fail before call"
+            "runtime/descriptor mismatches cannot register"
             `Quick
-            test_runtime_descriptor_mismatches_fail_before_call;
+            test_runtime_descriptor_mismatches_cannot_be_registered;
+          Alcotest.test_case
+            "raw Claude override invalidates validated pairing"
+            `Quick
+            test_raw_claude_override_invalidates_validated_pair;
           Alcotest.test_case
             "invalid preflight never spawns or calls"
             `Quick
@@ -692,9 +917,17 @@ let () =
             `Quick
             test_dispatch_enforces_installed_version_policy;
           Alcotest.test_case
+            "hardened below-baseline backend is blocked"
+            `Quick
+            test_hardened_below_baseline_stops_before_backend;
+          Alcotest.test_case
             "ordinary backend exceptions are sanitized"
             `Quick
             test_dispatch_sanitizes_backend_exceptions;
+          Alcotest.test_case
+            "fatal backend exceptions are re-raised"
+            `Quick
+            test_dispatch_reraises_fatal_exceptions;
           Alcotest.test_case
             "cancellation propagates"
             `Quick

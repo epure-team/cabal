@@ -12,7 +12,7 @@ type option_error =
   | Probe_context_required
   | Extensible_probe_override_conflict
 
-type validation_error =
+type validation_error = Runtime_entry.validation_error =
   | Invalid_runtime_id
   | Runtime_id_mismatch
   | Invalid_runtime_display_name
@@ -20,6 +20,7 @@ type validation_error =
   | Invalid_descriptor_binary_name
   | Invalid_descriptor_baseline_version
   | Descriptor_evidence_invalid of Task_preflight.error
+  | Runtime_capabilities_mismatch
   | Session_resume_mismatch
   | Native_json_schema_output_mismatch
 
@@ -33,22 +34,7 @@ type error =
   | Custom_runtime_id_collision
   | Custom_descriptor_id_collision
 
-let render_validation_error = function
-  | Invalid_runtime_id -> "runtime backend id is structurally invalid"
-  | Runtime_id_mismatch -> "runtime backend id does not match its descriptor"
-  | Invalid_runtime_display_name ->
-      "runtime backend display name is structurally invalid"
-  | Invalid_descriptor_display_name ->
-      "backend descriptor display name is structurally invalid"
-  | Invalid_descriptor_binary_name ->
-      "backend descriptor binary name is structurally invalid"
-  | Invalid_descriptor_baseline_version ->
-      "backend descriptor baseline version must be major.minor.patch"
-  | Descriptor_evidence_invalid error -> Task_preflight.render_error error
-  | Session_resume_mismatch ->
-      "runtime and descriptor session-resume capabilities differ"
-  | Native_json_schema_output_mismatch ->
-      "runtime and descriptor native JSON schema capabilities differ"
+let render_validation_error = Runtime_entry.render_validation_error
 
 let render_error = function
   | Invalid_options Incomplete_eio_context ->
@@ -70,56 +56,25 @@ let render_error = function
   | Custom_descriptor_id_collision ->
       "a backend descriptor with this id is already registered"
 
-let nonempty_text value =
-  String.trim value <> ""
-  && String.for_all
-       (fun character ->
-         let code = Char.code character in
-         code >= 0x20 && code <> 0x7f)
-       value
-
-let valid_runtime_id value =
-  nonempty_text value
-  && value = String.trim value
-  && String.length value <= 128
-  && String.for_all
-       (function
-         | 'a' .. 'z' | '0' .. '9' | '-' | '_' | '.' -> true
-         | _ -> false)
-       value
+let valid_runtime_id = Runtime_entry.valid_runtime_id
 
 let ( let* ) result continuation = Result.bind result continuation
 
+let validate_backend_capabilities ~runtime_capabilities ~descriptor ~backend =
+  Result.map
+    (fun _ -> ())
+    (Runtime_entry.create
+       ~backend
+       ~descriptor
+       ~runtime_capabilities
+       ~origin:Runtime_entry.Custom
+       ~version_policy:Runtime_entry.Enforce_baseline)
+
 let validate_backend ~descriptor ~backend =
-  let runtime_id = Agentic_backend.id backend in
-  if not (valid_runtime_id runtime_id) then Error Invalid_runtime_id
-  else if runtime_id <> descriptor.Backend_registry.id then
-    Error Runtime_id_mismatch
-  else if not (nonempty_text (Agentic_backend.name backend)) then
-    Error Invalid_runtime_display_name
-  else if not (nonempty_text descriptor.display_name) then
-    Error Invalid_descriptor_display_name
-  else if not (nonempty_text descriptor.binary_name) then
-    Error Invalid_descriptor_binary_name
-  else if
-    not (Backend_version.is_valid_version_string descriptor.baseline_version)
-  then
-    Error Invalid_descriptor_baseline_version
-  else
-    let* () =
-      match Task_preflight.validate_descriptor descriptor with
-      | Ok () -> Ok ()
-      | Error error -> Error (Descriptor_evidence_invalid error)
-    in
-    if
-      Agentic_backend.supports_session_resume backend
-      <> descriptor.capabilities.session_resume
-    then Error Session_resume_mismatch
-    else if
-      Agentic_backend.native_json_schema_output backend
-      <> descriptor.capabilities.native_json_schema_output
-    then Error Native_json_schema_output_mismatch
-    else Ok ()
+  validate_backend_capabilities
+    ~runtime_capabilities:descriptor.Backend_registry.capabilities
+    ~descriptor
+    ~backend
 
 let approved_ids =
   ["claude-code"; "codex"; "copilot-cli"; "gemini-cli"; "opencode"; "pi"]
@@ -132,6 +87,138 @@ let handwritten_backends : Agentic_backend.t list =
     (module Opencode_cli : Agentic_backend.S);
     (module Copilot_cli : Agentic_backend.S);
   ]
+
+let no_media : Backend_registry.media_support =
+  {media_types = []; evidence = None}
+
+let no_web : Backend_registry.web_support =
+  {maximum = Backend_types.Web_disabled; evidence = None}
+
+let native_schema_evidence tested_at_version =
+  Some
+    {
+      Backend_types.tested_at_version;
+      json_schema_draft = "2020-12";
+      test_method = Backend_types.E2e_test;
+    }
+
+(* This mapping is intentionally independent of [Backend_registry]. It is the
+   bootstrap-owned runtime contract for the exact approved implementations.
+   Entry construction requires exact equality with the catalog descriptor, so a
+   new or changed positive catalog claim cannot become dispatch-trusted without
+   an explicit corresponding runtime-contract change here. *)
+let approved_runtime_capabilities = function
+  | "claude-code" ->
+      Some
+        Backend_registry.
+          {
+            structured_output = true;
+            streaming_output = true;
+            session_resume = true;
+            mcp_support = Mcp_config_file;
+            read_only_support = true;
+            project_config_surface = Config_explicit_flag;
+            precedence_confidence = High;
+            generated_lsp_config = true;
+            file_reading = true;
+            media_support = no_media;
+            web_support = no_web;
+            native_json_schema_output = true;
+            native_json_schema_output_evidence =
+              native_schema_evidence "2.1.117";
+          }
+  | "codex" ->
+      Some
+        Backend_registry.
+          {
+            structured_output = true;
+            streaming_output = false;
+            session_resume = true;
+            mcp_support = Mcp_config_file;
+            read_only_support = true;
+            project_config_surface = Config_fixed_path;
+            precedence_confidence = Medium;
+            generated_lsp_config = false;
+            file_reading = false;
+            media_support = no_media;
+            web_support = no_web;
+            native_json_schema_output = true;
+            native_json_schema_output_evidence =
+              native_schema_evidence "0.131.0";
+          }
+  | "copilot-cli" ->
+      Some
+        Backend_registry.
+          {
+            structured_output = false;
+            streaming_output = false;
+            session_resume = false;
+            mcp_support = Mcp_config_file;
+            read_only_support = false;
+            project_config_surface = Config_fixed_path;
+            precedence_confidence = Low;
+            generated_lsp_config = true;
+            file_reading = false;
+            media_support = no_media;
+            web_support = no_web;
+            native_json_schema_output = false;
+            native_json_schema_output_evidence = None;
+          }
+  | "gemini-cli" ->
+      Some
+        Backend_registry.
+          {
+            structured_output = true;
+            streaming_output = true;
+            session_resume = true;
+            mcp_support = Mcp_user_settings;
+            read_only_support = false;
+            project_config_surface = Config_fixed_path;
+            precedence_confidence = Low;
+            generated_lsp_config = false;
+            file_reading = false;
+            media_support = no_media;
+            web_support = no_web;
+            native_json_schema_output = false;
+            native_json_schema_output_evidence = None;
+          }
+  | "opencode" ->
+      Some
+        Backend_registry.
+          {
+            structured_output = true;
+            streaming_output = true;
+            session_resume = false;
+            mcp_support = Mcp_config_file;
+            read_only_support = false;
+            project_config_surface = Config_fixed_path;
+            precedence_confidence = Medium;
+            generated_lsp_config = true;
+            file_reading = true;
+            media_support = no_media;
+            web_support = no_web;
+            native_json_schema_output = false;
+            native_json_schema_output_evidence = None;
+          }
+  | "pi" ->
+      Some
+        Backend_registry.
+          {
+            structured_output = true;
+            streaming_output = true;
+            session_resume = false;
+            mcp_support = Mcp_none;
+            read_only_support = false;
+            project_config_surface = Config_none;
+            precedence_confidence = High;
+            generated_lsp_config = false;
+            file_reading = true;
+            media_support = no_media;
+            web_support = no_web;
+            native_json_schema_output = false;
+            native_json_schema_output_evidence = None;
+          }
+  | _ -> None
 
 let same_approved_set backends =
   let ids =
@@ -157,13 +244,28 @@ let hardened_candidates () =
   else
     let final = List.fold_left replace_backend embedded handwritten_backends in
     let rec validate = function
-      | [] -> Ok final
-      | backend :: rest -> (
-          match Backend_registry.find (Agentic_backend.id backend) with
-          | None -> Error Descriptor_missing
-          | Some descriptor -> (
-              match validate_backend ~descriptor ~backend with
-              | Ok () -> validate rest
+      | [] -> Ok []
+      | backend :: rest ->
+          let id = Agentic_backend.id backend in
+          let origin =
+            if id = "pi" then Runtime_entry.Yaml else Runtime_entry.Handwritten
+          in
+          (match
+             Backend_registry.find id, approved_runtime_capabilities id
+           with
+          | None, _ | _, None -> Error Descriptor_missing
+          | Some descriptor, Some runtime_capabilities -> (
+              match
+                Runtime_entry.create
+                  ~backend
+                  ~descriptor
+                  ~runtime_capabilities
+                  ~origin
+                  ~version_policy:Runtime_entry.Enforce_baseline
+              with
+              | Ok entry ->
+                  let* rest = validate rest in
+                  Ok (entry :: rest)
               | Error error -> Error (Candidate_invalid error)))
     in
     validate final
@@ -188,7 +290,7 @@ let register_hardened ?sw ?env ~probe_models () =
   if Registry.list_ids () <> [] then Error Hardened_registry_not_empty
   else
     let* candidates = hardened_candidates () in
-    List.iter Registry.register candidates ;
+    Registry.replace_all_validated candidates ;
     (match probe_models, sw, env with
     | Some true, Some sw, Some env ->
         Adapter_loader.resolve_registered_model_probes ~sw ~env ()
@@ -202,9 +304,16 @@ let register_runtime ?project_dir ?sw ?env ?probe_models ~profile () =
   | Hardened_builtins -> register_hardened ?sw ?env ~probe_models ()
 
 let register_custom ~descriptor ~backend =
-  match validate_backend ~descriptor ~backend with
+  match
+    Runtime_entry.create
+      ~backend
+      ~descriptor
+      ~runtime_capabilities:descriptor.Backend_registry.capabilities
+      ~origin:Runtime_entry.Custom
+      ~version_policy:Runtime_entry.Enforce_baseline
+  with
   | Error error -> Error (Candidate_invalid error)
-  | Ok () ->
+  | Ok entry ->
       let id = Agentic_backend.id backend in
       if Option.is_some (Registry.get id) then Error Custom_runtime_id_collision
       else if Option.is_some (Backend_registry.find descriptor.id) then
@@ -214,5 +323,9 @@ let register_custom ~descriptor ~backend =
         | Error Backend_registry.Descriptor_id_already_registered ->
             Error Custom_descriptor_id_collision
         | Ok () ->
-            Registry.register backend ;
+            (* [entry] is already an immutable validated token. Registry commit
+               is a no-fail whole-entry replacement in the documented
+               single-domain startup model, so catalog insertion cannot expose
+               a usable half-pair. *)
+            Registry.register_validated entry ;
             Ok ()

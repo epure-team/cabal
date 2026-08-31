@@ -38,7 +38,6 @@ let make_mock ~supports_resume ~native ~responses =
 
     let name = "Test Backend Completer JSON Schema"
 
-    let implementation_origin = Agentic_backend.Custom
 
     let models = []
 
