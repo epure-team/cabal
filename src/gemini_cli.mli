@@ -29,6 +29,10 @@
 (** @inline *)
 include Agentic_backend.S
 
+(** Extract public assistant text, session identity, and token usage from one
+    Gemini stream-JSON event. Malformed or private-only records return [[]]. *)
+val normalized_events_of_line : string -> Task_event.payload list
+
 (** {1 Additional Utilities} *)
 
 (** [project_config_artifacts ~mcp_servers ~lsp_servers] returns the

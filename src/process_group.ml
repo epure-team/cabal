@@ -41,6 +41,7 @@ type t = {
   lifecycle_lock : Eio.Mutex.t;
   wait_for_cleanup : float -> bool;
   mutable next_cleanup_claim : int;
+  kill_escalated : bool Atomic.t;
 }
 
 let default_launcher = "cabal-process-group-launcher"
@@ -74,6 +75,8 @@ let launcher_path () =
   | _ -> default_launcher
 
 let pid t = t.pid
+
+let kill_escalated t = Atomic.get t.kill_escalated
 
 let handshake t = t.handshake
 
@@ -452,7 +455,8 @@ let signal_group_for_claim t claim pgid signal =
             kill_sent;
           }
         when current = claim ->
-          if signal = Sys.sigkill && not kill_sent then
+          if signal = Sys.sigkill && not kill_sent then begin
+            Atomic.set t.kill_escalated true ;
             t.lifecycle <-
               Terminating
                 {
@@ -461,7 +465,8 @@ let signal_group_for_claim t claim pgid signal =
                   control_delivered;
                   cleanup_claim = Some current;
                   kill_sent = true;
-                } ;
+                }
+          end ;
           Some (attempt_group_signal pgid signal)
       | Owned _ | Terminating _ | Releasing | Retired -> None)
 
@@ -477,6 +482,7 @@ let signal_catastrophic_group_for_claim t claim pgid =
             kill_sent = _;
           }
         when current = claim ->
+          Atomic.set t.kill_escalated true ;
           t.lifecycle <-
             Terminating
               {
@@ -506,7 +512,8 @@ let signal_direct_for_claim t claim signal =
             kill_sent;
           }
         when current = claim ->
-          if signal = Sys.sigkill && not kill_sent then
+          if signal = Sys.sigkill && not kill_sent then begin
+            Atomic.set t.kill_escalated true ;
             t.lifecycle <-
               Terminating
                 {
@@ -515,7 +522,8 @@ let signal_direct_for_claim t claim signal =
                   control_delivered;
                   cleanup_claim = Some current;
                   kill_sent = true;
-                } ;
+                }
+          end ;
           Some (attempt_direct_signal t signal)
       | Owned _ | Terminating _ | Releasing | Retired -> None)
 
@@ -1111,8 +1119,9 @@ let spawn ~sw ~clock ~mgr ?cwd ?env ?stdin ?stdout ?stderr ?launcher
                          with
                          | Ok () -> true
                          | Error `Timeout -> false);
-                     next_cleanup_claim = 1;
-                   }
+                      next_cleanup_claim = 1;
+                      kill_escalated = Atomic.make false;
+                    }
                  in
                  target_ref := Some target ;
                   (* Reap the direct supervisor exactly once on the protected

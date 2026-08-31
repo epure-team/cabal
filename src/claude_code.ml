@@ -511,6 +511,49 @@ let parse_stream_event line =
     | _ -> None
   with _ -> None
 
+let normalized_events_of_stream_line line =
+  try
+    let json = Yojson.Safe.from_string line in
+    let open Yojson.Safe.Util in
+    match json |> member "type" |> to_string_option with
+    | Some "assistant" ->
+        json |> member "message" |> member "content" |> to_list
+        |> List.filter_map (fun block ->
+            match block |> member "type" |> to_string_option with
+            | Some "text" ->
+                Option.map
+                  (fun text -> Task_event.Agent_text_delta text)
+                  (block |> member "text" |> to_string_option)
+            | Some "tool_use" ->
+                Option.map
+                  (fun name ->
+                    let id = block |> member "id" |> to_string_option in
+                    Task_event.Tool_started {id; name})
+                  (block |> member "name" |> to_string_option)
+            | _ -> None)
+    | Some "system"
+      when json |> member "subtype" |> to_string_option = Some "init" ->
+        Option.to_list
+          (Option.map
+             (fun id -> Task_event.Session_id id)
+             (json |> member "session_id" |> to_string_option))
+    | Some "result" ->
+        let text =
+          Option.to_list
+            (Option.map
+               (fun text -> Task_event.Agent_text_delta text)
+               (json |> member "result" |> to_string_option))
+        in
+        let session =
+          Option.to_list
+            (Option.map
+               (fun id -> Task_event.Session_id id)
+               (json |> member "session_id" |> to_string_option))
+        in
+        text @ session
+    | _ -> []
+  with _ -> []
+
 (* Extract response text from Claude Code JSON stdout *)
 let parse_stdout_text stdout =
   try
@@ -519,7 +562,7 @@ let parse_stdout_text stdout =
     text
   with _ -> stdout
 
-let run_task ~sw ~env ?on_raw_line:_ spec =
+let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None ->
@@ -541,17 +584,29 @@ let run_task ~sw ~env ?on_raw_line:_ spec =
       let build_cmd ~mcp_config_path s =
         build_command ~project_config_path ~mcp_config_path s
       in
+      let on_stdout line =
+        Option.iter (fun callback -> callback line) on_raw_line ;
+        Option.iter
+          (fun context ->
+            List.iter
+              (Task_execution_context.emit context)
+              (normalized_events_of_stream_line line))
+          context
+      in
+      Option.iter Task_execution_context.claim_structured_text context ;
       Backend_process.run_task_with
         ~sw
         ~env
         ~spec
         ~build_command:build_cmd
+        ?context
         ~parse_cost:parse_cost_from_stdout
         ~parse_stdout:parse_stdout_text
         ~parse_session_id:parse_session_id_from_stdout
+        ~on_stdout
         ()
 
-let run_task_streaming ~sw ~env ~on_stdout ?on_raw_line spec =
+let run_task_streaming ~sw ~env ~on_stdout ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None ->
@@ -573,10 +628,17 @@ let run_task_streaming ~sw ~env ~on_stdout ?on_raw_line spec =
          callers can capture the full backend-native event stream (Story #466). *)
       let on_stdout_parsed line =
         Option.iter (fun cb -> cb line) on_raw_line ;
+        Option.iter
+          (fun context ->
+            List.iter
+              (Task_execution_context.emit context)
+              (normalized_events_of_stream_line line))
+          context ;
         match parse_stream_event line with
         | Some text -> on_stdout text
         | None -> ()
       in
+      Option.iter Task_execution_context.claim_structured_text context ;
       let build_cmd ~mcp_config_path s =
         build_command ~streaming:true ~project_config_path ~mcp_config_path s
       in
@@ -585,6 +647,7 @@ let run_task_streaming ~sw ~env ~on_stdout ?on_raw_line spec =
         ~env
         ~spec
         ~build_command:build_cmd
+        ?context
         ~parse_cost:parse_cost_from_stdout
         ~parse_stdout:parse_stdout_text
         ~parse_session_id:parse_session_id_from_stdout

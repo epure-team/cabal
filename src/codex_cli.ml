@@ -372,8 +372,75 @@ let parse_session_id_from_stdout stdout =
     lines ;
   !session_id
 
+let normalized_events_of_line line =
+  try
+    let json = Yojson.Safe.from_string line in
+    let open Yojson.Safe.Util in
+    let events = ref [] in
+    let add event = events := event :: !events in
+    let session_id =
+      match json |> member "session_id" |> to_string_option with
+      | Some id -> Some id
+      | None -> json |> member "thread_id" |> to_string_option
+    in
+    Option.iter (fun id -> add (Task_event.Session_id id)) session_id ;
+    let event_type = json |> member "type" |> to_string_option in
+    let item = json |> member "item" in
+    let item_type = item |> member "type" |> to_string_option in
+    (match event_type, item_type with
+    | Some "item.completed", Some "agent_message" ->
+        Option.iter
+          (fun text -> add (Task_event.Agent_text_delta text))
+          (item |> member "text" |> to_string_option)
+    | (Some "item.started" | Some "item.completed"), Some item_kind
+      when item_kind <> "agent_message" ->
+        let id = item |> member "id" |> to_string_option in
+        let name =
+          match item |> member "name" |> to_string_option with
+          | Some name -> name
+          | None -> item_kind
+        in
+        if event_type = Some "item.started" then
+          add (Task_event.Tool_started {id; name})
+        else add (Task_event.Tool_finished {id; name = Some name})
+    | _ -> ()) ;
+    let usage = json |> member "usage" in
+    if usage <> `Null then begin
+      add
+        (Task_event.Token_usage
+           {
+             Backend_types.tokens_input =
+               usage |> member "input_tokens" |> to_int_option;
+             tokens_output = usage |> member "output_tokens" |> to_int_option;
+             cost_usd = None;
+             cache_creation_input_tokens = None;
+             cache_read_input_tokens = None;
+           })
+    end ;
+    List.rev !events
+  with _ -> []
+
+let remove_file_noerr path = try Sys.remove path with _ -> ()
+
+let create_output_schema_file schema =
+  let path = Filename.temp_file "cabal_schema_" ".json" in
+  try
+    let channel = open_out_bin path in
+    Fun.protect
+      ~finally:(fun () -> close_out_noerr channel)
+      (fun () -> output_string channel (Yojson.Safe.to_string ~std:true schema)) ;
+    path
+  with error ->
+    remove_file_noerr path ;
+    raise error
+
+let with_output_schema_file schema f =
+  let path = create_output_schema_file schema in
+  Fun.protect ~finally:(fun () -> remove_file_noerr path) (fun () -> f path)
+
 (* Build the codex exec command *)
-let build_command ~mcp_config_path:_ (spec : task_spec) =
+let build_command_with_schema_path ?schema_path ~mcp_config_path:_
+    (spec : task_spec) =
   (* Codex reads prompt from stdin with - argument *)
   let model_flags = match spec.model with Some m -> ["-m"; m] | None -> [] in
   (* Read-only agents (validators) get --sandbox read-only so they cannot
@@ -382,20 +449,11 @@ let build_command ~mcp_config_path:_ (spec : task_spec) =
   let sandbox_flags =
     if spec.read_only then ["-s"; "read-only"] else ["--full-auto"]
   in
-  (* Native JSON Schema constraint — written to a temp file and passed via
-     --output-schema <path>.  The temp file is cleaned up on process exit.
+  (* Native JSON Schema constraint — passed via a task-scoped temp file.
      Codex reads the schema path as a PathBuf (codex-rs/exec/src/cli.rs).
      Feature ships since codex @openai/codex@0.41.0 / rust-v0.41.0 (PR #4079). *)
   let schema_args =
-    match spec.json_schema with
-    | Some s ->
-        let path = Filename.temp_file "cabal_schema_" ".json" in
-        at_exit (fun () -> try Sys.remove path with _ -> ()) ;
-        let oc = open_out path in
-        output_string oc (Yojson.Safe.to_string ~std:true s) ;
-        close_out oc ;
-        ["--output-schema"; path]
-    | None -> []
+    match schema_path with Some path -> ["--output-schema"; path] | None -> []
   in
   let base =
     match spec.resume_session_id with
@@ -418,12 +476,19 @@ let build_command ~mcp_config_path:_ (spec : task_spec) =
   (* Return command and stdin content separately to avoid arg list too long *)
   (base, full_prompt)
 
+let build_command ~mcp_config_path (spec : task_spec) =
+  match spec.json_schema with
+  | None -> build_command_with_schema_path ~mcp_config_path spec
+  | Some schema ->
+      let schema_path = create_output_schema_file schema in
+      build_command_with_schema_path ~schema_path ~mcp_config_path spec
+
 (* Extract response text from Codex JSONL stdout *)
 let parse_stdout_text stdout =
   let text, _ = parse_jsonl_output stdout in
   text
 
-let run_task ~sw ~env ?on_raw_line:_ spec =
+let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
@@ -451,12 +516,31 @@ let run_task ~sw ~env ?on_raw_line:_ spec =
       | Some msg -> make_task_result ~status:(Failed msg) ()
       | None ->
           let runtime_spec = {spec with mcp_servers = []} in
-          Backend_process.run_task_with
-            ~sw
-            ~env
-            ~spec:runtime_spec
-            ~build_command
-            ~parse_cost:parse_cost_from_stdout
-            ~parse_stdout:parse_stdout_text
-            ~parse_session_id:parse_session_id_from_stdout
-            ())
+          let on_stdout line =
+            Option.iter (fun callback -> callback line) on_raw_line ;
+            Option.iter
+              (fun context ->
+                List.iter
+                  (Task_execution_context.emit context)
+                  (normalized_events_of_line line))
+              context
+          in
+          Option.iter Task_execution_context.claim_structured_text context ;
+          let run build_command =
+            Backend_process.run_task_with
+              ~sw
+              ~env
+              ~spec:runtime_spec
+              ~build_command
+              ?context
+              ~parse_cost:parse_cost_from_stdout
+              ~parse_stdout:parse_stdout_text
+              ~parse_session_id:parse_session_id_from_stdout
+              ~on_stdout
+              ()
+          in
+          match runtime_spec.json_schema with
+          | None -> run build_command
+          | Some schema ->
+              with_output_schema_file schema (fun schema_path ->
+                  run (build_command_with_schema_path ~schema_path)))

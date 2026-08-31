@@ -88,7 +88,7 @@ let make_backend ?(session_resume = false) ?(native = false) ?availability ~id
     let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =
       Agentic_backend.Config_check_unsupported "not used"
 
-    let run_task ~sw ~env ?on_raw_line spec =
+    let run_task ~sw ~env ?context:_ ?on_raw_line spec =
       incr calls ;
       run ~sw ~env ?on_raw_line spec
   end in
@@ -808,7 +808,7 @@ let test_dispatch_reraises_fatal_exceptions () =
         (fun () -> run ~env ~sw ~backend_id:execution_id (spec ())))
     fatal_cases
 
-let test_dispatch_preserves_cancellation () =
+let test_dispatch_normalizes_cancellation () =
   with_registry @@ fun () ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -822,10 +822,13 @@ let test_dispatch_preserves_cancellation () =
          raise (Eio.Cancel.Cancelled (Failure "dispatch-secret")))
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
   match run ~env ~sw ~backend_id:id (spec ()) with
-  | exception Eio.Cancel.Cancelled _ -> ()
   | exception error ->
       Alcotest.failf "unexpected exception: %s" (Printexc.to_string error)
-  | Ok _ -> Alcotest.fail "cancellation must propagate"
+  | Ok result ->
+      Alcotest.(check bool)
+        "cancellation normalized"
+        true
+        (result.Backend_types.status = Backend_types.Cancelled)
   | Error error ->
       Alcotest.failf
         "cancellation was converted to %s"
@@ -931,9 +934,9 @@ let () =
             `Quick
             test_dispatch_reraises_fatal_exceptions;
           Alcotest.test_case
-            "cancellation propagates"
+            "cancellation is normalized"
             `Quick
-            test_dispatch_preserves_cancellation;
+            test_dispatch_normalizes_cancellation;
           Alcotest.test_case
             "validator wrapper dispatches read-only"
             `Quick

@@ -45,6 +45,7 @@ module type S = sig
   val run_task :
     sw:Eio.Switch.t ->
     env:Eio_unix.Stdenv.base ->
+    ?context:Task_execution_context.t ->
     ?on_raw_line:(string -> unit) ->
     task_spec ->
     task_result
@@ -73,6 +74,9 @@ let check_project_config ~sw ~env ~project_dir ~setup_result (module B : S) =
 
 let run_task ~sw ~env ?on_raw_line (module B : S) spec =
   B.run_task ~sw ~env ?on_raw_line spec
+
+let run_task_with_context ~sw ~env ~context ?on_raw_line (module B : S) spec =
+  B.run_task ~sw ~env ~context ?on_raw_line spec
 
 let run_task_with_ctxt ~sw ~env ?on_raw_line backend request =
   let result = run_task ~sw ~env ?on_raw_line backend request.spec in

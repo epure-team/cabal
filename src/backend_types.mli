@@ -395,7 +395,8 @@ type 'ctxt task_response = {
 (** {1 Constructors} *)
 
 (** [make_task_spec ~prompt ~working_dir ()] creates a task specification
-    with sensible defaults. Default timeout is 300 seconds (5 minutes).
+    with sensible defaults. The legacy default timeout is [max_float], treated
+    by {!Task_runtime} as effectively unbounded.
     Default expected_outputs is [[Files_changed; Structured_report]].
 
     {pre}

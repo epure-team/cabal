@@ -106,7 +106,8 @@ module type S = sig
     setup_result:Backend_config_writer.setup_result ->
     config_check_result
 
-  (** [run_task ~sw ~env ?on_raw_line spec] executes a task using this backend.
+  (** [run_task ~sw ~env ?context ?on_raw_line spec] executes a task using this
+      backend.
 
       The backend should:
       1. Spawn the agentic client with the given task spec
@@ -116,12 +117,14 @@ module type S = sig
 
       @param sw Eio switch for resource management
       @param env Eio environment for process spawning and I/O
+      @param context optional neutral lifecycle/deadline context
       @param on_raw_line optional per-line callback for raw event capture
       @param spec The task specification to execute
       @return The result of the task execution *)
   val run_task :
     sw:Eio.Switch.t ->
     env:Eio_unix.Stdenv.base ->
+    ?context:Task_execution_context.t ->
     ?on_raw_line:(string -> unit) ->
     task_spec ->
     task_result
@@ -320,6 +323,18 @@ val check_project_config :
 val run_task :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
+  ?on_raw_line:(string -> unit) ->
+  t ->
+  task_spec ->
+  task_result
+
+(** Context-aware internal execution path. The original {!run_task} type is
+    retained for source compatibility; central runtime code uses this function
+    to thread one neutral lifecycle/deadline context through backend retries. *)
+val run_task_with_context :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  context:Task_execution_context.t ->
   ?on_raw_line:(string -> unit) ->
   t ->
   task_spec ->

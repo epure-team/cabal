@@ -549,6 +549,35 @@ let parse_cost_from_stdout stdout =
   let _, cost = parse_json_events stdout in
   cost
 
+let normalized_events_of_line line =
+  try
+    let json = Yojson.Safe.from_string line in
+    let open Yojson.Safe.Util in
+    let part = json |> member "part" in
+    match json |> member "type" |> to_string_option with
+    | Some "text" ->
+        Option.to_list
+          (Option.map
+             (fun text -> Task_event.Agent_text_delta text)
+             (part |> member "text" |> to_string_option))
+    | Some "step_finish" ->
+        let tokens = part |> member "tokens" in
+        if tokens = `Null then []
+        else
+          [
+            Task_event.Token_usage
+              {
+                Backend_types.tokens_input =
+                  tokens |> member "input" |> to_int_option;
+                tokens_output = tokens |> member "output" |> to_int_option;
+                cost_usd = part |> member "cost" |> to_float_option;
+                cache_creation_input_tokens = None;
+                cache_read_input_tokens = None;
+              };
+          ]
+    | _ -> []
+  with _ -> []
+
 (* Build the opencode run command for non-interactive execution *)
 let build_command ~mcp_config_path:_ (spec : task_spec) =
   (* Use - to read prompt from stdin *)
@@ -620,7 +649,7 @@ let check_opencode_mutation ~env ~config_path ~backup result =
         session_id = None;
       }
 
-let run_task ~sw ~env ?on_raw_line spec =
+let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
@@ -645,6 +674,16 @@ let run_task ~sw ~env ?on_raw_line spec =
        with
       | None -> ()
       | Some msg -> Diagnostics.user_warning "%s" msg) ;
+      let on_stdout line =
+        Option.iter (fun callback -> callback line) on_raw_line ;
+        Option.iter
+          (fun context ->
+            List.iter
+              (Task_execution_context.emit context)
+              (normalized_events_of_line line))
+          context
+      in
+      Option.iter Task_execution_context.claim_structured_text context ;
       let mcp_ready =
         ensure_mcp_if_config_applied
           ~env
@@ -667,9 +706,10 @@ let run_task ~sw ~env ?on_raw_line spec =
                     ~env
                     ~spec:runtime_spec
                     ~build_command
+                    ?context
                     ~parse_cost:parse_cost_from_stdout
                     ~parse_stdout:parse_stdout_text
-                    ?on_stdout:on_raw_line
+                    ~on_stdout
                     ()
                 in
                 (* Story #515 AC2: detect mutation and restore *)
@@ -680,7 +720,8 @@ let run_task ~sw ~env ?on_raw_line spec =
               ~env
               ~spec:runtime_spec
               ~build_command
+              ?context
               ~parse_cost:parse_cost_from_stdout
               ~parse_stdout:parse_stdout_text
-              ?on_stdout:on_raw_line
+              ~on_stdout
               ())

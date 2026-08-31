@@ -51,7 +51,8 @@ val validate_task_namespace : task_spec -> task_result option
 (** [run_process ~sw ~env ~cmd ~working_dir ~timeout_seconds ~parse_cost ~on_stdout]
     spawns a subprocess with the given command in an owned process group,
     captures stdout/stderr concurrently, and handles timeout via
-    [Eio.Time.with_timeout].
+    [Eio.Time.with_timeout]. When [context] is present, the process receives at
+    most the time remaining on the task's shared absolute deadline.
 
     @param parse_cost Optional function to extract cost from stdout.
       If not provided, cost is always [None].
@@ -60,6 +61,8 @@ val validate_task_namespace : task_spec -> task_result option
     @param working_dir Directory to run the process in.
     @param timeout_seconds Maximum wall-clock seconds before initiating bounded,
       ownership-aware process cleanup.
+    @param context Optional task lifecycle/deadline context. Process ownership,
+      termination, escalation, and exit transitions are emitted through it.
 
     {pre}
     [sw] must be active. [cmd] must be a non-empty list with a valid
@@ -98,6 +101,7 @@ val run_process :
   ?stdin_content:string option ->
   working_dir:string ->
   timeout_seconds:float ->
+  ?context:Task_execution_context.t ->
   ?parse_cost:(string -> cost option) ->
   ?on_stdout:(string -> unit) ->
   ?guardian:Resource_guardian.t ->
@@ -303,6 +307,8 @@ val check_available :
       from stdout for resume support.
     @param on_stdout Optional callback called for each line of stdout as it arrives.
       Used for streaming output to UI.
+    @param context Optional shared task context. Its remaining budget caps the
+      process timeout and receives process lifecycle events.
 
     {pre}
     [sw] must be active. [spec.working_dir] must be an existing directory.
@@ -323,6 +329,7 @@ val run_task_with :
   spec:task_spec ->
   build_command:
     (mcp_config_path:string option -> task_spec -> string list * string) ->
+  ?context:Task_execution_context.t ->
   ?parse_cost:(string -> cost option) ->
   ?parse_stdout:(string -> string) ->
   ?parse_session_id:(string -> string option) ->

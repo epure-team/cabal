@@ -86,6 +86,10 @@ val spawn :
 (** [pid t] is the direct launcher/backend process ID. *)
 val pid : t -> int
 
+(** Whether cleanup escalated to an explicit SIGKILL attempt. This remains
+    available after retirement for lifecycle observability. *)
+val kill_escalated : t -> bool
+
 (** [handshake t] is the immutable result of the launcher handshake. *)
 val handshake : t -> handshake
 

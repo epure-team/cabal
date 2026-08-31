@@ -965,6 +965,61 @@ let test_missing_exec_handshake_cannot_report_backend_success () =
         (Sys.file_exists (marker ^ ".released")) ;
       wait_for_pid_exit ~clock (child_pid marker))
 
+let test_shared_deadline_and_process_lifecycle_events () =
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let deadline =
+    match Task_deadline.create (Eio.Stdenv.mono_clock env) 0.15 with
+    | Ok deadline -> deadline
+    | Error Task_deadline.Invalid_timeout -> Alcotest.fail "valid deadline"
+  in
+  let events = ref [] in
+  let sink =
+    Task_event.create_sink
+      ~now:(fun () -> Task_deadline.elapsed deadline)
+      ~on_event:(fun event -> events := event :: !events)
+      ()
+  in
+  let context =
+    Task_execution_context.create
+      ~remaining_time:(fun () -> Task_deadline.remaining deadline)
+      sink
+  in
+  Eio.Time.sleep (Eio.Stdenv.clock env) 0.05 ;
+  let result =
+    Backend_process.run_process
+      ~sw
+      ~env
+      ~context
+      ~cmd:[helper_path (); "--process-descendant-helper"; "nonreading"]
+      ~working_dir:"/tmp"
+      ~timeout_seconds:30.0
+      ()
+  in
+  Alcotest.(check bool)
+    "process uses remaining whole-task deadline"
+    true
+    (result.Backend_process.status = Backend_types.Timeout) ;
+  let payloads =
+    List.rev_map (fun event -> event.Task_event.payload) !events
+  in
+  Alcotest.(check bool)
+    "process ownership acquired"
+    true
+    (List.exists
+       (function Task_event.Process_started {pid = Some _} -> true | _ -> false)
+       payloads) ;
+  Alcotest.(check bool)
+    "termination request observed"
+    true
+    (List.mem Task_event.Process_termination_requested payloads) ;
+  Alcotest.(check bool)
+    "process exit observed"
+    true
+    (List.exists
+       (function Task_event.Process_exited _ -> true | _ -> false)
+       payloads)
+
 let process_tree_tests =
   [
     ( "timeout terminates descendant and preserves output",
@@ -1009,6 +1064,9 @@ let process_tree_tests =
     ( "missing EXEC handshake cannot report backend success",
       `Quick,
       test_missing_exec_handshake_cannot_report_backend_success );
+    ( "shared deadline and process lifecycle events",
+      `Quick,
+      test_shared_deadline_and_process_lifecycle_events );
   ]
 
 (** {1 Test Runner} *)

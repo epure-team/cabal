@@ -26,6 +26,24 @@
  (modules test_task_preflight))
 
 (test
+ (name test_task_event)
+ (libraries cabal alcotest eio eio_posix yojson)
+ (modules test_task_event))
+
+(test
+ (name test_task_runtime)
+ (libraries
+  cabal
+  cabal_process_test_helper
+  alcotest
+  eio
+  eio_posix
+  yojson
+  unix)
+ (deps ../bin/process_group_launcher.exe)
+ (modules test_task_runtime))
+
+(test
  (name test_runtime_bootstrap)
  (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
  (deps ../bin/process_group_launcher.exe)

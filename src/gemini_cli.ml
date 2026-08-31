@@ -334,6 +334,49 @@ let parse_session_id_from_stdout stdout =
   let _, _, session_id = parse_gemini_stream_json stdout in
   session_id
 
+let normalized_events_of_line line =
+  try
+    let json = Yojson.Safe.from_string line in
+    let open Yojson.Safe.Util in
+    let events = ref [] in
+    let add event = events := event :: !events in
+    let text =
+      match json |> member "response" |> to_string_option with
+      | Some text -> Some text
+      | None -> (
+          match json |> member "result" |> to_string_option with
+          | Some text -> Some text
+          | None -> json |> member "text" |> to_string_option)
+    in
+    Option.iter (fun text -> add (Task_event.Agent_text_delta text)) text ;
+    Option.iter
+      (fun id -> add (Task_event.Session_id id))
+      (json |> member "session_id" |> to_string_option) ;
+    let usage =
+      let metadata = json |> member "usageMetadata" in
+      if metadata = `Null then json |> member "usage" else metadata
+    in
+    if usage <> `Null then begin
+      let first_int first second =
+        match usage |> member first |> to_int_option with
+        | Some value -> Some value
+        | None -> usage |> member second |> to_int_option
+      in
+      add
+        (Task_event.Token_usage
+           {
+             Backend_types.tokens_input =
+               first_int "promptTokenCount" "input_tokens";
+             tokens_output =
+               first_int "candidatesTokenCount" "output_tokens";
+             cost_usd = None;
+             cache_creation_input_tokens = None;
+             cache_read_input_tokens = None;
+           })
+    end ;
+    List.rev !events
+  with _ -> []
+
 (* Build the gemini command for non-interactive stream-json execution *)
 let build_command ~mcp_config_path:_ (spec : task_spec) =
   let model_args = match spec.model with Some m -> ["-m"; m] | None -> [] in
@@ -423,7 +466,7 @@ let mcp_settings_error_if_needed setup mcp_servers =
                path
                (setup_outcome_reason outcome)))
 
-let run_task ~sw ~env ?on_raw_line spec =
+let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
@@ -453,13 +496,24 @@ let run_task ~sw ~env ?on_raw_line spec =
       | Some msg -> make_task_result ~status:(Failed msg) ()
       | None ->
           let runtime_spec = {spec with mcp_servers = []} in
+          let on_stdout line =
+            Option.iter (fun callback -> callback line) on_raw_line ;
+            Option.iter
+              (fun context ->
+                List.iter
+                  (Task_execution_context.emit context)
+                  (normalized_events_of_line line))
+              context
+          in
+          Option.iter Task_execution_context.claim_structured_text context ;
           Backend_process.run_task_with
             ~sw
             ~env
             ~spec:runtime_spec
             ~build_command
+            ?context
             ~parse_cost:parse_cost_from_stdout
             ~parse_stdout:parse_stdout_text
             ~parse_session_id:parse_session_id_from_stdout
-            ?on_stdout:on_raw_line
+            ~on_stdout
             ())

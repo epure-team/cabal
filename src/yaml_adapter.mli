@@ -121,6 +121,10 @@ val parse_pi_json_events : string -> string
     (none) *)
 val parse_pi_session_id : string -> string option
 
+(** Extract only public assistant text and session identity from one Pi NDJSON
+    event. Thinking and tool payload blocks are omitted. *)
+val normalized_pi_events_of_line : string -> Task_event.payload list
+
 (** [pi_stream_ended_without_finish_reason result] recognises the transient
     Ollama transport defect that Pi surfaces as a hard failure.
 

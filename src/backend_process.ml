@@ -244,7 +244,7 @@ let drain_output ~clock ~max_bytes flow output =
    TUI, print in CLI). If on_stdout is provided, it is called for each line of
    stdout as it arrives. *)
 let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
-    ~timeout_seconds ?parse_cost ?on_stdout ?guardian () =
+    ~timeout_seconds ?context ?parse_cost ?on_stdout ?guardian () =
   let proc_mgr = Eio.Stdenv.process_mgr env in
   let fs = Eio.Stdenv.fs env in
   let clock = Eio.Stdenv.clock env in
@@ -263,6 +263,18 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
   let target = ref None in
   let guardian_registered = ref false in
   let released = ref false in
+  let process_exit_emitted = ref false in
+  let emit payload =
+    Option.iter
+      (fun value -> Task_execution_context.emit value payload)
+      context
+  in
+  let emit_process_exit exit_status =
+    if not !process_exit_emitted then begin
+      process_exit_emitted := true ;
+      emit (Task_event.Process_exited {exit_status})
+    end
+  in
   let cleanup () =
     Option.iter
       (fun process_group ->
@@ -272,6 +284,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             guardian ;
         guardian_registered := false ;
         if not !released then begin
+          emit Task_event.Process_termination_requested ;
           (* Start draining before TERM so a handler that emits a full pipe can
              finish and exit during the launcher's bounded grace period. The
              three fibres are cancel-protected and each pipe has exactly one
@@ -280,7 +293,10 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
               Eio.Fiber.all
                 [
                   (fun () ->
-                    try Process_group.terminate ~clock process_group
+                    try
+                      Process_group.terminate ~clock process_group ;
+                      if Process_group.kill_escalated process_group then
+                        emit Task_event.Process_kill_escalated
                     with _ -> ());
                   (fun () ->
                     drain_output
@@ -294,7 +310,8 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
                       ~max_bytes:(16 * 1024 * 1024)
                       stderr_r
                       stderr_buf);
-                ])
+                ]) ;
+          emit_process_exit "terminated"
         end)
       !target ;
     close_noerr stdout_r ;
@@ -319,6 +336,9 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             cmd
         in
         target := Some process_group ;
+        emit
+          (Task_event.Process_started
+             {pid = Some (Process_group.pid process_group)}) ;
         (* The child owns these ends after spawn. *)
         close_noerr stdout_w ;
         close_noerr stderr_w ;
@@ -331,36 +351,47 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
                 Resource_guardian.register_target g process_group ;
                 guardian_registered := true)
               guardian ;
+            let await_io () =
+              Eio.Fiber.all
+                [
+                  (fun () ->
+                    match (stdin_content, stdin_w) with
+                    | Some content, Some writer ->
+                        Fun.protect
+                          ~finally:(fun () -> close_noerr writer)
+                          (fun () ->
+                            try Eio.Flow.copy_string content writer
+                            with Eio.Io _ -> ())
+                    | _ -> ());
+                  (fun () ->
+                    read_output
+                      ?on_stdout
+                      ~max_bytes:(128 * 1024 * 1024)
+                      stdout_r
+                      stdout_buf);
+                  (fun () ->
+                    (* Stderr is deliberately not streamed to avoid corrupting a
+                       TUI. The captured bytes are returned to the caller. *)
+                    read_output
+                      ~max_bytes:(16 * 1024 * 1024)
+                      stderr_r
+                      stderr_buf);
+                  (fun () ->
+                    result := Some (Process_group.await_backend process_group));
+                ] ;
+              Ok ()
+            in
+            let effective_timeout =
+              match context with
+              | None -> timeout_seconds
+              | Some value -> (
+                  match Task_execution_context.remaining_time value with
+                  | None -> timeout_seconds
+                  | Some remaining -> min timeout_seconds remaining)
+            in
             let io_result =
-              Eio.Time.with_timeout clock timeout_seconds (fun () ->
-                  Eio.Fiber.all
-                    [
-                      (fun () ->
-                        match (stdin_content, stdin_w) with
-                        | Some content, Some writer ->
-                            Fun.protect
-                              ~finally:(fun () -> close_noerr writer)
-                              (fun () ->
-                                try Eio.Flow.copy_string content writer
-                                with Eio.Io _ -> ())
-                        | _ -> ());
-                      (fun () ->
-                        read_output
-                          ?on_stdout
-                          ~max_bytes:(128 * 1024 * 1024)
-                          stdout_r
-                          stdout_buf);
-                      (fun () ->
-                        (* Stderr is deliberately not streamed to avoid corrupting a
-                            TUI. The captured bytes are returned to the caller. *)
-                        read_output
-                          ~max_bytes:(16 * 1024 * 1024)
-                          stderr_r
-                          stderr_buf);
-                      (fun () ->
-                        result := Some (Process_group.await_backend process_group));
-                    ] ;
-                  Ok ())
+              if effective_timeout >= 9_000_000_000.0 then await_io ()
+              else Eio.Time.with_timeout clock effective_timeout await_io
             in
             match io_result with
             | Error `Timeout -> Error `Timeout
@@ -378,29 +409,30 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
   let stdout_str = Buffer.contents stdout_buf in
   let stderr_str = Buffer.contents stderr_buf in
   let elapsed = duration_of_seconds elapsed_seconds in
-  match timeout_result with
-  | Error `Timeout ->
-      {
-        status = Timeout;
-        stdout = stdout_str;
-        stderr = stderr_str;
-        exit_code = -1;
-        elapsed;
-        cost = None;
-        session_id = None;
-      }
-  | Error (`Handshake_failed message) ->
-      {
-        status = Failed message;
-        stdout = stdout_str;
-        stderr = stderr_str;
-        exit_code = -1;
-        elapsed;
-        cost = None;
-        session_id = None;
-      }
-  | Ok () -> (
-      match !result with
+  let process_result =
+    match timeout_result with
+    | Error `Timeout ->
+        {
+          status = Timeout;
+          stdout = stdout_str;
+          stderr = stderr_str;
+          exit_code = -1;
+          elapsed;
+          cost = None;
+          session_id = None;
+        }
+    | Error (`Handshake_failed message) ->
+        {
+          status = Failed message;
+          stdout = stdout_str;
+          stderr = stderr_str;
+          exit_code = -1;
+          elapsed;
+          cost = None;
+          session_id = None;
+        }
+    | Ok () -> (
+        match !result with
       | Some (`Exited 0) ->
           let cost =
             match parse_cost with Some f -> f stdout_str | None -> None
@@ -444,6 +476,14 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             cost = None;
             session_id = None;
           })
+  in
+  emit_process_exit
+    (match process_result.status with
+    | Success -> "success"
+    | Failed _ -> "failed"
+    | Timeout -> "timeout"
+    | Cancelled -> "cancelled") ;
+  process_result
 
 (** Default cap for version / availability probes. Five seconds is long enough
     for cold-start CLIs (large Node binaries on slow disks) but short enough
@@ -493,7 +533,7 @@ let check_available ~env ?(timeout_seconds = default_probe_timeout_seconds) cmd
 
 (* Standard task execution flow shared by all backends.
    Uses Fun.protect to ensure MCP config cleanup even on exception. *)
-let run_task_with ~sw ~env ~spec ~build_command ?parse_cost ?parse_stdout
+let run_task_with ~sw ~env ~spec ~build_command ?context ?parse_cost ?parse_stdout
     ?parse_session_id ?on_stdout ?guardian () =
   match validate_managed_namespace spec.managed_namespace with
   | Error msg -> invalid_managed_namespace_result msg
@@ -514,6 +554,7 @@ let run_task_with ~sw ~env ~spec ~build_command ?parse_cost ?parse_stdout
               ~stdin_content:(Some stdin_content)
               ~working_dir:spec.working_dir
               ~timeout_seconds
+              ?context
               ?parse_cost
               ?on_stdout
               ?guardian

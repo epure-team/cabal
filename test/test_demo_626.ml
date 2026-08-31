@@ -68,7 +68,8 @@ let make_mock ~supports_resume ~responses =
     let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =
       Agentic_backend.Config_check_unsupported "test mock has no config"
 
-    let run_task ~sw:_ ~env:_ ?on_raw_line:_ (spec : Backend_types.task_spec) =
+    let run_task ~sw:_ ~env:_ ?context:_ ?on_raw_line:_
+        (spec : Backend_types.task_spec) =
       let i = !call_count in
       incr call_count ;
       captured_prompts := spec.Backend_types.prompt :: !captured_prompts ;

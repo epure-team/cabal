@@ -230,6 +230,12 @@ val parse_stdout_text : string -> string
     (none) *)
 val parse_stream_event : string -> string option
 
+(** [normalized_events_of_stream_line line] extracts only public assistant
+    text, tool identity, and session identity from one Claude stream event.
+    Thinking blocks, tool arguments, and malformed input produce no sensitive
+    normalized payload. *)
+val normalized_events_of_stream_line : string -> Task_event.payload list
+
 (** [run_task_streaming ~sw ~env ~on_stdout spec] runs a task with streaming
     stdout output. The [on_stdout] callback is called for each line of output
     as it arrives, enabling real-time display in the UI.
@@ -252,6 +258,7 @@ val run_task_streaming :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
   on_stdout:(string -> unit) ->
+  ?context:Task_execution_context.t ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->
   Backend_types.task_result

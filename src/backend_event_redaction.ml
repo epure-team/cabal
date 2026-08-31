@@ -223,6 +223,12 @@ let rec shape_of_json (json : Yojson.Safe.t) =
       ^ "}"
   | `List items -> (
       "[" ^ match items with [] -> "]" | h :: _ -> shape_of_json h ^ "...]")
+  | `Tuple items -> (
+      "(" ^ match items with [] -> ")" | h :: _ -> shape_of_json h ^ "...)")
+  | `Variant (tag, value) ->
+      "<" ^ tag
+      ^ Option.fold ~none:"" ~some:(fun item -> ":" ^ shape_of_json item) value
+      ^ ">"
   | `String _ -> "str"
   | `Int _ | `Float _ | `Intlit _ -> "num"
   | `Bool _ -> "bool"
@@ -273,6 +279,11 @@ let rec redact_json ~parent_field (count : int ref) (json : Yojson.Safe.t) :
   | `List items ->
       (* Items in a list inherit the parent field name for policy lookup. *)
       `List (List.map (fun item -> redact_json ~parent_field count item) items)
+  | `Tuple items ->
+      `Tuple (List.map (fun item -> redact_json ~parent_field count item) items)
+  | `Variant (tag, value) ->
+      `Variant
+        (tag, Option.map (fun item -> redact_json ~parent_field count item) value)
 
 (* -------------------------------------------------------------------------- *)
 (* Public API                                                                  *)

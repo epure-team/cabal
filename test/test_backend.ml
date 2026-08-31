@@ -35,7 +35,8 @@ module Mock_backend : Agentic_backend.S = struct
     Agentic_backend.Config_check_unsupported
       "mock test backend does not generate project config"
 
-  let run_task ~sw:_ ~env:_ ?on_raw_line:_ (spec : Backend_types.task_spec) =
+  let run_task ~sw:_ ~env:_ ?context:_ ?on_raw_line:_
+      (spec : Backend_types.task_spec) =
     (* Simple mock: just echo success with the prompt *)
     {
       Backend_types.status = Backend_types.Success;
@@ -81,7 +82,8 @@ module Unavailable_backend : Agentic_backend.S = struct
     Agentic_backend.Config_check_unsupported
       "unavailable test backend does not generate project config"
 
-  let run_task ~sw:_ ~env:_ ?on_raw_line:_ (_spec : Backend_types.task_spec) =
+  let run_task ~sw:_ ~env:_ ?context:_ ?on_raw_line:_
+      (_spec : Backend_types.task_spec) =
     {
       Backend_types.status = Backend_types.Failed "Backend not available";
       files_changed = [];
@@ -108,7 +110,7 @@ let test_make_task_spec () =
   Alcotest.(check string) "prompt" "Test prompt" spec.prompt ;
   Alcotest.(check string) "instructions default" "" spec.instructions ;
   Alcotest.(check string) "working_dir" "/tmp/test" spec.working_dir ;
-  Alcotest.(check (float 0.01)) "default timeout" 300.0 spec.timeout ;
+  Alcotest.(check (float 0.01)) "default timeout" max_float spec.timeout ;
   Alcotest.(check bool)
     "expected_outputs default"
     true

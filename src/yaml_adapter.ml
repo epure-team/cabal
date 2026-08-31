@@ -87,6 +87,41 @@ let parse_pi_session_id stdout =
         | _ -> None
       with Yojson.Json_error _ -> None)
 
+let normalized_pi_events_of_line line =
+  try
+    match Yojson.Safe.from_string line with
+    | `Assoc fields -> (
+        match List.assoc_opt "type" fields with
+        | Some (`String "session") -> (
+            match List.assoc_opt "id" fields with
+            | Some (`String id) -> [Task_event.Session_id id]
+            | _ -> [])
+        | Some (`String "message") -> (
+            match List.assoc_opt "message" fields with
+            | Some (`Assoc message) -> (
+                match
+                  List.assoc_opt "role" message,
+                  List.assoc_opt "content" message
+                with
+                | Some (`String "assistant"), Some (`List blocks) ->
+                    List.filter_map
+                      (function
+                        | `Assoc block -> (
+                            match
+                              List.assoc_opt "type" block,
+                              List.assoc_opt "text" block
+                            with
+                            | Some (`String "text"), Some (`String text) ->
+                                Some (Task_event.Agent_text_delta text)
+                            | _ -> None)
+                        | _ -> None)
+                      blocks
+                | _ -> [])
+            | _ -> [])
+        | _ -> [])
+    | _ -> []
+  with Yojson.Json_error _ -> []
+
 (* Ollama occasionally closes an OpenAI-compatible streamed response from a
    local coding model without a terminal [finish_reason].  Pi retries a turn
    internally, but ultimately exits non-zero and Cabal would otherwise turn a
@@ -157,7 +192,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
       | "pi" -> Some parse_pi_json_events
       | _ -> None
 
-    let run_task ~sw ~env ?on_raw_line:_ (spec : task_spec) =
+    let run_task ~sw ~env ?context ?on_raw_line (spec : task_spec) =
       let args = invocation_argv cfg in
       let full_prompt =
         if String.length spec.instructions > 0 then
@@ -171,13 +206,28 @@ let make_backend (cfg : config) : Agentic_backend.t =
         else (args, full_prompt)
       in
       let run_once () =
+        (match context with
+        | Some context when cfg.name = "pi" ->
+            Task_execution_context.claim_structured_text context
+        | Some _ | None -> ()) ;
+        let on_stdout line =
+          Option.iter (fun callback -> callback line) on_raw_line ;
+          match context with
+          | Some context when cfg.name = "pi" ->
+              List.iter
+                (Task_execution_context.emit context)
+                (normalized_pi_events_of_line line)
+          | Some _ | None -> ()
+        in
         Backend_process.run_task_with
           ~sw
           ~env
           ~spec:{spec with timeout = cfg.timeout_seconds}
           ~build_command
+          ?context
           ?parse_stdout:parse_stdout_for_id
           ?parse_session_id:(if cfg.name = "pi" then Some parse_pi_session_id else None)
+          ~on_stdout
           ()
       in
       let first = run_once () in

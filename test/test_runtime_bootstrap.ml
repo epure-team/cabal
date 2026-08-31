@@ -142,7 +142,7 @@ let make_backend ?(session_resume = false) ?(native = false) ?(name = "Custom")
     let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =
       Agentic_backend.Config_check_unsupported "not used"
 
-    let run_task ~sw:_ ~env:_ ?on_raw_line:_ _ =
+    let run_task ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ _ =
       Backend_types.make_task_result ~status:Backend_types.Success ()
   end in
   (module Backend : Agentic_backend.S)
