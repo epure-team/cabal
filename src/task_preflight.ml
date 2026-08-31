@@ -49,6 +49,8 @@ type input_error =
 
 type capability_error =
   | Native_json_schema_support_without_evidence
+  | Native_json_schema_evidence_without_support
+  | Invalid_native_json_schema_evidence
   | Media_support_without_evidence
   | Web_support_without_evidence
   | Invalid_media_support_evidence
@@ -117,6 +119,10 @@ let render_input_error = function
 let render_capability_error = function
   | Native_json_schema_support_without_evidence ->
       "backend descriptor claims native JSON schema output without evidence"
+  | Native_json_schema_evidence_without_support ->
+      "backend descriptor carries native JSON schema evidence for disabled support"
+  | Invalid_native_json_schema_evidence ->
+      "backend native JSON schema evidence is incomplete or not reproducible"
   | Media_support_without_evidence ->
       "backend descriptor claims media support without evidence"
   | Web_support_without_evidence ->
@@ -518,31 +524,49 @@ let valid_feature_evidence (evidence : Backend_types.feature_evidence) =
   | Backend_types.E2e_test -> true
   | Backend_types.Manual_probe command -> nonempty command
 
+let valid_native_schema_evidence
+    (evidence : Backend_types.capability_evidence) =
+  nonempty evidence.Backend_types.tested_at_version
+  && nonempty evidence.json_schema_draft
+  &&
+  match evidence.test_method with
+  | Backend_types.E2e_test -> true
+  | Backend_types.Manual_probe command -> nonempty command
+
 let validate_descriptor_evidence
     (capabilities : Backend_registry.capabilities) =
-  if
-    capabilities.Backend_registry.native_json_schema_output
-    && capabilities.native_json_schema_output_evidence = None
-  then Error (Capability Native_json_schema_support_without_evidence)
+  let* () =
+    if capabilities.Backend_registry.native_json_schema_output then
+      match capabilities.native_json_schema_output_evidence with
+      | None -> Error (Capability Native_json_schema_support_without_evidence)
+      | Some evidence when not (valid_native_schema_evidence evidence) ->
+          Error (Capability Invalid_native_json_schema_evidence)
+      | Some _ -> Ok ()
+    else if Option.is_some capabilities.native_json_schema_output_evidence then
+      Error (Capability Native_json_schema_evidence_without_support)
+    else Ok ()
+  in
+  let media_support = capabilities.media_support in
+  if media_support.media_types <> [] && media_support.evidence = None then
+    Error (Capability Media_support_without_evidence)
   else
-    let media_support = capabilities.media_support in
-    if media_support.media_types <> [] && media_support.evidence = None then
-      Error (Capability Media_support_without_evidence)
-    else
-      match media_support.evidence with
-      | Some evidence when not (valid_feature_evidence evidence) ->
-          Error (Capability Invalid_media_support_evidence)
-      | _ ->
-          let web_support = capabilities.web_support in
-          if
-            web_support.maximum <> Backend_types.Web_disabled
-            && web_support.evidence = None
-          then Error (Capability Web_support_without_evidence)
-          else
-            match web_support.evidence with
-            | Some evidence when not (valid_feature_evidence evidence) ->
-                Error (Capability Invalid_web_support_evidence)
-            | _ -> Ok ()
+    match media_support.evidence with
+    | Some evidence when not (valid_feature_evidence evidence) ->
+        Error (Capability Invalid_media_support_evidence)
+    | _ ->
+        let web_support = capabilities.web_support in
+        if
+          web_support.maximum <> Backend_types.Web_disabled
+          && web_support.evidence = None
+        then Error (Capability Web_support_without_evidence)
+        else
+          match web_support.evidence with
+          | Some evidence when not (valid_feature_evidence evidence) ->
+              Error (Capability Invalid_web_support_evidence)
+          | _ -> Ok ()
+
+let validate_descriptor descriptor =
+  validate_descriptor_evidence descriptor.Backend_registry.capabilities
 
 let web_access_rank = function
   | Backend_types.Web_disabled -> 0
@@ -565,7 +589,7 @@ let validate_requested_media capabilities attachments =
 
 let validate_capabilities ~descriptor spec =
   let capabilities = descriptor.Backend_registry.capabilities in
-  let* () = validate_descriptor_evidence capabilities in
+  let* () = validate_descriptor descriptor in
   let* () =
     validate_requested_media capabilities spec.Backend_types.attachments
   in

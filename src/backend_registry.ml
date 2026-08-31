@@ -60,6 +60,8 @@ type unsupported_capability_note = {
   note : string;
 }
 
+type descriptor_registration_error = Descriptor_id_already_registered
+
 let builtin_backends =
   [
     {
@@ -152,7 +154,7 @@ let builtin_backends =
         {
           structured_output = true;
           streaming_output = true;
-          session_resume = true;
+          session_resume = false;
           mcp_support = Mcp_none;
           read_only_support = false;
           project_config_surface = Config_none;
@@ -363,6 +365,13 @@ let find id =
   match List.find_opt (fun d -> d.id = id) builtin_backends with
   | Some _ as r -> r
   | None -> List.find_opt (fun d -> d.id = id) !extra_descriptors
+
+let add_descriptor d =
+  match find d.id with
+  | Some _ -> Error Descriptor_id_already_registered
+  | None ->
+      extra_descriptors := d :: !extra_descriptors ;
+      Ok ()
 
 let supports_file_reading backend_id =
   match find backend_id with

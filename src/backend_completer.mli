@@ -46,6 +46,11 @@ val complete_with_workspace :
 (** [make ~sw ~env ~backend ~working_dir] creates a completer that
     delegates to the given agentic backend.
 
+    This is a low-level compatibility path for callers that intentionally hold
+    an explicit backend snapshot. It routes through {!Json_schema_enforcer} but
+    bypasses CBL-03 registry consistency and {!Task_preflight} guarantees. Use
+    {!make_by_name} for centrally validated call-time resolution.
+
     Each call spawns the backend CLI with the combined system/user prompt
     and returns the text response from stdout.
 
@@ -130,7 +135,15 @@ val run_version_gate :
   env:Eio_unix.Stdenv.base -> backend_name:string -> (unit, string) result
 
 (** [make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers ()]
-    looks up a backend by name in the registry and creates a completer.
+    checks the current backend for compatibility, then creates a completer whose
+    every invocation resolves [backend_name] again through
+    {!Runtime_dispatch.run_task}. A later registry override is therefore used by
+    the next call rather than the backend present at construction time.
+
+    The legacy completer type has no attachment or web-policy parameters, so
+    this wrapper deliberately constructs attachment-free, [Web_disabled] tasks
+    and applies a private zero-attachment preflight policy. This is a wrapper
+    constraint, not a Cabal library default.
 
     @param model Optional model to pass to the backend (e.g., "opus", "sonnet")
     @param mcp_servers Optional MCP servers to make available to the backend
@@ -191,6 +204,10 @@ val check_read_only_routing :
 (** [make_validator_by_name ~sw ~env ~backend_name ~working_dir ?model
     ?mcp_servers ()] creates a completer for validator tasks, enforcing that
     the selected backend declares [read_only_support = true].
+
+    The returned completer resolves the backend at each invocation through
+    {!Runtime_dispatch} and submits [task_spec.read_only = true]. It shares the
+    legacy attachment-free/[Web_disabled] constraint of {!make_by_name}.
 
     Calls {!check_read_only_routing} internally — the same gate used by the
     high-level routing layer — so enforcement is consistent at both the

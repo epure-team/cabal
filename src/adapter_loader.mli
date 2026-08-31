@@ -81,6 +81,21 @@ val load_string :
 *)
 val load_dir : string -> (string * (yaml_adapter_config, string) result) list
 
+(** [embedded_backends ()] constructs the compiled-in YAML runtime candidates
+    without reading [HOME], project directories, or invoking model probes. The
+    function does not mutate {!Registry}; callers may validate the complete
+    candidate set before committing it.
+
+    @return [Error _] if any embedded adapter cannot be parsed or validated. *)
+val embedded_backends : unit -> (Agentic_backend.t list, string) result
+
+(** [resolve_registered_model_probes ~sw ~env ()] explicitly runs the existing
+    protected model-probe layer for every currently registered backend and
+    publishes probe/static resolution in {!Registry}. Probe errors and
+    exceptions retain the backend's static model list. *)
+val resolve_registered_model_probes :
+  sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> unit -> unit
+
 (** [register_all ()] loads and registers backends in priority order:
 
     1. Built-in YAML configs embedded at compile time ([source = "builtin"])

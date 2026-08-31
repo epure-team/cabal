@@ -15,11 +15,10 @@
     Runtime detection (installed version, available binary) is separate and
     never mutates this data.
 
-    Note that [Adapter_loader.register_all ()] loads YAML-backed adapters; it
-    does not by itself register handwritten backend modules or their native
-    runtime capability values. Hosts and tests that need strict built-in
-    semantics should register handwritten modules after the loader, matching the
-    runtime order used by the generic native E2E.
+    Note that [Adapter_loader.register_all ()] remains the extensible YAML-only
+    loader. Hosts and tests that need strict built-in runtime semantics should
+    use [Runtime_bootstrap.Hardened_builtins], which stages approved embedded
+    adapters and installs the five handwritten replacements after validation.
 
     {b Built-in backends (6):} claude-code, codex, opencode, pi, gemini-cli,
     and copilot-cli. *)
@@ -169,14 +168,30 @@ type unsupported_capability_note = {
 
 (** {1 Registry Access} *)
 
-(** [register_descriptor d] registers an extra descriptor for use in tests.
+(** [register_descriptor d] registers an extra descriptor for compatibility.
 
     Not reflected in [all ()] or [read_only_safe_backend_ids ()], which remain
     built-in-only. Affects [find] and all capability queries ([supports_*]).
 
     Idempotent: re-registering the same [d.id] is a no-op. Not thread-safe;
-    intended for single-threaded test setup only. *)
+    intended for single-threaded startup or test setup. New production code
+    should prefer [Runtime_bootstrap.register_custom], which validates and
+    installs the descriptor and runtime backend as one additive contract. *)
 val register_descriptor : descriptor -> unit
+
+(** Descriptor insertion failure for additive registration. *)
+type descriptor_registration_error = Descriptor_id_already_registered
+
+(** [add_descriptor d] adds [d] only when its id is absent from both the
+    built-in and additive descriptor sets. It never replaces metadata.
+
+    This non-replacing primitive supports the atomic startup contract in
+    [Runtime_bootstrap.register_custom]. Registry mutation is single-domain
+    startup state; concurrent registration is unsupported.
+
+    @return [Error Descriptor_id_already_registered] on any collision. *)
+val add_descriptor :
+  descriptor -> (unit, descriptor_registration_error) result
 
 (** [all ()] returns descriptors for all built-in backends in canonical order.
 

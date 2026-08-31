@@ -11,7 +11,11 @@
     agentic backends. Backends register themselves at startup, and the
     orchestrator queries the registry to find available backends.
 
-    See DESIGN.md Section 6 "Agentic Backend Layer". *)
+    See DESIGN.md Section 6 "Agentic Backend Layer".
+
+    This is process-global startup state for a single OCaml domain. Register
+    backends before concurrent task execution; mutation and lookup are not
+    synchronized across domains. *)
 
 (** {1 Registration} *)
 

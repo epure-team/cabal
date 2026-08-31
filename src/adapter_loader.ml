@@ -195,6 +195,16 @@ let load_dir dir =
         (filename, result))
       yaml_files
 
+let embedded_backends () =
+  let rec load loaded = function
+    | [] -> Ok (List.rev loaded)
+    | (_name, content) :: rest -> (
+        match load_string ~source:"builtin" content with
+        | Error message -> Error message
+        | Ok config -> load (Yaml_adapter.make_backend config :: loaded) rest)
+  in
+  load [] Builtin.all
+
 (* --- Probe runner --------------------------------------------------------- *)
 
 (** [run_probe ~sw ~env backend] invokes the backend's [models_probe] (if any)
@@ -241,6 +251,8 @@ let resolve_probes_for_registered ~sw ~env () =
             id
             (Agentic_backend.models backend, Registry.Static))
     (Registry.list ())
+
+let resolve_registered_model_probes = resolve_probes_for_registered
 
 (* --- Register all ---------------------------------------------------------- *)
 

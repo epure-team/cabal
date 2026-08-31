@@ -299,6 +299,10 @@ val check_project_config :
 
 (** [run_task ~sw ~env backend spec] executes a task using the backend.
 
+    This is a low-level compatibility API. Direct use bypasses CBL-03 runtime
+    registry/descriptor consistency and central task preflight; hosts wanting
+    those guarantees should call [Runtime_dispatch.run_task].
+
     {pre}
     [backend] must be available (i.e. [available ~sw ~env backend = true]).
     [sw] must be an open switch with sufficient lifetime for the task.
