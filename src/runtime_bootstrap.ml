@@ -88,16 +88,6 @@ let valid_runtime_id value =
          | _ -> false)
        value
 
-let valid_baseline_version value =
-  let valid_component component =
-    component <> ""
-    && String.for_all (function '0' .. '9' -> true | _ -> false) component
-  in
-  match String.split_on_char '.' value with
-  | [major; minor; patch] ->
-      valid_component major && valid_component minor && valid_component patch
-  | _ -> false
-
 let ( let* ) result continuation = Result.bind result continuation
 
 let validate_backend ~descriptor ~backend =
@@ -111,7 +101,9 @@ let validate_backend ~descriptor ~backend =
     Error Invalid_descriptor_display_name
   else if not (nonempty_text descriptor.binary_name) then
     Error Invalid_descriptor_binary_name
-  else if not (valid_baseline_version descriptor.baseline_version) then
+  else if
+    not (Backend_version.is_valid_version_string descriptor.baseline_version)
+  then
     Error Invalid_descriptor_baseline_version
   else
     let* () =

@@ -135,10 +135,12 @@ val run_version_gate :
   env:Eio_unix.Stdenv.base -> backend_name:string -> (unit, string) result
 
 (** [make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers ()]
-    checks the current backend for compatibility, then creates a completer whose
-    every invocation resolves [backend_name] again through
-    {!Runtime_dispatch.run_task}. A later registry override is therefore used by
-    the next call rather than the backend present at construction time.
+    performs only side-effect-free routing-id validation at construction, then
+    creates a completer whose every invocation resolves, validates, version- and
+    availability-checks, preflights, and invokes [backend_name] through
+    {!Runtime_dispatch.run_task}. No runtime lookup or adapter command occurs at
+    construction. A later registry override is therefore used by the next call
+    rather than the backend present at construction time.
 
     The legacy completer type has no attachment or web-policy parameters, so
     this wrapper deliberately constructs attachment-free, [Web_disabled] tasks
@@ -147,13 +149,15 @@ val run_version_gate :
 
     @param model Optional model to pass to the backend (e.g., "opus", "sonnet")
     @param mcp_servers Optional MCP servers to make available to the backend
-    Returns [Error msg] if the backend is not found or not available.
+    Returns [Error msg] at construction only for a malformed routing id.
 
     {pre}
-    The switch [sw] must be active. A backend named [backend_name] must be registered.
+    The switch [sw] must be active when the returned completer is invoked.
 
     {post}
-    Returns [Ok completer] wrapping the named backend on success, or [Error msg] if the backend is not found or not available.
+    Returns [Ok completer] for a structurally valid id. Dynamic registration,
+    consistency, version, availability, and preflight failures are reported by
+    the returned completer at invocation time.
 
     {violators}
     (none)
@@ -221,8 +225,10 @@ val check_read_only_routing :
     The switch [sw] must be active when the returned completer is later invoked.
 
     {post}
-    Returns [Error msg] when [backend_name] lacks [read_only_support] or is not
-    available.  Returns [Ok completer] otherwise.
+    Returns [Error msg] at construction when [backend_name] lacks
+    [read_only_support]. Dynamic registration/version/availability failures are
+    returned only when the completer is invoked. Returns [Ok completer]
+    otherwise.
 
     {violators}
     (none)

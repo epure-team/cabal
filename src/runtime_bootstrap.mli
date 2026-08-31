@@ -62,6 +62,10 @@ val render_validation_error : validation_error -> string
 (** [render_error error] returns a sanitized bootstrap diagnostic. *)
 val render_error : error -> string
 
+(** [valid_runtime_id value] checks the canonical, side-effect-free backend-id
+    syntax accepted by bootstrap and by-name routing. *)
+val valid_runtime_id : string -> bool
+
 (** [validate_backend ~descriptor ~backend] verifies exact id equality,
     display/binary/version structure, descriptor evidence invariants, and every
     capability represented by {!Agentic_backend.S}: session resume and native
@@ -74,10 +78,12 @@ val validate_backend :
 (** [register_runtime ?project_dir ?sw ?env ?probe_models ~profile ()]
     composes and registers a runtime.
 
-    [Extensible] calls {!Adapter_loader.register_all} with unchanged embedded →
-    global → project precedence. Supplying [sw] and [env] preserves its current
-    automatic probe behavior; explicitly disabling probes in that combination
-    is rejected rather than silently changing semantics.
+    [Extensible] calls {!Adapter_loader.register_all} with embedded → global →
+    project precedence, including conservative descriptors for non-built-in YAML
+    adapters and immutable built-in/host descriptor ownership. Supplying [sw]
+    and [env] preserves its current automatic probe behavior; explicitly
+    disabling probes in that combination is rejected rather than silently
+    changing semantics.
 
     [Hardened_builtins] requires an empty {!Registry}, never reads [HOME] or
     [project_dir], and disables model probes unless [probe_models=true] is

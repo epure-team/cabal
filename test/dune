@@ -26,7 +26,7 @@
 
 (test
  (name test_runtime_dispatch)
- (libraries cabal alcotest eio eio_posix)
+ (libraries cabal alcotest eio eio_posix unix)
  (modules test_runtime_dispatch))
 
 (test

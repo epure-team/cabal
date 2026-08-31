@@ -65,10 +65,13 @@ type capability_error =
   | Native_json_schema_support_without_evidence
   | Native_json_schema_evidence_without_support
   | Invalid_native_json_schema_evidence
+  | Invalid_native_json_schema_evidence_version
   | Media_support_without_evidence
   | Web_support_without_evidence
   | Invalid_media_support_evidence
   | Invalid_web_support_evidence
+  | Invalid_media_support_evidence_version
+  | Invalid_web_support_evidence_version
   | Unsupported_media_type of Backend_types.media_type
   | Unsupported_web_access of {
       requested : Backend_types.web_access;
@@ -120,7 +123,8 @@ val validate_inputs :
 
 (** [validate_descriptor descriptor] validates capability-evidence invariants
     without inspecting a task or performing I/O. Positive native-schema, media,
-    and web claims require complete, reproducible evidence; native-schema
+    and web claims require complete, reproducible evidence whose
+    [tested_at_version] is an exact [major.minor.patch] value; native-schema
     evidence is rejected when the corresponding capability is disabled.
 
     {b Preconditions.} None.

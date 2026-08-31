@@ -115,41 +115,27 @@ let legacy_zero_attachment_limits : Task_preflight.limits =
 
 let make_by_name_with_read_only ~read_only ~sw ~env ~backend_name ~working_dir
     ?model ?mcp_servers () =
-  match Registry.get backend_name with
-  | None ->
-      let available = Registry.list_ids () in
-      let msg =
-        Printf.sprintf
-          "Backend '%s' not found. Registered: %s"
-          backend_name
-          (String.concat ", " available)
-      in
-      Error msg
-  | Some backend ->
-      if not (Agentic_backend.available ~sw ~env backend) then
-        Error
-          (Printf.sprintf
-             "Backend '%s' is not available (CLI tool not installed?)"
-             backend_name)
-      else
-        Ok
-          (make_with_runner
-             ~run:(fun spec ->
-               match
-                 Runtime_dispatch.run_task
-                   ~sw
-                   ~env
-                   ~limits:legacy_zero_attachment_limits
-                   ~backend_id:backend_name
-                   spec
-               with
-               | Ok result -> Ok result
-               | Error error -> Error (Runtime_dispatch.render_error error))
-             ~working_dir
-             ?model
-             ?mcp_servers
-             ~read_only
-             ())
+  if not (Runtime_bootstrap.valid_runtime_id backend_name) then
+    Error "backend routing id is structurally invalid"
+  else
+    Ok
+      (make_with_runner
+         ~run:(fun spec ->
+           match
+             Runtime_dispatch.run_task
+               ~sw
+               ~env
+               ~limits:legacy_zero_attachment_limits
+               ~backend_id:backend_name
+               spec
+           with
+           | Ok result -> Ok result
+           | Error error -> Error (Runtime_dispatch.render_error error))
+         ~working_dir
+         ?model
+         ?mcp_servers
+         ~read_only
+         ())
 
 let make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers () =
   make_by_name_with_read_only

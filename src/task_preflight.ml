@@ -51,10 +51,13 @@ type capability_error =
   | Native_json_schema_support_without_evidence
   | Native_json_schema_evidence_without_support
   | Invalid_native_json_schema_evidence
+  | Invalid_native_json_schema_evidence_version
   | Media_support_without_evidence
   | Web_support_without_evidence
   | Invalid_media_support_evidence
   | Invalid_web_support_evidence
+  | Invalid_media_support_evidence_version
+  | Invalid_web_support_evidence_version
   | Unsupported_media_type of Backend_types.media_type
   | Unsupported_web_access of {
       requested : Backend_types.web_access;
@@ -123,6 +126,8 @@ let render_capability_error = function
       "backend descriptor carries native JSON schema evidence for disabled support"
   | Invalid_native_json_schema_evidence ->
       "backend native JSON schema evidence is incomplete or not reproducible"
+  | Invalid_native_json_schema_evidence_version ->
+      "backend native JSON schema evidence has an invalid tested version"
   | Media_support_without_evidence ->
       "backend descriptor claims media support without evidence"
   | Web_support_without_evidence ->
@@ -131,6 +136,10 @@ let render_capability_error = function
       "backend media evidence is incomplete or not reproducible"
   | Invalid_web_support_evidence ->
       "backend web evidence is incomplete or not reproducible"
+  | Invalid_media_support_evidence_version ->
+      "backend media evidence has an invalid tested version"
+  | Invalid_web_support_evidence_version ->
+      "backend web evidence has an invalid tested version"
   | Unsupported_media_type Backend_types.Png ->
       "backend does not support requested PNG attachments"
   | Unsupported_media_type Backend_types.Jpeg ->
@@ -515,8 +524,7 @@ let validate_inputs ~limits spec =
 let nonempty value = String.trim value <> ""
 
 let valid_feature_evidence (evidence : Backend_types.feature_evidence) =
-  nonempty evidence.Backend_types.tested_at_version
-  && nonempty evidence.notes
+  nonempty evidence.notes
   &&
   (match evidence.evidence_url with None -> true | Some url -> nonempty url)
   &&
@@ -526,8 +534,7 @@ let valid_feature_evidence (evidence : Backend_types.feature_evidence) =
 
 let valid_native_schema_evidence
     (evidence : Backend_types.capability_evidence) =
-  nonempty evidence.Backend_types.tested_at_version
-  && nonempty evidence.json_schema_draft
+  nonempty evidence.json_schema_draft
   &&
   match evidence.test_method with
   | Backend_types.E2e_test -> true
@@ -539,6 +546,11 @@ let validate_descriptor_evidence
     if capabilities.Backend_registry.native_json_schema_output then
       match capabilities.native_json_schema_output_evidence with
       | None -> Error (Capability Native_json_schema_support_without_evidence)
+      | Some evidence
+        when not
+               (Backend_version.is_valid_version_string
+                  evidence.Backend_types.tested_at_version) ->
+          Error (Capability Invalid_native_json_schema_evidence_version)
       | Some evidence when not (valid_native_schema_evidence evidence) ->
           Error (Capability Invalid_native_json_schema_evidence)
       | Some _ -> Ok ()
@@ -551,6 +563,11 @@ let validate_descriptor_evidence
     Error (Capability Media_support_without_evidence)
   else
     match media_support.evidence with
+    | Some evidence
+      when not
+             (Backend_version.is_valid_version_string
+                evidence.Backend_types.tested_at_version) ->
+        Error (Capability Invalid_media_support_evidence_version)
     | Some evidence when not (valid_feature_evidence evidence) ->
         Error (Capability Invalid_media_support_evidence)
     | _ ->
@@ -561,6 +578,11 @@ let validate_descriptor_evidence
         then Error (Capability Web_support_without_evidence)
         else
           match web_support.evidence with
+          | Some evidence
+            when not
+                   (Backend_version.is_valid_version_string
+                      evidence.Backend_types.tested_at_version) ->
+              Error (Capability Invalid_web_support_evidence_version)
           | Some evidence when not (valid_feature_evidence evidence) ->
               Error (Capability Invalid_web_support_evidence)
           | _ -> Ok ()

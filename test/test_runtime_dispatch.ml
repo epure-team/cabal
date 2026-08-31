@@ -26,7 +26,8 @@ let limits =
     }
 
 let descriptor_for ?(session_resume = false) ?(native = false)
-    ?(read_only = false) id =
+    ?(read_only = false) ?(binary_name = "dispatch-test")
+    ?(baseline_version = "1.0.0") id =
   let native_json_schema_output_evidence =
     if native then
       Some
@@ -40,8 +41,8 @@ let descriptor_for ?(session_resume = false) ?(native = false)
   {
     Backend_registry.id;
     display_name = "Dispatch test backend";
-    binary_name = "dispatch-test";
-    baseline_version = "1.0.0";
+    binary_name;
+    baseline_version;
     capabilities =
       {
         structured_output = true;
@@ -67,14 +68,18 @@ let success ?(text = "ok") () =
     ~agent_text:text
     ()
 
-let make_backend ?(session_resume = false) ?(native = false)
-    ?(available = true) ~id ~calls run =
+let make_backend ?(session_resume = false) ?(native = false) ?availability ~id
+    ~calls run =
   let module Backend = struct
     let id = id
     let name = "Dispatch test backend"
+    let implementation_origin = Agentic_backend.Custom
     let models = []
     let models_probe = None
-    let available ~sw:_ ~env:_ = available
+
+    let available ~sw ~env =
+      match availability with None -> true | Some check -> check ~sw ~env
+
     let supports_session_resume = session_resume
     let native_json_schema_output = native
     let is_resume_failure _ = false
@@ -92,10 +97,40 @@ let with_registry f =
   Registry.clear () ;
   Fun.protect ~finally:Registry.clear f
 
-let register_pair ?session_resume ?native ?read_only ~id backend =
-  let descriptor = descriptor_for ?session_resume ?native ?read_only id in
+let register_pair ?session_resume ?native ?read_only ?binary_name
+    ?baseline_version ~id backend =
+  let descriptor =
+    descriptor_for
+      ?session_resume
+      ?native
+      ?read_only
+      ?binary_name
+      ?baseline_version
+      id
+  in
   Backend_registry.register_descriptor descriptor ;
   Registry.register backend
+
+let rec remove_tree path =
+  if Sys.file_exists path then
+    if Sys.is_directory path then begin
+      Array.iter (fun name -> remove_tree (Filename.concat path name)) (Sys.readdir path) ;
+      Unix.rmdir path
+    end
+    else Unix.unlink path
+
+let with_temp_dir label f =
+  let path = Filename.temp_dir ("cabal-dispatch-" ^ label ^ "-") "" in
+  Fun.protect
+    ~finally:(fun () -> remove_tree path)
+    (fun () -> f path)
+
+let write_executable path contents =
+  let channel = open_out path in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr channel)
+    (fun () -> output_string channel contents) ;
+  Unix.chmod path 0o700
 
 let spec ?(working_dir = ".") ?(read_only = false) ?resume_session_id
     ?json_schema ?(attachments = []) ?(web_access = Backend_types.Web_disabled)
@@ -140,6 +175,7 @@ let test_runtime_descriptor_mismatches_fail_before_call () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let session_calls = ref 0 in
+  let availability_calls = ref 0 in
   let session_id = "dispatch-session-mismatch" in
   register_pair
     ~session_resume:true
@@ -147,12 +183,19 @@ let test_runtime_descriptor_mismatches_fail_before_call () =
     (make_backend
        ~id:session_id
        ~calls:session_calls
+       ~availability:(fun ~sw:_ ~env:_ ->
+         incr availability_calls ;
+         failwith "availability must not run for a mismatched runtime")
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
   Alcotest.(check bool)
     "session mismatch fails"
     true
     (Result.is_error (run ~env ~sw ~backend_id:session_id (spec ()))) ;
   Alcotest.(check int) "session mismatch call count" 0 !session_calls ;
+  Alcotest.(check int)
+    "mismatch rejected before availability"
+    0
+    !availability_calls ;
 
   let native_calls = ref 0 in
   let native_id = "dispatch-native-mismatch" in
@@ -291,12 +334,16 @@ let test_by_name_wrapper_resolves_override_at_each_call () =
   Eio.Switch.run @@ fun sw ->
   let id = "dispatch-by-name-override" in
   let first_calls = ref 0 in
+  let first_availability_calls = ref 0 in
   let second_calls = ref 0 in
   let captured = ref None in
   let first =
     make_backend
       ~id
       ~calls:first_calls
+      ~availability:(fun ~sw:_ ~env:_ ->
+        incr first_availability_calls ;
+        false)
       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ~text:"first" ())
   in
   register_pair ~id first ;
@@ -312,6 +359,10 @@ let test_by_name_wrapper_resolves_override_at_each_call () =
     | Ok completer -> completer
     | Error error -> Alcotest.fail error
   in
+  Alcotest.(check int)
+    "construction does not check availability"
+    0
+    !first_availability_calls ;
   let second =
     make_backend ~id ~calls:second_calls (fun ~sw:_ ~env:_ ?on_raw_line:_ task ->
         captured := Some task ;
@@ -328,6 +379,10 @@ let test_by_name_wrapper_resolves_override_at_each_call () =
   | Ok result -> Alcotest.(check string) "override result" "second" result.text
   | Error error -> Alcotest.fail error) ;
   Alcotest.(check int) "constructed backend is not retained" 0 !first_calls ;
+  Alcotest.(check int)
+    "unavailable construction-time backend is never probed"
+    0
+    !first_availability_calls ;
   Alcotest.(check int) "override called once" 1 !second_calls ;
   match !captured with
   | None -> Alcotest.fail "override did not capture a task"
@@ -340,6 +395,139 @@ let test_by_name_wrapper_resolves_override_at_each_call () =
         "legacy wrapper disables web"
         true
         (task.web_access = Backend_types.Web_disabled)
+
+let test_by_name_rejects_malformed_id_without_resolution () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  match
+    Backend_completer.make_by_name
+      ~sw
+      ~env
+      ~backend_name:"../malformed-backend"
+      ~working_dir:"."
+      ()
+  with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "malformed static backend id must be rejected"
+
+let test_dispatch_enforces_installed_version_policy () =
+  with_registry @@ fun () ->
+  with_temp_dir "versions" @@ fun temp_dir ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let run_case ~label ~version_script ~expected_ok =
+    let id = "dispatch-version-" ^ label in
+    let binary_name = Filename.concat temp_dir (label ^ "-backend") in
+    Option.iter (write_executable binary_name) version_script ;
+    let calls = ref 0 in
+    let availability_calls = ref 0 in
+    register_pair
+      ~id
+      ~binary_name
+      ~baseline_version:"1.2.3"
+      (make_backend
+         ~id
+         ~calls
+         ~availability:(fun ~sw:_ ~env:_ ->
+           incr availability_calls ;
+           true)
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+    let result = run ~env ~sw ~backend_id:id (spec ()) in
+    Alcotest.(check bool) (label ^ " result") expected_ok (Result.is_ok result) ;
+    Alcotest.(check int)
+      (label ^ " backend calls")
+      (if expected_ok then 1 else 0)
+      !calls ;
+    Alcotest.(check int)
+      (label ^ " availability calls")
+      (if expected_ok then 1 else 0)
+      !availability_calls
+  in
+  run_case
+    ~label:"below"
+    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' '1.2.2'\n")
+    ~expected_ok:false ;
+  run_case
+    ~label:"current"
+    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' '1.2.3'\n")
+    ~expected_ok:true ;
+  run_case
+    ~label:"above"
+    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' '2.0.0'\n")
+    ~expected_ok:true ;
+  run_case
+    ~label:"unparseable"
+    ~version_script:(Some "#!/bin/sh\nprintf '%s\\n' 'unknown version'\n")
+    ~expected_ok:true ;
+  run_case ~label:"missing" ~version_script:None ~expected_ok:true
+
+let test_dispatch_sanitizes_backend_exceptions () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let assert_sanitized label result =
+    match result with
+    | Ok _ -> Alcotest.failf "%s exception must become a dispatch error" label
+    | Error error ->
+        let rendered = Runtime_dispatch.render_error error in
+        Alcotest.(check bool)
+          (label ^ " secret removed")
+          false
+          (contains rendered "dispatch-secret") ;
+        Alcotest.(check bool)
+          (label ^ " path removed")
+          false
+          (contains rendered "/private/dispatch-secret")
+  in
+  let availability_id = "dispatch-availability-exception" in
+  let availability_calls = ref 0 in
+  let availability_backend =
+    make_backend
+      ~id:availability_id
+      ~calls:(ref 0)
+      ~availability:(fun ~sw:_ ~env:_ ->
+        incr availability_calls ;
+        failwith "dispatch-secret /private/dispatch-secret")
+      (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())
+  in
+  register_pair ~id:availability_id availability_backend ;
+  assert_sanitized
+    "availability"
+    (run ~env ~sw ~backend_id:availability_id (spec ())) ;
+  Alcotest.(check int) "availability attempted once" 1 !availability_calls ;
+
+  let run_id = "dispatch-run-exception" in
+  let run_calls = ref 0 in
+  register_pair
+    ~id:run_id
+    (make_backend ~id:run_id ~calls:run_calls (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+         failwith "dispatch-secret /private/dispatch-secret")) ;
+  assert_sanitized "run_task" (run ~env ~sw ~backend_id:run_id (spec ())) ;
+  Alcotest.(check int) "run attempted once" 1 !run_calls
+
+let test_dispatch_preserves_cancellation () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let id = "dispatch-cancellation" in
+  register_pair
+    ~id
+    (make_backend
+       ~id
+       ~calls:(ref 0)
+       ~availability:(fun ~sw:_ ~env:_ ->
+         raise (Eio.Cancel.Cancelled (Failure "dispatch-secret")))
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ())) ;
+  match run ~env ~sw ~backend_id:id (spec ()) with
+  | exception Eio.Cancel.Cancelled _ -> ()
+  | exception error ->
+      Alcotest.failf "unexpected exception: %s" (Printexc.to_string error)
+  | Ok _ -> Alcotest.fail "cancellation must propagate"
+  | Error error ->
+      Alcotest.failf
+        "cancellation was converted to %s"
+        (Runtime_dispatch.render_error error)
 
 let test_validator_wrapper_dispatches_read_only_task () =
   with_registry @@ fun () ->
@@ -410,6 +598,22 @@ let () =
             "by-name wrapper resolves call-time override"
             `Quick
             test_by_name_wrapper_resolves_override_at_each_call;
+          Alcotest.test_case
+            "by-name wrapper rejects malformed static id"
+            `Quick
+            test_by_name_rejects_malformed_id_without_resolution;
+          Alcotest.test_case
+            "installed version policy is enforced"
+            `Quick
+            test_dispatch_enforces_installed_version_policy;
+          Alcotest.test_case
+            "ordinary backend exceptions are sanitized"
+            `Quick
+            test_dispatch_sanitizes_backend_exceptions;
+          Alcotest.test_case
+            "cancellation propagates"
+            `Quick
+            test_dispatch_preserves_cancellation;
           Alcotest.test_case
             "validator wrapper dispatches read-only"
             `Quick
