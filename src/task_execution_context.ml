@@ -13,6 +13,7 @@ type t = {
   token_usage_emitted : bool Atomic.t;
   structured_text_claimed : bool Atomic.t;
   final_public_text : bool Atomic.t;
+  requested_delivery : Backend_types.attempt_delivery option Atomic.t;
 }
 
 let create ~remaining_time event_sink =
@@ -24,6 +25,7 @@ let create ~remaining_time event_sink =
     token_usage_emitted = Atomic.make false;
     structured_text_claimed = Atomic.make false;
     final_public_text = Atomic.make false;
+    requested_delivery = Atomic.make None;
   }
 
 let remaining_time context = context.remaining_time ()
@@ -60,3 +62,10 @@ let structured_text_claimed context = Atomic.get context.structured_text_claimed
 let mark_final_public_text context = Atomic.set context.final_public_text true
 
 let final_public_text context = Atomic.get context.final_public_text
+
+let requested_delivery context = Atomic.get context.requested_delivery
+
+module Private = struct
+  let set_requested_delivery context delivery =
+    Atomic.set context.requested_delivery (Some delivery)
+end

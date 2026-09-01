@@ -189,7 +189,7 @@ let test_native_schema_path_is_single_call () =
         (Some object_schema)
         (List.hd (List.rev !captured_schemas))
 
-let test_native_schema_rejection_returns_error () =
+let test_native_backend_failure_with_schema_returns_error () =
   let backend, call_count, _, _ =
     make_mock
       ~supports_resume:false
@@ -213,9 +213,9 @@ let test_native_schema_rejection_returns_error () =
       ~json_schema:(Some object_schema)
       ~resume_session_id:None
   with
-  | Ok _ -> Alcotest.fail "expected Error on native schema rejection"
+  | Ok _ -> Alcotest.fail "expected Error on native backend failure"
   | Error msg ->
-      Alcotest.(check int) "native rejection is single-call" 1 !call_count ;
+      Alcotest.(check int) "native failure is single-call" 1 !call_count ;
       (* The message must NOT claim the schema was at fault: this path is
          reached for any non-zero exit while a schema was in force. Asserting
          the cause sends a diagnosis after the schema when the real failure was
@@ -255,8 +255,8 @@ let () =
             `Quick
             test_native_schema_path_is_single_call;
           Alcotest.test_case
-            "native schema rejection returns error"
+            "native backend failure with schema returns error"
             `Quick
-            test_native_schema_rejection_returns_error;
+            test_native_backend_failure_with_schema_returns_error;
         ] );
     ]

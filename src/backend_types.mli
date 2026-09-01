@@ -378,6 +378,119 @@ type task_result = {
 }
 [@@deriving show, eq, yojson]
 
+(** {1 Detailed Task Execution} *)
+
+(** Stable kind of one backend call within a detailed execution.
+
+    This algebra is shared with {!Task_event.attempt_kind}: [Initial_attempt]
+    is the caller's invocation, [Fresh_attempt] is a schema retry using a new
+    backend invocation, and [Resumed_attempt] is a schema retry of an existing
+    backend session. *)
+type attempt_kind = Initial_attempt | Fresh_attempt | Resumed_attempt
+
+(** Media handling selected for one invoked backend attempt.
+
+    [Upload_attachments] requests that a future media-aware transport resolve
+    the workspace-relative references and send their bytes. It applies to initial
+    and fresh attempts. [Reuse_session_attachments] requests no second upload
+    because a resumed session is expected to retain them; the attachment
+    metadata remains available as reference/digest telemetry. These constructors
+    describe intent, not proof of transport behavior or preflight approval. *)
+type attachment_delivery = Upload_attachments | Reuse_session_attachments
+
+(** Requested input-delivery policy for one attempt.
+
+    This record contains attachment metadata, including workspace-relative
+    paths and digests, copied from the task specification for in-process
+    host/transport inspection. It neither performs preflight/content loading nor
+    proves that a transport honored the request. Cabal does not put it into
+    normalized task events or rendered execution errors. *)
+type attempt_delivery = {
+  attachment_references : media_attachment list;
+      (** Requested attachment references/digests, never attachment bytes. *)
+  attachment_delivery : attachment_delivery;
+      (** Whether a transport uploads from the references or reuses session
+          media. *)
+  web_access_policy : web_access;
+      (** Web policy preserved from the caller's task. *)
+}
+
+(** Complete telemetry for one actually invoked backend call.
+
+    [number] is 1-based and attempts are stored in invocation order.
+    [result] is retained without projection, including its own backend-reported
+    elapsed time, cost, session and output fields. [attempt_elapsed] separately
+    measures the backend call at the enforcer boundary using the monotonic clock.
+    [schema_validation_error] is [Some message] only when this successful
+    transport result was actually validated and rejected by the validator. *)
+type task_attempt = {
+  number : int;  (** 1-based invocation number. *)
+  kind : attempt_kind;  (** Initial, fresh retry, or resumed retry. *)
+  result : task_result;  (** Complete unmodified backend result. *)
+  attempt_elapsed : duration;
+      (** Monotonic elapsed time around this backend call. *)
+  schema_validation_error : string option;
+      (** Validator error for this result, when validation was applicable and
+          failed. *)
+  delivery : attempt_delivery;
+      (** Requested media/web intent exposed to the backend before this call. *)
+}
+
+(** Detailed result of one schema-enforcer invocation.
+
+    [attempts] contains every completed backend call in order. [total_elapsed]
+    is measured once around the complete enforcer invocation and is not a sum of
+    backend- or attempt-reported durations. [total_cost] aggregates each optional
+    cost/token field independently across attempts. [final_session_id] is the
+    last non-empty session id returned by any completed attempt. *)
+type task_execution = {
+  final_result : task_result;
+      (** Final projected result. On retry success this is the complete
+          successful retry result. *)
+  attempts : task_attempt list;  (** Ordered completed backend calls. *)
+  total_elapsed : duration;  (** Monotonic wall-clock time for the enforcer. *)
+  total_cost : cost option;  (** Field-wise aggregate over attempt costs. *)
+  final_session_id : string option;
+      (** Last non-empty session id across [attempts]. *)
+}
+
+(** Classified failure of the invoked corrective attempt.
+
+    [Schema_validation_failure] is a second validator rejection.
+    [Transport_failure] is a non-success backend result. [Resume_failure] is a
+    non-success result recognized by the backend as rejection/failure of the
+    requested session resume. The complete result remains in the enclosing
+    {!task_execution}. *)
+type retry_failure =
+  | Schema_validation_failure of string
+  | Transport_failure of result_status
+  | Resume_failure of result_status
+
+(** Structured schema-enforcement failure retaining complete execution data.
+
+    [Native_backend_failure_with_schema] is fail-fast after one native-schema
+    backend call. It intentionally does not claim that the backend classified
+    the failure as a schema rejection. [Schema_retry_failed] retains the first
+    validator error separately from the classified second failure. When the
+    second failure is
+    [Schema_validation_failure error], both validator strings are therefore
+    independently inspectable, while both complete results remain in
+    [execution.attempts]. *)
+type task_execution_error =
+  | Native_backend_failure_with_schema of {
+      execution : task_execution;
+      message : string;
+    }
+      (** One native-schema backend call returned [Failed message]. *)
+  | Schema_retry_failed of {
+      execution : task_execution;
+          (** Complete telemetry for both invoked attempts. *)
+      attempt_1_validation_error : string;
+          (** Validator rejection from the initial attempt. *)
+      attempt_2_failure : retry_failure;
+          (** Classified failure from the corrective attempt. *)
+    }
+
 (** Opaque task request wrapper carrying caller-owned context through backend
     execution. The backend library treats [ctxt] as an uninterpreted value. *)
 type 'ctxt task_request = {
@@ -508,6 +621,18 @@ val empty_report : structured_report
     {violates}
     (none) *)
 val empty_cost : cost
+
+(** [aggregate_costs costs] aggregates optional backend cost records field by
+    field. Unknown values are ignored only for their own field: known values in
+    that field are summed, while a field for which every attempt is unknown
+    remains [None]. The result is [None] only when every input cost record is
+    [None]; a present all-unknown record produces [Some empty_cost]. A negative
+    integer or float, NaN, or infinite float invalidates only its own field and
+    yields [None] for that field. Non-negative integer overflow saturates at
+    [max_int], and finite float overflow saturates at [max_float]. Currency and
+    token units are inherited unchanged from {!type:cost}. The helper does not
+    mutate input records or fabricate values for all-unknown fields. *)
+val aggregate_costs : cost option list -> cost option
 
 (** [make_task_result ~status ()] creates a task result with sensible defaults.
 

@@ -55,3 +55,20 @@ val mark_final_public_text : t -> unit
 
 (** Whether final result text was proven public by the authoritative parser. *)
 val final_public_text : t -> bool
+
+(** [requested_delivery context] returns the attachment/web delivery intent
+    selected for the backend call currently being invoked. Schema enforcement
+    sets it before every backend invocation. Future media-aware transports may
+    inspect it to distinguish initial/fresh attachment upload from
+    resumed-session reuse.
+
+    This is requested intent, not proof that a transport honored the request and
+    not a substitute for attachment preflight. It is [None] before an enforcer
+    has selected an attempt policy. *)
+val requested_delivery : t -> Backend_types.attempt_delivery option
+
+module Private : sig
+  val set_requested_delivery : t -> Backend_types.attempt_delivery -> unit
+  (** Enforcer-owned setter. Backend transports should use
+      {!requested_delivery} and must not rewrite the selected policy. *)
+end

@@ -53,13 +53,75 @@ val resume_retry_template : string
     that order. *)
 val fresh_retry_template : string
 
+(** [render_error error] renders a detailed schema-enforcement error with the
+    exact compatibility text used by {!run_task}. Double failures retain the
+    historical [Attempt 1] and [Attempt 2] labels. Native failures retain the
+    historical bounded-stderr suffix. This renderer never includes attachment
+    metadata, prompts, or task-result output beyond that existing native stderr
+    compatibility surface. *)
+val render_error : task_execution_error -> string
+
+(** [run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec] executes
+    [spec] and returns ordered attempt telemetry.
+
+    This is the detailed low-level counterpart of {!run_task}. It preserves the
+    same native/pass-through/validate-and-retry routing and the hard maximum of
+    two backend calls. Every backend call that returns a [task_result] produces
+    exactly one {!Backend_types.task_attempt}; a retry suppressed before
+    invocation by the shared deadline or cancellation produces no attempt.
+
+    [task_attempt.attempt_elapsed] and [task_execution.total_elapsed] use
+    [env]'s monotonic clock. Total elapsed is measured once around the complete
+    enforcer, including resume-failure classification, and is not a sum. Costs
+    are aggregated with {!Backend_types.aggregate_costs}, and the final session
+    is the last nonblank trimmed session id.
+
+    Initial and fresh attempts request [Upload_attachments]. Resumed attempts
+    request [Reuse_session_attachments] while retaining attachment
+    references/digests and [web_access] in both their task spec and detailed
+    delivery telemetry. The same requested intent is installed in [context]
+    before the backend invocation for transport inspection. It is not proof of
+    preflight approval, content loading, or transport compliance. When [context]
+    has a bounded absolute deadline, the
+    current remaining duration replaces the original timeout in the retry spec;
+    an expired deadline suppresses the retry transition and backend call.
+
+    Resume is selected only for a nonblank trimmed session id. A failed invoked
+    resume is returned as structured [Schema_retry_failed] with [Resume_failure].
+    If backend resume-failure classification raises an ordinary exception, the
+    completed result is conservatively [Transport_failure] and a sanitized
+    diagnostic is emitted; cancellation and fatal runtime exceptions propagate.
+    A failed resume never triggers an automatic third fresh call. Under the
+    two-call cap, a caller wanting that fresh fallback starts a new enforcer
+    invocation; that new initial/fresh attempt requests attachment upload.
+
+    [backend] must be available and [sw] must remain open for the invocation.
+    The function guarantees:
+
+    - [json_schema = None] and native-schema paths invoke exactly once.
+    - Validate-and-retry invokes once or twice, never three times.
+    - [Ok execution] selects the successful final attempt when validation
+      succeeds, or preserves an existing propagated non-success/deadline result.
+    - [Error detail] retains all completed attempts and classifies native,
+      validator, backend transport, and recognized resume failures. *)
+val run_task_detailed :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  ?context:Task_execution_context.t ->
+  ?on_raw_line:(string -> unit) ->
+  backend:Agentic_backend.t ->
+  task_spec ->
+  (task_execution, task_execution_error) result
+
 (** [run_task ~sw ~env ?context ?on_raw_line ~backend spec] executes [spec] with
     optional JSON schema enforcement.
 
     This remains a low-level compatibility API. It intentionally accepts an
     explicit backend snapshot and does not resolve registries or run CBL-03
     preflight. Hosts should normally call [Runtime_dispatch.run_task]; direct
-    use is appropriate only when the caller owns those checks.
+    use is appropriate only when the caller owns those checks. It is implemented
+    solely as a projection of {!run_task_detailed}; detailed errors are rendered
+    through {!render_error}.
 
     {pre}
     [backend] must be available.  [sw] must be an open switch with sufficient

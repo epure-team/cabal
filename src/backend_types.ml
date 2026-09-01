@@ -207,6 +207,54 @@ type task_result = {
 }
 [@@deriving show, eq, yojson]
 
+(* Detailed task execution and retry telemetry. These records deliberately do
+   not derive serialization: attachment metadata and complete backend results
+   remain an inspectable in-process API rather than normalized event/error
+   payloads. *)
+
+type attempt_kind = Initial_attempt | Fresh_attempt | Resumed_attempt
+
+type attachment_delivery = Upload_attachments | Reuse_session_attachments
+
+type attempt_delivery = {
+  attachment_references : media_attachment list;
+  attachment_delivery : attachment_delivery;
+  web_access_policy : web_access;
+}
+
+type task_attempt = {
+  number : int;
+  kind : attempt_kind;
+  result : task_result;
+  attempt_elapsed : duration;
+  schema_validation_error : string option;
+  delivery : attempt_delivery;
+}
+
+type task_execution = {
+  final_result : task_result;
+  attempts : task_attempt list;
+  total_elapsed : duration;
+  total_cost : cost option;
+  final_session_id : string option;
+}
+
+type retry_failure =
+  | Schema_validation_failure of string
+  | Transport_failure of result_status
+  | Resume_failure of result_status
+
+type task_execution_error =
+  | Native_backend_failure_with_schema of {
+      execution : task_execution;
+      message : string;
+    }
+  | Schema_retry_failed of {
+      execution : task_execution;
+      attempt_1_validation_error : string;
+      attempt_2_failure : retry_failure;
+    }
+
 type 'ctxt task_request = {spec : task_spec; ctxt : 'ctxt}
 
 type 'ctxt task_response = {result : task_result; ctxt : 'ctxt}
@@ -274,6 +322,69 @@ let empty_cost =
     cache_creation_input_tokens = None;
     cache_read_input_tokens = None;
   }
+
+type 'a aggregate_field = Unknown | Invalid | Total of 'a
+
+let sum_optional_int values =
+  let state =
+    List.fold_left
+      (fun state -> function
+        | None -> state
+        | Some value -> (
+            if value < 0 then Invalid
+            else
+              match state with
+              | Invalid -> Invalid
+              | Unknown -> Total value
+              | Total total ->
+                  if value > max_int - total then Total max_int
+                  else Total (total + value)))
+      Unknown
+      values
+  in
+  match state with Unknown | Invalid -> None | Total total -> Some total
+
+let sum_optional_float values =
+  let state =
+    List.fold_left
+      (fun state -> function
+        | None -> state
+        | Some value -> (
+            if
+              value < 0.0 || Float.is_nan value || Float.is_infinite value
+            then Invalid
+            else
+              match state with
+              | Invalid -> Invalid
+              | Unknown -> Total value
+              | Total total ->
+                  if total > max_float -. value then Total max_float
+                  else Total (total +. value)))
+      Unknown
+      values
+  in
+  match state with Unknown | Invalid -> None | Total total -> Some total
+
+let aggregate_costs costs =
+  let costs = List.filter_map Fun.id costs in
+  match costs with
+  | [] -> None
+  | costs ->
+      Some
+        {
+          tokens_input =
+            sum_optional_int (List.map (fun cost -> cost.tokens_input) costs);
+          tokens_output =
+            sum_optional_int (List.map (fun cost -> cost.tokens_output) costs);
+          cost_usd =
+            sum_optional_float (List.map (fun cost -> cost.cost_usd) costs);
+          cache_creation_input_tokens =
+            sum_optional_int
+              (List.map (fun cost -> cost.cache_creation_input_tokens) costs);
+          cache_read_input_tokens =
+            sum_optional_int
+              (List.map (fun cost -> cost.cache_read_input_tokens) costs);
+        }
 
 let make_task_result ~status ?(files_changed = []) ?report ?(elapsed = 0.0)
     ?cost ?(stdout = "") ?(agent_text = "") ?(stderr = "") ?(exit_code = 0)

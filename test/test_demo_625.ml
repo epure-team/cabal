@@ -98,8 +98,8 @@ let valid_json_result ?(session_id = "sess-42") () =
     ~session_id
     ()
 
-(** A failed result simulating native schema rejection. *)
-let native_rejection_result () =
+(** A failed native-backend result while a schema is in force. *)
+let native_failure_result () =
   Backend_types.make_task_result
     ~status:
       (Backend_types.Failed "unsupported JSON Schema keywords: $defs, if, then")
@@ -131,14 +131,14 @@ let test_native_no_validation_no_retry () =
     !call_count ;
   Alcotest.(check bool) "AC-N1: result is Ok" true (Result.is_ok result)
 
-(** {1 AC-N2 — native rejection is returned as Error immediately}
+(** {1 AC-N2 — native backend failure is returned as Error immediately}
 
     When the native backend returns [Failed], the enforcer must return
     [Error] containing the word "native" and must NOT make a second call. *)
 
-let test_native_rejection_fail_fast () =
+let test_native_failure_fail_fast () =
   let backend, call_count, _ =
-    make_native_mock ~responses:[native_rejection_result ()] ()
+    make_native_mock ~responses:[native_failure_result ()] ()
   in
   let spec =
     Backend_types.make_task_spec
@@ -155,10 +155,10 @@ let test_native_rejection_fail_fast () =
     1
     !call_count ;
   match result with
-  | Ok _ -> Alcotest.fail "AC-N2: expected Error (native rejection) but got Ok"
+  | Ok _ -> Alcotest.fail "AC-N2: expected native failure Error but got Ok"
   | Error msg ->
       Alcotest.(check bool)
-        "AC-N2: error message identifies native rejection"
+        "AC-N2: error message identifies native backend"
         true
         (contains msg "native")
 
@@ -237,6 +237,38 @@ let test_native_schema_in_spec () =
         true
         (Option.is_some received_spec.Backend_types.json_schema)
 
+let test_native_failure_retains_detailed_attempt () =
+  let rejection = native_failure_result () in
+  let backend, call_count, _ = make_native_mock ~responses:[rejection] () in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"give me json"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  match Json_schema_enforcer.run_task_detailed ~sw ~env ~backend spec with
+  | Error
+      (Backend_types.Native_backend_failure_with_schema {execution; message}) ->
+      Alcotest.(check int) "detailed native path remains one call" 1 !call_count ;
+      Alcotest.(check bool)
+        "complete rejection result retained"
+        true
+        (match execution.Backend_types.attempts with
+        | [attempt] -> attempt.result = rejection
+        | _ -> false) ;
+      Alcotest.(check bool)
+        "native failure detail retained"
+        true
+        (contains message "unsupported JSON Schema keywords")
+  | Error error ->
+      Alcotest.failf
+        "unexpected detailed error: %s"
+        (Json_schema_enforcer.render_error error)
+  | Ok _ -> Alcotest.fail "expected detailed native failure"
+
 let () =
   Alcotest.run
     "Story_625_native_json_schema_wiring"
@@ -248,12 +280,12 @@ let () =
             `Quick
             test_native_no_validation_no_retry;
         ] );
-      ( "AC-N2 native rejection — fail-fast, no fallback",
+      ( "AC-N2 native failure — fail-fast, no fallback",
         [
           Alcotest.test_case
             "Failed result returns Error with native message, 1 call"
             `Quick
-            test_native_rejection_fail_fast;
+            test_native_failure_fail_fast;
         ] );
       ( "AC-N3 no schema — native pass-through unchanged",
         [
@@ -275,5 +307,12 @@ let () =
             "json_schema = Some in spec received by native backend run_task"
             `Quick
             test_native_schema_in_spec;
+        ] );
+      ( "CBL-05 detailed native failure",
+        [
+          Alcotest.test_case
+            "complete single attempt is retained"
+            `Quick
+            test_native_failure_retains_detailed_attempt;
         ] );
     ]

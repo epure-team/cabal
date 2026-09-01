@@ -64,14 +64,15 @@ let descriptor_for ?(session_resume = false) ?(native = false)
       };
   }
 
-let success ?(text = "ok") () =
+let success ?(text = "ok") ?session_id () =
   Backend_types.make_task_result
     ~status:Backend_types.Success
     ~agent_text:text
+    ?session_id
     ()
 
-let make_backend ?(session_resume = false) ?(native = false) ?availability ~id
-    ~calls run =
+let make_backend ?(session_resume = false) ?(native = false) ?availability
+    ?(on_context = fun _ -> ()) ~id ~calls run =
   let module Backend = struct
     let id = id
     let name = "Dispatch test backend"
@@ -88,8 +89,9 @@ let make_backend ?(session_resume = false) ?(native = false) ?availability ~id
     let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =
       Agentic_backend.Config_check_unsupported "not used"
 
-    let run_task ~sw ~env ?context:_ ?on_raw_line spec =
+    let run_task ~sw ~env ?context ?on_raw_line spec =
       incr calls ;
+      Option.iter on_context context ;
       run ~sw ~env ?on_raw_line spec
   end in
   (module Backend : Agentic_backend.S)
@@ -495,6 +497,66 @@ let test_enforcer_uses_resolved_backend_snapshot_for_retry () =
   | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)) ;
   Alcotest.(check int) "initial backend handles both attempts" 2 !first_calls ;
   Alcotest.(check int) "replacement is not used in flight" 0 !replacement_calls
+
+let test_dispatch_context_exposes_requested_delivery () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let schema =
+    `Assoc
+      [
+        ("type", `String "object");
+        ( "properties",
+          `Assoc [("value", `Assoc [("type", `String "string")])] );
+        ("required", `List [`String "value"]);
+      ]
+  in
+  List.iter
+    (fun (label, session_resume, expected_second) ->
+      let id = "dispatch-delivery-" ^ label in
+      let calls = ref 0 in
+      let observed = ref [] in
+      let backend =
+        make_backend
+          ~id
+          ~calls
+          ~session_resume
+          ~on_context:(fun context ->
+            observed :=
+              Task_execution_context.requested_delivery context :: !observed)
+          (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+            if !calls = 1 then
+              success
+                ~text:"not-json"
+                ?session_id:
+                  (if session_resume then Some "delivery-session" else None)
+                ()
+            else success ~text:{|{"value":"ok"}|} ())
+      in
+      register_pair ~id ~session_resume backend ;
+      (match run ~env ~sw ~backend_id:id (spec ~json_schema:schema ()) with
+      | Ok result ->
+          Alcotest.(check string)
+            (label ^ ": successful retry")
+            {|{"value":"ok"}|}
+            result.Backend_types.agent_text
+      | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)) ;
+      Alcotest.(check int) (label ^ ": exact calls") 2 !calls ;
+      let attachment_deliveries =
+        List.rev !observed
+        |> List.map (function
+             | Some delivery -> delivery.Backend_types.attachment_delivery
+             | None -> Alcotest.fail "dispatch backend observed no delivery intent")
+      in
+      Alcotest.(check bool)
+        (label ^ ": central context exposes exact attempt intents")
+        true
+        (attachment_deliveries
+        = [Backend_types.Upload_attachments; expected_second]))
+    [
+      ("fresh", false, Backend_types.Upload_attachments);
+      ("resume", true, Backend_types.Reuse_session_attachments);
+    ]
 
 let test_by_name_wrapper_resolves_override_at_each_call () =
   with_registry @@ fun () ->
@@ -938,6 +1000,10 @@ let () =
             "schema retry keeps resolved backend snapshot"
             `Quick
             test_enforcer_uses_resolved_backend_snapshot_for_retry;
+          Alcotest.test_case
+            "dispatch context exposes requested delivery"
+            `Quick
+            test_dispatch_context_exposes_requested_delivery;
           Alcotest.test_case
             "by-name wrapper resolves call-time override"
             `Quick
