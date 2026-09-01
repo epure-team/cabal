@@ -194,7 +194,7 @@ let run_enforcer_schema_compliance_for_backend ~sw ~env ~proc_mgr backend_id =
             | Error msg ->
                 Alcotest.failf
                   "Json_schema_enforcer returned Error (both attempts failed \
-                   schema validation or native rejection): %s"
+                   schema validation or native backend failure): %s"
                   msg
             | Ok task_result -> (
                 match task_result.status with

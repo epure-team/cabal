@@ -70,22 +70,30 @@ val render_error : task_execution_error -> string
     exactly one {!Backend_types.task_attempt}; a retry suppressed before
     invocation by the shared deadline or cancellation produces no attempt.
 
-    Attempt elapsed time and [task_execution.total_elapsed] use [env]'s
-    monotonic clock. Total elapsed is measured once around the enforcer and is
-    not a sum. Costs are aggregated with {!Backend_types.aggregate_costs}, and
-    the final session is the last non-empty session id.
+    [task_attempt.attempt_elapsed] and [task_execution.total_elapsed] use
+    [env]'s monotonic clock. Total elapsed is measured once around the complete
+    enforcer, including resume-failure classification, and is not a sum. Costs
+    are aggregated with {!Backend_types.aggregate_costs}, and the final session
+    is the last nonblank trimmed session id.
 
-    Initial and fresh attempts use [Upload_attachments]. Resumed attempts use
-    [Reuse_session_attachments] while retaining the approved attachment
+    Initial and fresh attempts request [Upload_attachments]. Resumed attempts
+    request [Reuse_session_attachments] while retaining attachment
     references/digests and [web_access] in both their task spec and detailed
-    delivery telemetry. When [context] has a bounded absolute deadline, the
+    delivery telemetry. The same requested intent is installed in [context]
+    before the backend invocation for transport inspection. It is not proof of
+    preflight approval, content loading, or transport compliance. When [context]
+    has a bounded absolute deadline, the
     current remaining duration replaces the original timeout in the retry spec;
     an expired deadline suppresses the retry transition and backend call.
 
-    A failed invoked resume is returned as structured [Schema_retry_failed]
-    with [Resume_failure]. It never triggers an automatic third fresh call.
-    Under the two-call cap, a caller wanting that fresh fallback starts a new
-    enforcer invocation; that new initial/fresh attempt uploads attachments.
+    Resume is selected only for a nonblank trimmed session id. A failed invoked
+    resume is returned as structured [Schema_retry_failed] with [Resume_failure].
+    If backend resume-failure classification raises an ordinary exception, the
+    completed result is conservatively [Transport_failure] and a sanitized
+    diagnostic is emitted; cancellation and fatal runtime exceptions propagate.
+    A failed resume never triggers an automatic third fresh call. Under the
+    two-call cap, a caller wanting that fresh fallback starts a new enforcer
+    invocation; that new initial/fresh attempt requests attachment upload.
 
     [backend] must be available and [sw] must remain open for the invocation.
     The function guarantees:

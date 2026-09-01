@@ -6,6 +6,14 @@
 (******************************************************************************)
 
 open Cabal
+open Backend_types
+
+(* CBL-05 source-compatibility guard: this projection intentionally has no
+   annotation. Adding another public [elapsed] record label must not change its
+   inference away from the legacy [task_result] field. *)
+let legacy_elapsed result = result.elapsed
+
+let _ = legacy_elapsed (make_task_result ~status:Success ~elapsed:1.0 ())
 
 module Migrated_backend = struct
   let id = "custom-compile-fixture"
@@ -22,7 +30,7 @@ module Migrated_backend = struct
 
   (* Downstream modules must add [?context], even when they do not consume it. *)
   let run_task ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ _spec =
-    Backend_types.make_task_result ~status:Backend_types.Success ()
+    make_task_result ~status:Success ()
 end
 
 let backend = (module Migrated_backend : Agentic_backend.S)

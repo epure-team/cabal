@@ -77,7 +77,7 @@ let bounded_stderr result =
       "\nbackend stderr: " ^ stderr
 
 let render_error = function
-  | Backend_types.Native_schema_rejection {execution; message} ->
+  | Backend_types.Native_backend_failure_with_schema {execution; message} ->
       "native-backend call failed with a schema in force: " ^ message
       ^ bounded_stderr execution.Backend_types.final_result
   | Backend_types.Schema_retry_failed
@@ -156,23 +156,36 @@ let delivery_for kind spec =
     web_access_policy = spec.Backend_types.web_access;
   }
 
-let make_attempt ~number ~kind ~spec ~result ~elapsed
+let prepare_delivery context kind spec =
+  let delivery = delivery_for kind spec in
+  Option.iter
+    (fun value ->
+      Task_execution_context.Private.set_requested_delivery value delivery)
+    context ;
+  delivery
+
+let make_attempt ~number ~kind ~delivery ~result ~attempt_elapsed
     ?schema_validation_error () =
   {
     Backend_types.number;
     kind;
     result;
-    elapsed;
+    attempt_elapsed;
     schema_validation_error;
-    delivery = delivery_for kind spec;
+    delivery;
   }
+
+let nonblank_session_id = function
+  | Some session_id -> (
+      match String.trim session_id with "" -> None | trimmed -> Some trimmed)
+  | None -> None
 
 let final_session_id attempts =
   List.fold_left
     (fun selected (attempt : Backend_types.task_attempt) ->
-      match attempt.result.session_id with
-      | Some session_id when String.trim session_id <> "" -> Some session_id
-      | Some _ | None -> selected)
+      match nonblank_session_id attempt.result.session_id with
+      | Some session_id -> Some session_id
+      | None -> selected)
     None
     attempts
 
@@ -204,6 +217,24 @@ let remaining_retry_spec context spec =
       | Some remaining -> Some {spec with Backend_types.timeout = remaining}
       | None -> Some spec)
 
+let warn_resume_classifier_failure () =
+  try
+    Diagnostics.warn
+      "resume failure classifier raised; treating the completed backend result \
+       as a transport failure"
+  with
+  | Eio.Cancel.Cancelled _ as cancellation -> raise cancellation
+  | (Out_of_memory | Stack_overflow | Sys.Break) as fatal -> raise fatal
+  | _ -> ()
+
+let is_resume_failure backend result =
+  try Agentic_backend.is_resume_failure backend result with
+  | Eio.Cancel.Cancelled _ as cancellation -> raise cancellation
+  | (Out_of_memory | Stack_overflow | Sys.Break) as fatal -> raise fatal
+  | _ ->
+      warn_resume_classifier_failure () ;
+      false
+
 let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
   let clock = Eio.Stdenv.mono_clock env in
   let started_at = Eio.Time.Mono.now clock in
@@ -213,16 +244,19 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
     context ;
   match spec.Backend_types.json_schema with
   | None ->
-      let result, elapsed =
+      let delivery =
+        prepare_delivery context Backend_types.Initial_attempt spec
+      in
+      let result, attempt_elapsed =
         run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec
       in
       let attempt =
         make_attempt
           ~number:1
           ~kind:Backend_types.Initial_attempt
-          ~spec
+          ~delivery
           ~result
-          ~elapsed
+          ~attempt_elapsed
           ()
       in
       Ok
@@ -241,16 +275,19 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
            reached for any non-zero exit while a schema was in force, which
            includes a rejected schema but equally a rate limit, a network
            failure, a bad flag, or the process being killed. *)
-        let result, elapsed =
+        let delivery =
+          prepare_delivery context Backend_types.Initial_attempt spec
+        in
+        let result, attempt_elapsed =
           run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec
         in
         let attempt =
           make_attempt
             ~number:1
             ~kind:Backend_types.Initial_attempt
-            ~spec
+            ~delivery
             ~result
-            ~elapsed
+            ~attempt_elapsed
             ()
         in
         let execution =
@@ -263,7 +300,7 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
         match result.Backend_types.status with
         | Backend_types.Failed msg ->
             Error
-              (Backend_types.Native_schema_rejection
+              (Backend_types.Native_backend_failure_with_schema
                  {execution; message = msg})
         | Backend_types.Success | Backend_types.Timeout
         | Backend_types.Cancelled ->
@@ -273,7 +310,10 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
            agent_text, and make at most one corrective re-invocation on failure.
            Hard cap of two backend calls per run_task invocation. *)
         let schema_json = Yojson.Safe.to_string ~std:true schema in
-        let result1, elapsed1 =
+        let delivery1 =
+          prepare_delivery context Backend_types.Initial_attempt spec
+        in
+        let result1, attempt_elapsed1 =
           run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec
         in
         (* Schema validation only makes sense for successful invocations.
@@ -286,9 +326,9 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
               make_attempt
                 ~number:1
                 ~kind:Backend_types.Initial_attempt
-                ~spec
+                ~delivery:delivery1
                 ~result:result1
-                ~elapsed:elapsed1
+                ~attempt_elapsed:attempt_elapsed1
                 ()
             in
             Ok
@@ -307,9 +347,9 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                   make_attempt
                     ~number:1
                     ~kind:Backend_types.Initial_attempt
-                    ~spec
+                    ~delivery:delivery1
                     ~result:result1
-                    ~elapsed:elapsed1
+                    ~attempt_elapsed:attempt_elapsed1
                     ()
                 in
                 Ok
@@ -323,15 +363,17 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                   make_attempt
                     ~number:1
                     ~kind:Backend_types.Initial_attempt
-                    ~spec
+                    ~delivery:delivery1
                     ~result:result1
-                    ~elapsed:elapsed1
+                    ~attempt_elapsed:attempt_elapsed1
                     ~schema_validation_error:err1
                     ()
                 in
                 let retry_spec, retry_kind, attempt_kind =
                   if Agentic_backend.supports_session_resume backend then
-                    match result1.Backend_types.session_id with
+                    match
+                      nonblank_session_id result1.Backend_types.session_id
+                    with
                     | Some sid ->
                         ( make_resume_retry_spec
                             ~base:spec
@@ -362,7 +404,10 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                           ~kind:retry_kind
                           ~reason:err1)
                       context ;
-                    let result2, elapsed2 =
+                    let delivery2 =
+                      prepare_delivery context attempt_kind retry_spec
+                    in
+                    let result2, attempt_elapsed2 =
                       run_backend
                         ~sw
                         ~env
@@ -376,9 +421,9 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                       make_attempt
                         ~number:2
                         ~kind:attempt_kind
-                        ~spec:retry_spec
+                        ~delivery:delivery2
                         ~result:result2
-                        ~elapsed:elapsed2
+                        ~attempt_elapsed:attempt_elapsed2
                         ?schema_validation_error
                         ()
                     in
@@ -386,19 +431,19 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                     | Backend_types.Failed _ | Backend_types.Timeout
                     | Backend_types.Cancelled ->
                         let attempts = [attempt1; attempt2 ()] in
+                        let attempt_2_failure =
+                          if
+                            attempt_kind = Backend_types.Resumed_attempt
+                            && is_resume_failure backend result2
+                          then Backend_types.Resume_failure result2.status
+                          else Backend_types.Transport_failure result2.status
+                        in
                         let execution =
                           make_execution
                             ~clock
                             ~started_at
                             ~attempts
                             ~final_result:result2
-                        in
-                        let attempt_2_failure =
-                          if
-                            attempt_kind = Backend_types.Resumed_attempt
-                            && Agentic_backend.is_resume_failure backend result2
-                          then Backend_types.Resume_failure result2.status
-                          else Backend_types.Transport_failure result2.status
                         in
                         Error
                           (Backend_types.Schema_retry_failed

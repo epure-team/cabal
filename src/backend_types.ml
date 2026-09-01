@@ -226,7 +226,7 @@ type task_attempt = {
   number : int;
   kind : attempt_kind;
   result : task_result;
-  elapsed : duration;
+  attempt_elapsed : duration;
   schema_validation_error : string option;
   delivery : attempt_delivery;
 }
@@ -245,7 +245,10 @@ type retry_failure =
   | Resume_failure of result_status
 
 type task_execution_error =
-  | Native_schema_rejection of {execution : task_execution; message : string}
+  | Native_backend_failure_with_schema of {
+      execution : task_execution;
+      message : string;
+    }
   | Schema_retry_failed of {
       execution : task_execution;
       attempt_1_validation_error : string;
@@ -320,27 +323,47 @@ let empty_cost =
     cache_read_input_tokens = None;
   }
 
+type 'a aggregate_field = Unknown | Invalid | Total of 'a
+
 let sum_optional_int values =
-  let known, total =
+  let state =
     List.fold_left
-      (fun (known, total) -> function
-        | Some value -> (true, total + value)
-        | None -> (known, total))
-      (false, 0)
+      (fun state -> function
+        | None -> state
+        | Some value -> (
+            if value < 0 then Invalid
+            else
+              match state with
+              | Invalid -> Invalid
+              | Unknown -> Total value
+              | Total total ->
+                  if value > max_int - total then Total max_int
+                  else Total (total + value)))
+      Unknown
       values
   in
-  if known then Some total else None
+  match state with Unknown | Invalid -> None | Total total -> Some total
 
 let sum_optional_float values =
-  let known, total =
+  let state =
     List.fold_left
-      (fun (known, total) -> function
-        | Some value -> (true, total +. value)
-        | None -> (known, total))
-      (false, 0.0)
+      (fun state -> function
+        | None -> state
+        | Some value -> (
+            if
+              value < 0.0 || Float.is_nan value || Float.is_infinite value
+            then Invalid
+            else
+              match state with
+              | Invalid -> Invalid
+              | Unknown -> Total value
+              | Total total ->
+                  if total > max_float -. value then Total max_float
+                  else Total (total +. value)))
+      Unknown
       values
   in
-  if known then Some total else None
+  match state with Unknown | Invalid -> None | Total total -> Some total
 
 let aggregate_costs costs =
   let costs = List.filter_map Fun.id costs in
