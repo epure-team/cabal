@@ -192,14 +192,20 @@ let handle =
 in
 (* Safe and idempotent, including from another fiber. *)
 Task_runtime.cancel handle;
-let result = Task_runtime.await handle
+let result = Task_runtime.await handle in
+(* Optional: wait until the terminal callback and all earlier callbacks return. *)
+Task_runtime.await_event_delivery handle
 ```
 
-`await` is repeatable and supports concurrent waiters. Each handle owns a
+`await` is repeatable, supports concurrent waiters, and never waits for event
+callbacks. It is therefore safe to call `await` from the same handle's
+`Process_started` or terminal callback. Use `await_event_delivery` after `await`
+when deterministic observation of the terminal event is required; do not call
+the delivery waiter from inside that handle's callback. Each handle owns a
 private cancellation scope, so cancelling one task does not cancel siblings;
-cancelling the caller's parent switch still propagates to its tasks. Cleanup
-and process-group reaping complete before `await` returns a normalized
-`Cancelled` or `Timeout` result.
+cancelling the caller's parent switch still propagates to its tasks. Cleanup and
+process-group reaping complete before `await` returns a normalized `Cancelled`
+or `Timeout` result.
 
 `task_spec.timeout` is one absolute monotonic budget covering registry
 resolution, preflight, version and availability checks, every schema-enforcement
@@ -208,13 +214,34 @@ not reset it. Negative and NaN values are rejected before backend calls;
 `max_float`, the legacy default, remains effectively unbounded.
 
 `Task_event` assigns task-local increasing sequence numbers, attempt numbers,
-and start-relative monotonic timestamps. Exactly one terminal event is emitted.
-Normalized streams include lifecycle, retry, process ownership, session,
-public assistant text/tool identity, and token-usage events. Raw backend lines
-remain available only through `on_raw_line`; raw reasoning, tool arguments,
-paths, prompts, and callback exception text are not promoted into normalized
-events. Event callback exceptions are isolated and reported through a sanitized
-`Diagnostics` warning.
+and start-relative monotonic timestamps. Each invoked backend attempt has one
+`Attempt_started` and one `Attempt_finished`, including retries. Exactly one
+terminal event is accepted. One asynchronous task-local drain invokes callbacks
+serially in sequence order, never under the event-state mutex; a slow callback
+cannot delay backend execution or handle outcome resolution. The terminal is
+queued after all earlier events and no post-terminal events are accepted.
+Normalized streams include lifecycle, retry, process ownership, session, public
+assistant text/tool identity, and token-usage events. Raw backend lines remain
+available only through `on_raw_line`; raw reasoning, tool arguments, paths,
+prompts, malformed structured records, and callback exception text are not
+promoted into normalized events. Event callback exceptions are isolated and
+reported through a sanitized `Diagnostics` warning. Fatal runtime exceptions
+still propagate unchanged through `await`, after best-effort enqueue of one
+generic redacted failed terminal.
+
+This release changes `Agentic_backend.S` for downstream backend implementers.
+Every custom module must add the optional lifecycle argument to its method:
+
+```ocaml
+let run_task ~sw ~env ?context:_ ?on_raw_line spec =
+  (* existing implementation *)
+```
+
+This module-signature migration is source-breaking even when the backend ignores
+the context. Existing call sites using the first-class
+`Agentic_backend.run_task ~sw ~env backend spec` wrapper remain source-compatible
+and need no new argument. `test/test_custom_backend_compile.ml` is the canonical
+minimal compile fixture.
 
 ### Media and web preflight
 
@@ -242,9 +269,11 @@ must still pass. Eio cancellation is normalized to `Cancelled` only after
 task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
 All built-in descriptors currently declare no media support and `Web_disabled`
-pending backend-specific transport evidence. Direct calls to
+pending backend-specific transport evidence. Existing call sites invoking
 `Agentic_backend.run_task` and `Json_schema_enforcer.run_task` remain compatible
-low-level paths but intentionally bypass these central guarantees.
+low-level paths but intentionally bypass these central guarantees; modules that
+implement `Agentic_backend.S` must perform the migration described above.
+
 ### Redaction contract for hosts logging backend output
 
 Cabal's `Session_event_log` redacts events **before** writing them. Hosts
@@ -275,6 +304,14 @@ file-reading claims. The entry explicitly uses `No_version_gate`, so arbitrary
 or prerelease YAML CLI version formats remain compatible while availability is
 still checked. Project overrides replace backend, effective descriptor, YAML
 origin, and policy together.
+
+Output parsing remains fail-closed for structured built-in ids even in the
+extensible profile. YAML adapters named `claude-code`, `codex`, `gemini-cli`,
+`opencode`, or `pi` use that protocol's strict public-response parser. Error,
+reasoning, user, unknown, and malformed records remain available to
+`on_raw_line` but never fall back into normalized `Agent_text_delta` or final
+`task_result.agent_text`. Arbitrary custom ids retain their generic compatibility
+behavior and do not inherit a built-in parser accidentally.
 
 Built-in and explicit host descriptors remain immutable catalog entries; YAML
 does not replace or inherit them. Central dispatch uses only the effective
