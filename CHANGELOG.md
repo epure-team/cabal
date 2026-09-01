@@ -23,10 +23,14 @@ by the date a change merged to `main`.
   `Attempt_finished` events. One asynchronous task-local callback drain preserves
   sequence order without blocking backend execution or handle outcomes;
   `Task_runtime.await_event_delivery` explicitly waits for terminal callback
-  completion. Callback exceptions are isolated with sanitized diagnostics,
-  while raw lines and reasoning remain confined to `on_raw_line`. Process
-  cleanup/reaping and task-scoped Codex schema-file cleanup complete before
-  terminal enqueue.
+  completion. Its pending queue is capped at 256 events (192 observations plus a
+  64-slot lifecycle/marker/terminal reserve), 64 KiB of assistant text, and
+  16 KiB per text delta. Backpressure omissions are summarized without raw data
+  by `Event_delivery_truncated`; one bounded marker accumulates counts while
+  pending, and fully omitted events leave delivered sequence gaps. Callback
+  exceptions are isolated with sanitized diagnostics, while raw lines and
+  reasoning remain confined to `on_raw_line`. Process cleanup/reaping and
+  task-scoped Codex schema-file cleanup complete before terminal enqueue.
 - **Validated runtime bootstrap and central dispatch.**
   `Runtime_bootstrap` now offers compatibility-preserving `Extensible` loading
   and an atomic `Hardened_builtins` profile that ignores user/project adapters,

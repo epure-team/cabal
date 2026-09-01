@@ -206,6 +206,368 @@ let test_callback_delivery_is_fifo_serialized_and_non_blocking () =
     (List.init 22 (fun index -> index + 1))
     (List.rev !delivered)
 
+let truncation_totals events =
+  List.fold_left
+    (fun (text_events, text_bytes, control_events) event ->
+      match event.Task_event.payload with
+      | Task_event.Event_delivery_truncated counts ->
+          ( text_events + counts.agent_text_events,
+            text_bytes + counts.agent_text_bytes,
+            control_events + counts.control_events )
+      | _ -> (text_events, text_bytes, control_events))
+    (0, 0, 0)
+    events
+
+let test_pending_delivery_is_bounded_and_retains_lifecycle () =
+  Eio_posix.run @@ fun _env ->
+  Eio.Switch.run @@ fun sw ->
+  let first_started, resolve_first_started = Eio.Promise.create () in
+  let release_first, resolve_release_first = Eio.Promise.create () in
+  let delivered = ref [] in
+  let sink =
+    Task_event.create_sink
+      ~sw
+      ~now:(fun () -> 0.0)
+      ~on_event:(fun event ->
+        if event.Task_event.seq = 1 then begin
+          Eio.Promise.resolve resolve_first_started () ;
+          Eio.Promise.await release_first
+        end ;
+        delivered := event :: !delivered)
+      ()
+  in
+  Task_event.emit sink Task_event.Task_started ;
+  Eio.Promise.await first_started ;
+  Task_event.begin_attempt sink Task_event.Initial_attempt ;
+  let emitted_text_events = Task_event.max_pending_observational_events * 8 in
+  for index = 1 to emitted_text_events do
+    Task_event.emit sink (Task_event.Agent_text_delta (string_of_int index))
+  done ;
+  Task_event.emit sink (Task_event.Session_id "session-1") ;
+  Task_event.emit
+    sink
+    (Task_event.Tool_started {id = Some "tool-1"; name = "Read"}) ;
+  Task_event.emit
+    sink
+    (Task_event.Tool_finished {id = Some "tool-1"; name = Some "Read"}) ;
+  Task_event.emit
+    sink
+    (Task_event.Token_usage
+       {
+         Backend_types.tokens_input = Some 1;
+         tokens_output = Some 1;
+         cost_usd = None;
+         cache_creation_input_tokens = None;
+         cache_read_input_tokens = None;
+       }) ;
+  let pending_before_controls =
+    Task_event.Private.pending_delivery sink
+  in
+  Alcotest.(check bool)
+    "pending event count is bounded"
+    true
+    (pending_before_controls.event_count <= Task_event.max_pending_events) ;
+  Alcotest.(check bool)
+    "pending public text bytes are bounded"
+    true
+    (pending_before_controls.agent_text_bytes
+    <= Task_event.max_pending_agent_text_bytes) ;
+  Task_event.finish_attempt sink Task_event.Attempt_failed ;
+  Task_event.transition_to_retry
+    sink
+    ~kind:Task_event.Fresh_retry
+    ~reason:"schema mismatch" ;
+  Task_event.emit sink (Task_event.Process_started {pid = Some 42}) ;
+  Task_event.emit sink Task_event.Process_termination_requested ;
+  Task_event.emit sink Task_event.Process_kill_escalated ;
+  Task_event.emit sink (Task_event.Process_exited {exit_status = "failed"}) ;
+  Task_event.finish_attempt sink Task_event.Attempt_cancelled ;
+  Task_event.emit_terminal sink Task_event.Cancelled ;
+  Task_event.emit sink (Task_event.Process_started {pid = Some 99}) ;
+  Task_event.emit sink (Task_event.Agent_text_delta "post-terminal") ;
+  let pending_with_terminal = Task_event.Private.pending_delivery sink in
+  Alcotest.(check bool)
+    "terminal remains inside the total pending bound"
+    true
+    (pending_with_terminal.event_count <= Task_event.max_pending_events) ;
+  Eio.Promise.resolve resolve_release_first () ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  let delivered = List.rev !delivered in
+  let text_events, _, control_events = truncation_totals delivered in
+  Alcotest.(check int)
+    "every excess small text event is reported"
+    (emitted_text_events - Task_event.max_pending_observational_events)
+    text_events ;
+  Alcotest.(check int) "legitimate controls are not dropped" 0 control_events ;
+  let marker =
+    List.find_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Event_delivery_truncated counts -> Some counts
+        | _ -> None)
+      delivered
+    |> function
+    | Some counts -> counts
+    | None -> Alcotest.fail "missing truncation marker"
+  in
+  Alcotest.(check int) "saturated session is categorized" 1 marker.session_events ;
+  Alcotest.(check int) "saturated tool events are categorized" 2 marker.tool_events ;
+  Alcotest.(check int)
+    "saturated usage is categorized"
+    1
+    marker.token_usage_events ;
+  let rec check_increasing_with_gap saw_gap = function
+    | first :: (second :: _ as rest) ->
+        Alcotest.(check bool)
+          "delivered sequence stays increasing"
+          true
+          (first.Task_event.seq < second.seq) ;
+        check_increasing_with_gap
+          (saw_gap || second.seq > first.seq + 1)
+          rest
+    | [] | [_] -> saw_gap
+  in
+  Alcotest.(check bool)
+    "omitted events leave a documented sequence gap"
+    true
+    (check_increasing_with_gap false delivered) ;
+  let lifecycle =
+    List.filter_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Task_started -> Some "task-started"
+        | Task_event.Attempt_started Task_event.Initial_attempt ->
+            Some "attempt-1-started"
+        | Task_event.Attempt_finished Task_event.Attempt_failed ->
+            Some "attempt-1-finished"
+        | Task_event.Retry_transition _ -> Some "retry"
+        | Task_event.Attempt_started Task_event.Fresh_attempt ->
+            Some "attempt-2-started"
+        | Task_event.Process_started {pid = Some 42} -> Some "process-started"
+        | Task_event.Process_termination_requested -> Some "process-term"
+        | Task_event.Process_kill_escalated -> Some "process-kill"
+        | Task_event.Process_exited _ -> Some "process-exited"
+        | Task_event.Attempt_finished Task_event.Attempt_cancelled ->
+            Some "attempt-2-finished"
+        | Task_event.Terminal Task_event.Cancelled -> Some "terminal"
+        | _ -> None)
+      delivered
+  in
+  Alcotest.(check (list string))
+    "lifecycle and terminal survive saturation in FIFO order"
+    [ "task-started";
+      "attempt-1-started";
+      "attempt-1-finished";
+      "retry";
+      "attempt-2-started";
+      "process-started";
+      "process-term";
+      "process-kill";
+      "process-exited";
+      "attempt-2-finished";
+      "terminal";
+    ]
+    lifecycle ;
+  Alcotest.(check bool)
+    "terminal is the final callback and post-terminal events are rejected"
+    true
+    (match List.rev delivered with
+    | {Task_event.payload = Terminal Cancelled; _} :: _ ->
+        not
+          (List.exists
+             (fun event ->
+               match event.Task_event.payload with
+               | Process_started {pid = Some 99}
+               | Agent_text_delta "post-terminal" ->
+                   true
+               | _ -> false)
+             delivered)
+    | _ -> false)
+
+let test_oversized_delta_is_bounded_and_reported () =
+  Eio_posix.run @@ fun _env ->
+  Eio.Switch.run @@ fun sw ->
+  let first_started, resolve_first_started = Eio.Promise.create () in
+  let release_first, resolve_release_first = Eio.Promise.create () in
+  let delivered = ref [] in
+  let sink =
+    Task_event.create_sink
+      ~sw
+      ~now:(fun () -> 0.0)
+      ~on_event:(fun event ->
+        if event.Task_event.seq = 1 then begin
+          Eio.Promise.resolve resolve_first_started () ;
+          Eio.Promise.await release_first
+        end ;
+        delivered := event :: !delivered)
+      ()
+  in
+  Task_event.emit sink Task_event.Task_started ;
+  Eio.Promise.await first_started ;
+  let oversized_length = Task_event.max_agent_text_delta_bytes * 4 in
+  Task_event.emit
+    sink
+    (Task_event.Agent_text_delta (String.make oversized_length 'x')) ;
+  let additional_full_deltas = 10 in
+  for _ = 1 to additional_full_deltas do
+    Task_event.emit
+      sink
+      (Task_event.Agent_text_delta
+         (String.make Task_event.max_agent_text_delta_bytes 'y'))
+  done ;
+  let pending = Task_event.Private.pending_delivery sink in
+  Alcotest.(check int)
+    "accumulated pending text reaches but never exceeds its byte bound"
+    Task_event.max_pending_agent_text_bytes
+    pending.agent_text_bytes ;
+  Task_event.emit_terminal sink Task_event.Succeeded ;
+  Eio.Promise.resolve resolve_release_first () ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  let delivered = List.rev !delivered in
+  let retained_lengths =
+    List.filter_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Agent_text_delta text -> Some (String.length text)
+        | _ -> None)
+      delivered
+  in
+  let retained_length =
+    match retained_lengths with
+    | first :: _ -> first
+    | [] -> Alcotest.fail "missing retained oversized delta prefix"
+  in
+  Alcotest.(check int)
+    "oversized delta is truncated to the per-event limit"
+    Task_event.max_agent_text_delta_bytes
+    retained_length ;
+  Alcotest.(check bool)
+    "every delivered delta respects the per-event limit"
+    true
+    (List.for_all
+       (fun length -> length <= Task_event.max_agent_text_delta_bytes)
+       retained_lengths) ;
+  let retained_bytes = List.fold_left ( + ) 0 retained_lengths in
+  Alcotest.(check int)
+    "delivered text respects the accumulated byte limit"
+    Task_event.max_pending_agent_text_bytes
+    retained_bytes ;
+  let text_events, text_bytes, _ = truncation_totals delivered in
+  let emitted_bytes =
+    oversized_length
+    + (additional_full_deltas * Task_event.max_agent_text_delta_bytes)
+  in
+  let retained_delta_capacity =
+    Task_event.max_pending_agent_text_bytes
+    / Task_event.max_agent_text_delta_bytes
+  in
+  Alcotest.(check int)
+    "every partial or fully omitted delta is counted"
+    (1 + additional_full_deltas - (retained_delta_capacity - 1))
+    text_events ;
+  Alcotest.(check int)
+    "omitted bytes are reported exactly"
+    (emitted_bytes - retained_bytes)
+    text_bytes
+
+let test_repeated_dense_delivery_has_bounded_liveness () =
+  Eio_posix.run @@ fun _env ->
+  Eio.Switch.run @@ fun sw ->
+  for iteration = 1 to 20 do
+    let first_started, resolve_first_started = Eio.Promise.create () in
+    let release_first, resolve_release_first = Eio.Promise.create () in
+    let terminal_seen = ref false in
+    let sink =
+      Task_event.create_sink
+        ~sw
+        ~now:(fun () -> 0.0)
+        ~on_event:(fun event ->
+          if event.Task_event.seq = 1 then begin
+            Eio.Promise.resolve resolve_first_started () ;
+            Eio.Promise.await release_first
+          end ;
+          match event.Task_event.payload with
+          | Task_event.Terminal _ -> terminal_seen := true
+          | _ -> ())
+        ()
+    in
+    Task_event.emit sink Task_event.Task_started ;
+    Eio.Promise.await first_started ;
+    for index = 1 to Task_event.max_pending_observational_events * 4 do
+      Task_event.emit
+        sink
+        (Task_event.Agent_text_delta
+           (Printf.sprintf "%d-%d" iteration index))
+    done ;
+    let pending = Task_event.Private.pending_delivery sink in
+    Alcotest.(check bool)
+      "dense pending count remains bounded"
+      true
+      (pending.event_count <= Task_event.max_pending_events) ;
+    Alcotest.(check bool)
+      "dense pending bytes remain bounded"
+      true
+      (pending.agent_text_bytes <= Task_event.max_pending_agent_text_bytes) ;
+    Task_event.emit_terminal sink Task_event.Succeeded ;
+    Eio.Promise.resolve resolve_release_first () ;
+    Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+    Alcotest.(check bool) "dense terminal drains" true !terminal_seen
+  done
+
+let test_alternating_abusive_controls_use_one_bounded_marker () =
+  Eio_posix.run @@ fun _env ->
+  Eio.Switch.run @@ fun sw ->
+  let first_started, resolve_first_started = Eio.Promise.create () in
+  let release_first, resolve_release_first = Eio.Promise.create () in
+  let delivered = ref [] in
+  let sink =
+    Task_event.create_sink
+      ~sw
+      ~now:(fun () -> 0.0)
+      ~on_event:(fun event ->
+        if event.Task_event.seq = 1 then begin
+          Eio.Promise.resolve resolve_first_started () ;
+          Eio.Promise.await release_first
+        end ;
+        delivered := event :: !delivered)
+      ()
+  in
+  Task_event.emit sink Task_event.Task_started ;
+  Eio.Promise.await first_started ;
+  let emitted_per_category = 1_000 in
+  for _ = 1 to emitted_per_category do
+    Task_event.emit sink (Task_event.Agent_text_delta "x") ;
+    Task_event.emit sink Task_event.Preflight_started
+  done ;
+  Task_event.emit_terminal sink Task_event.Succeeded ;
+  let pending = Task_event.Private.pending_delivery sink in
+  Alcotest.(check int)
+    "all data, control, marker, and terminal slots are statically bounded"
+    Task_event.max_pending_events
+    pending.event_count ;
+  Eio.Promise.resolve resolve_release_first () ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  let markers =
+    List.filter_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Event_delivery_truncated counts -> Some counts
+        | _ -> None)
+      !delivered
+  in
+  Alcotest.(check int) "alternating pressure retains one marker" 1 (List.length markers) ;
+  match markers with
+  | [counts] ->
+      Alcotest.(check int)
+        "all omitted observations are counted"
+        (emitted_per_category - Task_event.max_pending_observational_events)
+        counts.agent_text_events ;
+      Alcotest.(check int)
+        "all abusive controls beyond the ordinary reserve are counted"
+        (emitted_per_category - (Task_event.control_event_reserve - 2))
+        counts.control_events
+  | [] | _ :: _ :: _ -> Alcotest.fail "expected one truncation marker"
+
 let test_claude_parser_emits_only_proven_public_content () =
   let reasoning =
     {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private-chain-of-thought"}]}}|}
@@ -355,6 +717,22 @@ let () =
             "callback FIFO serialization"
             `Quick
             test_callback_delivery_is_fifo_serialized_and_non_blocking;
+          Alcotest.test_case
+            "bounded pending delivery retains lifecycle"
+            `Quick
+            test_pending_delivery_is_bounded_and_retains_lifecycle;
+          Alcotest.test_case
+            "oversized public delta is bounded"
+            `Quick
+            test_oversized_delta_is_bounded_and_reported;
+          Alcotest.test_case
+            "repeated dense delivery remains live"
+            `Quick
+            test_repeated_dense_delivery_has_bounded_liveness;
+          Alcotest.test_case
+            "alternating abusive controls keep one marker"
+            `Quick
+            test_alternating_abusive_controls_use_one_bounded_marker;
         ] );
       ( "backend parser",
         [

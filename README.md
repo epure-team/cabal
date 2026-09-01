@@ -218,8 +218,13 @@ and start-relative monotonic timestamps. Each invoked backend attempt has one
 `Attempt_started` and one `Attempt_finished`, including retries. Exactly one
 terminal event is accepted. One asynchronous task-local drain invokes callbacks
 serially in sequence order, never under the event-state mutex; a slow callback
-cannot delay backend execution or handle outcome resolution. The terminal is
-queued after all earlier events and no post-terminal events are accepted.
+cannot delay backend execution or handle outcome resolution. Pending delivery is
+hard-bounded to 256 events: at most 192 public text/usage/session/tool
+observations and 64 control slots. Of the control reserve, 62 admit ordinary
+lifecycle events, one is dedicated to a truncation marker, and one to the
+terminal. Pending assistant text is additionally capped at 64 KiB total and
+16 KiB per delta. The terminal is therefore always enqueueable after all
+retained earlier events and no post-terminal events are accepted.
 Normalized streams include lifecycle, retry, process ownership, session, public
 assistant text/tool identity, and token-usage events. Raw backend lines remain
 available only through `on_raw_line`; raw reasoning, tool arguments, paths,
@@ -228,6 +233,18 @@ promoted into normalized events. Event callback exceptions are isolated and
 reported through a sanitized `Diagnostics` warning. Fatal runtime exceptions
 still propagate unchanged through `await`, after best-effort enqueue of one
 generic redacted failed terminal.
+
+When a callback falls behind, only observations are normally dropped or
+prefix-truncated. `Event_delivery_truncated` reports saturating counts by safe
+category plus omitted public-text bytes; it contains no raw data. Cabal's hard
+two-attempt lifecycle fits within the separate control reserve. If a custom
+backend abuses runtime-owned control payloads beyond that reserve, the excess is
+also counted by the marker rather than growing memory. Delivered sequence
+numbers stay increasing; fully omitted events leave gaps, while byte-only prefix
+truncation need not. One pending marker is assigned immediately after the first
+affected event or gap and accumulates later omissions until drained. The
+callback must eventually return for `await_event_delivery` to complete, but a
+permanently stuck callback cannot cause unbounded queue growth.
 
 This release changes `Agentic_backend.S` for downstream backend implementers.
 Every custom module must add the optional lifecycle argument to its method:
