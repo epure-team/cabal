@@ -164,6 +164,32 @@ standalone OCaml library and as the backend abstraction layer vendored under
     on the same invalid input.  Divergence between `build_resume_prompt` /
     `build_fresh_prompt` and the exported templates is caught deterministically.
 
+## Detailed execution telemetry — CBL-05
+
+- `Backend_types.attempt_kind` is the canonical attempt algebra;
+  `Task_event.attempt_kind` re-exports it so event and detailed execution kinds
+  cannot diverge.
+- `Json_schema_enforcer.run_task_detailed` retains every completed backend
+  `task_result`; `run_task` must remain only its compatibility projection through
+  `Json_schema_enforcer.render_error`. Preserve the exact native error renderer
+  and `Attempt 1` / `Attempt 2` labels.
+- The hard maximum remains **two backend calls per enforcer invocation**. A
+  failed invoked resume is classified structurally as `Resume_failure`; never add
+  a third automatic fresh fallback. Callers wanting fresh fallback invoke again.
+- Initial and fresh attempts use `Upload_attachments`. Resumed attempts retain
+  approved attachment references/digests and web policy but use
+  `Reuse_session_attachments`; `task_spec.attachments` remain workspace-relative
+  references, not bytes. A new invocation uploads from those references again.
+- The retry spec is bounded by the remaining time on the existing CBL-04
+  absolute deadline, never the original timeout. Cancellation/deadline expiry
+  before the retry transition creates neither an attempt nor retry events.
+- Aggregate optional cost/token fields independently: sum all known values for a
+  field and leave that field `None` only when all its values are unknown. Total
+  elapsed is one monotonic boundary measurement, not a sum of attempt durations;
+  final session selection uses the last non-empty id.
+- `Event_delivery_truncated` and event sequence gaps are normal bounded-delivery
+  telemetry, not execution failures.
+
 ## Native JSON schema wiring — Story #625
 
 - `Json_schema_enforcer.run_task` routes to the **native path** when

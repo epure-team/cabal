@@ -246,6 +246,41 @@ affected event or gap and accumulates later omissions until drained. The
 callback must eventually return for `await_event_delivery` to complete, but a
 permanently stuck callback cannot cause unbounded queue growth.
 
+### Detailed schema-attempt telemetry
+
+`Json_schema_enforcer.run_task_detailed` exposes every completed backend call as
+an ordered, 1-based `Backend_types.task_attempt`. Attempt kinds are shared with
+`Task_event.attempt_kind`, so the detailed list agrees with
+`Attempt_started`/`Attempt_finished` numbering. Each attempt retains its complete
+`task_result`, monotonic call elapsed time, applicable validator error, and the
+approved attachment/web delivery policy. `task_execution` additionally reports
+wall-clock elapsed measured once around the enforcer, field-wise aggregate
+cost/token usage, and the last non-empty session id. A field whose values are all
+unknown remains `None`; unknown values in another field do not discard known
+values.
+
+Native rejection and retry exhaustion are structured
+`Backend_types.task_execution_error` values. Double validation failure keeps the
+two validator strings separate and both complete results. The existing
+`Json_schema_enforcer.run_task` API is implemented as a compatibility projection;
+`Json_schema_enforcer.render_error` preserves its exact historical native error
+text and `Attempt 1` / `Attempt 2` labels.
+
+The hard limit remains **two backend calls per enforcer invocation**. A resumed
+retry keeps attachment references/digests and web policy in its spec and
+telemetry, but is marked `Reuse_session_attachments` so a media-aware transport
+does not upload bytes already fed to that session. Initial and fresh calls are
+marked `Upload_attachments`. If an invoked resume fails, the structured error
+classifies `Resume_failure`; Cabal does not make a third automatic fresh call.
+A caller wanting fresh fallback starts a new invocation with the original spec,
+which uploads the approved attachments again. The retry receives the remaining
+time on the existing absolute deadline, never the original timeout; expiry or
+cancellation before the transition produces no retry attempt or retry event.
+
+`Event_delivery_truncated` and delivered sequence gaps only describe bounded
+observer backpressure. They are normal observability states and never change the
+detailed execution outcome.
+
 This release changes `Agentic_backend.S` for downstream backend implementers.
 Every custom module must add the optional lifecycle argument to its method:
 
