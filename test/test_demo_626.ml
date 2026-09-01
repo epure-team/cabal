@@ -644,6 +644,51 @@ let test_expired_deadline_suppresses_retry_lifecycle () =
        0
        payloads)
 
+let test_detailed_double_invalid_retains_results_and_errors () =
+  let first = make_invalid_result ~session_id:"detailed-first" () in
+  let second = make_invalid_result ~session_id:"detailed-second" () in
+  let backend, call_count, _ =
+    make_mock ~supports_resume:false ~responses:[first; second]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"original"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  match Json_schema_enforcer.run_task_detailed ~sw ~env ~backend spec with
+  | Error
+      (Backend_types.Schema_retry_failed
+        {
+          execution;
+          attempt_1_validation_error;
+          attempt_2_failure = Schema_validation_failure attempt_2_validation_error;
+        }) ->
+      Alcotest.(check int) "detailed path still makes two calls" 2 !call_count ;
+      Alcotest.(check bool)
+        "both complete results retained"
+        true
+        (match execution.Backend_types.attempts with
+        | [attempt1; attempt2] ->
+            attempt1.result = first && attempt2.result = second
+        | _ -> false) ;
+      Alcotest.(check bool)
+        "first validator error retained"
+        true
+        (String.length attempt_1_validation_error > 0) ;
+      Alcotest.(check bool)
+        "second validator error retained"
+        true
+        (String.length attempt_2_validation_error > 0)
+  | Error error ->
+      Alcotest.failf
+        "unexpected detailed error: %s"
+        (Json_schema_enforcer.render_error error)
+  | Ok _ -> Alcotest.fail "expected detailed schema retry failure"
+
 (** {1 Suite} *)
 
 let () =
@@ -750,5 +795,12 @@ let () =
             "expired deadline suppresses retry events"
             `Quick
             test_expired_deadline_suppresses_retry_lifecycle;
+        ] );
+      ( "CBL-05 detailed compatibility",
+        [
+          Alcotest.test_case
+            "double invalid retains complete results and errors"
+            `Quick
+            test_detailed_double_invalid_retains_results_and_errors;
         ] );
     ]

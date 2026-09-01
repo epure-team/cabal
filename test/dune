@@ -44,6 +44,11 @@
  (modules test_task_runtime))
 
 (test
+ (name test_task_execution)
+ (libraries cabal alcotest eio eio_posix yojson)
+ (modules test_task_execution))
+
+(test
  (name test_custom_backend_compile)
  (libraries cabal eio)
  (modules test_custom_backend_compile))

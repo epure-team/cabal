@@ -237,6 +237,37 @@ let test_native_schema_in_spec () =
         true
         (Option.is_some received_spec.Backend_types.json_schema)
 
+let test_native_rejection_retains_detailed_attempt () =
+  let rejection = native_rejection_result () in
+  let backend, call_count, _ = make_native_mock ~responses:[rejection] () in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"give me json"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  match Json_schema_enforcer.run_task_detailed ~sw ~env ~backend spec with
+  | Error (Backend_types.Native_schema_rejection {execution; message}) ->
+      Alcotest.(check int) "detailed native path remains one call" 1 !call_count ;
+      Alcotest.(check bool)
+        "complete rejection result retained"
+        true
+        (match execution.Backend_types.attempts with
+        | [attempt] -> attempt.result = rejection
+        | _ -> false) ;
+      Alcotest.(check bool)
+        "native rejection detail retained"
+        true
+        (contains message "unsupported JSON Schema keywords")
+  | Error error ->
+      Alcotest.failf
+        "unexpected detailed error: %s"
+        (Json_schema_enforcer.render_error error)
+  | Ok _ -> Alcotest.fail "expected detailed native rejection"
+
 let () =
   Alcotest.run
     "Story_625_native_json_schema_wiring"
@@ -275,5 +306,12 @@ let () =
             "json_schema = Some in spec received by native backend run_task"
             `Quick
             test_native_schema_in_spec;
+        ] );
+      ( "CBL-05 detailed native rejection",
+        [
+          Alcotest.test_case
+            "complete single attempt is retained"
+            `Quick
+            test_native_rejection_retains_detailed_attempt;
         ] );
     ]
