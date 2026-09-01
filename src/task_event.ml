@@ -375,16 +375,17 @@ let emit_agent_text_unlocked sink text =
       let retained_bytes = String.length retained in
       let omitted_bytes = String.length text - retained_bytes in
       let event = make_event_unlocked sink (Agent_text_delta retained) in
-      if
+      let event_retained =
         sink.pending_observational_events
         < max_pending_observational_events
         && (retained_bytes > 0 || text = "")
-      then
+      in
+      if event_retained then
         add_pending_unlocked
           sink
           queue
           {event; kind = Observation {agent_text_bytes = retained_bytes}} ;
-      if omitted_bytes > 0 then
+      if (not event_retained) || omitted_bytes > 0 then
         record_truncation_unlocked sink (Agent_text_omitted omitted_bytes)
 
 let enqueue_control_unlocked sink payload =

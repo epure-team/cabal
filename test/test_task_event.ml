@@ -470,6 +470,67 @@ let test_oversized_delta_is_bounded_and_reported () =
     (emitted_bytes - retained_bytes)
     text_bytes
 
+let test_saturated_empty_delta_is_reported_as_omitted_event () =
+  Eio_posix.run @@ fun _env ->
+  Eio.Switch.run @@ fun sw ->
+  let first_started, resolve_first_started = Eio.Promise.create () in
+  let release_first, resolve_release_first = Eio.Promise.create () in
+  let delivered = ref [] in
+  let sink =
+    Task_event.create_sink
+      ~sw
+      ~now:(fun () -> 0.0)
+      ~on_event:(fun event ->
+        if event.Task_event.seq = 1 then begin
+          Eio.Promise.resolve resolve_first_started () ;
+          Eio.Promise.await release_first
+        end ;
+        delivered := event :: !delivered)
+      ()
+  in
+  Task_event.emit sink Task_event.Task_started ;
+  Eio.Promise.await first_started ;
+  for _ = 1 to Task_event.max_pending_observational_events do
+    Task_event.emit sink (Task_event.Agent_text_delta "x")
+  done ;
+  Task_event.emit sink (Task_event.Agent_text_delta "") ;
+  Task_event.emit_terminal sink Task_event.Succeeded ;
+  Eio.Promise.resolve resolve_release_first () ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  let delivered = List.rev !delivered in
+  Alcotest.(check bool)
+    "saturated empty delta is not delivered"
+    false
+    (List.exists
+       (fun event -> event.Task_event.payload = Task_event.Agent_text_delta "")
+       delivered) ;
+  match List.rev delivered with
+  | terminal :: marker :: previous :: _ ->
+      (match marker.Task_event.payload with
+      | Task_event.Event_delivery_truncated counts ->
+          Alcotest.(check int)
+            "empty omitted delta counts as one event"
+            1
+            counts.agent_text_events ;
+          Alcotest.(check int)
+            "empty omitted delta contributes no bytes"
+            0
+            counts.agent_text_bytes
+      | _ -> Alcotest.fail "missing marker before terminal") ;
+      Alcotest.(check bool)
+        "fully omitted empty delta leaves one sequence gap"
+        true
+        (marker.seq = previous.seq + 2) ;
+      Alcotest.(check bool)
+        "marker is immediately followed by terminal"
+        true
+        (terminal.seq = marker.seq + 1) ;
+      Alcotest.(check bool)
+        "terminal remains last"
+        true
+        (terminal.payload = Task_event.Terminal Task_event.Succeeded)
+  | _ -> Alcotest.fail "missing saturated empty-delta lifecycle events"
+
 let test_repeated_dense_delivery_has_bounded_liveness () =
   Eio_posix.run @@ fun _env ->
   Eio.Switch.run @@ fun sw ->
@@ -725,6 +786,10 @@ let () =
             "oversized public delta is bounded"
             `Quick
             test_oversized_delta_is_bounded_and_reported;
+          Alcotest.test_case
+            "saturated empty delta is reported"
+            `Quick
+            test_saturated_empty_delta_is_reported_as_omitted_event;
           Alcotest.test_case
             "repeated dense delivery remains live"
             `Quick
