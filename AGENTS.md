@@ -177,16 +177,23 @@ standalone OCaml library and as the backend abstraction layer vendored under
   failed invoked resume is classified structurally as `Resume_failure`; never add
   a third automatic fresh fallback. Callers wanting fresh fallback invoke again.
 - Initial and fresh attempts use `Upload_attachments`. Resumed attempts retain
-  approved attachment references/digests and web policy but use
+  attachment references/digests and web policy but use
   `Reuse_session_attachments`; `task_spec.attachments` remain workspace-relative
-  references, not bytes. A new invocation uploads from those references again.
+  references, not bytes. Before every call, the exact requested intent must be
+  visible through `Task_execution_context.requested_delivery`. This is intent,
+  not proof of preflight, content loading, or transport compliance.
 - The retry spec is bounded by the remaining time on the existing CBL-04
   absolute deadline, never the original timeout. Cancellation/deadline expiry
   before the retry transition creates neither an attempt nor retry events.
-- Aggregate optional cost/token fields independently: sum all known values for a
-  field and leave that field `None` only when all its values are unknown. Total
-  elapsed is one monotonic boundary measurement, not a sum of attempt durations;
-  final session selection uses the last non-empty id.
+- Aggregate optional cost/token fields independently. Negative/non-finite input
+  invalidates only its field; non-negative integer overflow saturates at
+  `max_int`, and finite float overflow at `max_float`. Total elapsed is one
+  monotonic boundary measurement, including resume classification, not a sum of
+  attempt durations; final session/resume selection ignores blank trimmed ids.
+- Contain ordinary `is_resume_failure` exceptions as `Transport_failure` with a
+  sanitized diagnostic after preserving both results. Cancellation,
+  `Out_of_memory`, `Stack_overflow`, and `Sys.Break` propagate. The central
+  detailed runtime/dispatch endpoint remains CBL-06 work.
 - `Event_delivery_truncated` and event sequence gaps are normal bounded-delivery
   telemetry, not execution failures.
 
@@ -197,8 +204,10 @@ standalone OCaml library and as the backend abstraction layer vendored under
   - `task_spec.json_schema` is left intact; the backend's `run_task` wires it to
     the CLI flag (e.g. `--output-schema <schema-json>` for claude-code).
   - `Json_schema_validator` is **NOT** called — no validate-and-retry loop.
-  - Any `Failed` result is returned as `Error "native-backend schema rejection: <msg>"` 
-    immediately; no second call, no fallback (Decision D-5).
+  - Any `Failed` result is returned as
+    `Error "native-backend call failed with a schema in force: <msg>"`
+    immediately; no second call, no fallback (Decision D-5). The structured
+    variant is `Native_backend_failure_with_schema`; it does not assert cause.
   - `Timeout` / `Cancelled` results are returned as `Ok result` (transport
     failures, not schema rejections).
 - **Adding a new `native_json_schema_output = true` backend**: you must also add

@@ -252,14 +252,16 @@ permanently stuck callback cannot cause unbounded queue growth.
 an ordered, 1-based `Backend_types.task_attempt`. Attempt kinds are shared with
 `Task_event.attempt_kind`, so the detailed list agrees with
 `Attempt_started`/`Attempt_finished` numbering. Each attempt retains its complete
-`task_result`, monotonic call elapsed time, applicable validator error, and the
-approved attachment/web delivery policy. `task_execution` additionally reports
-wall-clock elapsed measured once around the enforcer, field-wise aggregate
-cost/token usage, and the last non-empty session id. A field whose values are all
-unknown remains `None`; unknown values in another field do not discard known
-values.
+`task_result`, monotonic `attempt_elapsed`, applicable validator error, and the
+requested attachment/web delivery intent. `task_execution` additionally reports
+wall-clock elapsed measured once around the complete enforcer (including resume
+failure classification), field-wise aggregate cost/token usage, and the last
+nonblank trimmed session id. A field whose values are all unknown remains
+`None`; unknown values in another field do not discard known values. Integer
+overflow saturates at `max_int`, finite float overflow at `max_float`, and a
+negative or non-finite input invalidates only its own aggregate field.
 
-Native rejection and retry exhaustion are structured
+Native backend failure with a schema in force and retry exhaustion are structured
 `Backend_types.task_execution_error` values. Double validation failure keeps the
 two validator strings separate and both complete results. The existing
 `Json_schema_enforcer.run_task` API is implemented as a compatibility projection;
@@ -267,15 +269,22 @@ two validator strings separate and both complete results. The existing
 text and `Attempt 1` / `Attempt 2` labels.
 
 The hard limit remains **two backend calls per enforcer invocation**. A resumed
-retry keeps attachment references/digests and web policy in its spec and
-telemetry, but is marked `Reuse_session_attachments` so a media-aware transport
-does not upload bytes already fed to that session. Initial and fresh calls are
-marked `Upload_attachments`. If an invoked resume fails, the structured error
-classifies `Resume_failure`; Cabal does not make a third automatic fresh call.
-A caller wanting fresh fallback starts a new invocation with the original spec,
-which uploads the approved attachments again. The retry receives the remaining
+retry keeps attachment references/digests and web policy in its spec and requests
+`Reuse_session_attachments`; initial and fresh calls request
+`Upload_attachments`. Before every backend invocation, that exact intent is
+available through `Task_execution_context.requested_delivery`. This telemetry is
+a request, not proof of preflight approval, content loading, or transport
+compliance. If an invoked resume fails, the structured error classifies
+`Resume_failure`; an ordinary exception from the backend classifier is contained
+as `Transport_failure` with a sanitized diagnostic. Cancellation and fatal
+runtime exceptions still propagate. Cabal does not make a third automatic fresh
+call. Blank/whitespace session IDs choose a fresh retry. A caller wanting fresh
+fallback starts a new invocation with the original spec. The retry receives the remaining
 time on the existing absolute deadline, never the original timeout; expiry or
 cancellation before the transition produces no retry attempt or retry event.
+
+This remains a low-level detailed enforcer API. A central runtime/dispatch
+detailed endpoint is intentionally deferred to CBL-06.
 
 `Event_delivery_truncated` and delivered sequence gaps only describe bounded
 observer backpressure. They are normal observability states and never change the

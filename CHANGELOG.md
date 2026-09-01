@@ -11,17 +11,22 @@ by the date a change merged to `main`.
 ### Added
 - **Detailed schema-attempt execution telemetry.**
   `Json_schema_enforcer.run_task_detailed` returns ordered initial/fresh/resumed
-  attempts with complete results, monotonic call timing, validator errors, and
-  attachment/web delivery policy. Executions aggregate every optional cost/token
-  field independently, measure total wall time once, and select the last
-  non-empty session explicitly. Native rejection, double validation failure,
-  transport failure, and recognized resume failure are structurally classified
+  attempts with complete results, uniquely named monotonic call timing,
+  validator errors, and backend-visible requested attachment/web delivery
+  intent. Executions aggregate every optional cost/token field independently
+  with invalid-input isolation and saturating overflow, measure total wall time
+  through resume classification, and select the last nonblank trimmed session
+  explicitly. Native backend failure with a schema in force, double validation
+  failure, transport failure, and recognized resume failure are structurally classified
   while retaining all completed attempts. `run_task` is now an exact
   compatibility projection through the public error renderer. The existing
   two-call hard cap is unchanged: a failed invoked resume never triggers an
   automatic third fresh fallback; callers start a new invocation to resend
   attachments. Retries preserve web/attachment references and are bounded by
-  the remaining shared absolute deadline.
+  the remaining shared absolute deadline. Ordinary resume-classifier exceptions
+  are contained as transport failures with sanitized diagnostics; cancellation
+  and fatal runtime exceptions propagate. Central detailed runtime/dispatch
+  wiring remains CBL-06 work.
 - **Cancellable task runtime and normalized lifecycle events.**
   `Task_runtime` now exposes isolated Eio-backed handles with idempotent
   cancellation and repeatable/concurrent await. `Runtime_dispatch.run_task`
