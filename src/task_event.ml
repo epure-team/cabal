@@ -7,7 +7,10 @@
 
 type tool = {id : string option; name : string}
 
-type attempt_kind = Initial_attempt | Fresh_attempt | Resumed_attempt
+type attempt_kind = Backend_types.attempt_kind =
+  | Initial_attempt
+  | Fresh_attempt
+  | Resumed_attempt
 
 type attempt_outcome =
   | Attempt_succeeded

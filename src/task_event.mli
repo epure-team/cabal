@@ -14,8 +14,13 @@
 (** A normalized tool identity. Raw tool arguments are deliberately omitted. *)
 type tool = {id : string option; name : string}
 
-(** Attempt kinds within one task deadline. *)
-type attempt_kind = Initial_attempt | Fresh_attempt | Resumed_attempt
+(** Attempt kinds within one task deadline, shared with
+    {!Backend_types.attempt_kind} so detailed executions and normalized events
+    cannot diverge. *)
+type attempt_kind = Backend_types.attempt_kind =
+  | Initial_attempt
+  | Fresh_attempt
+  | Resumed_attempt
 
 (** Stable transport-level outcome of one invoked backend attempt. *)
 type attempt_outcome =
