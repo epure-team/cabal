@@ -36,7 +36,8 @@ type error =
     inherits {!Task_preflight.render_error}'s path/digest/byte exclusion;
     low-level schema-enforcement strings are redacted before display. Ordinary
     availability, version-probe, and execution exceptions carry no untrusted
-    payload in their typed errors. *)
+    payload in their typed errors. Event callbacks drain asynchronously in
+    sequence order and cannot delay handle outcome resolution. *)
 val render_error : error -> string
 
 (** Immutable dispatch snapshot validated against one resolved registry entry. *)
@@ -81,6 +82,8 @@ module Private : sig
   val cancel : task_handle -> unit
 
   val await : task_handle -> (Backend_types.task_result, error) result
+
+  val await_event_delivery : task_handle -> unit
 end
 
 (** [run_task ~sw ~env ~limits ~backend_id spec] performs central resolution,
@@ -99,7 +102,10 @@ end
     process spawn. Ordinary operational/backend exceptions become sanitized
     typed errors. Eio cancellation is normalized to a [Cancelled] task result
     after cleanup; [Out_of_memory], [Stack_overflow], and [Sys.Break] are
-    re-raised by handle await.
+    re-raised by handle await after best-effort enqueue of one generic failed
+    terminal. Process cleanup and reaping precede terminal enqueue; callback
+    completion can be awaited separately through
+    {!Task_runtime.await_event_delivery}.
 
     Direct use of {!Agentic_backend.run_task} or
     {!Json_schema_enforcer.run_task} remains source-compatible but bypasses

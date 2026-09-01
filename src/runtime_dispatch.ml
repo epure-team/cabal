@@ -148,6 +148,7 @@ type outcome = (Backend_types.task_result, error) result
 type task_handle = {
   cancellation : Eio.Cancel.t;
   outcome : outcome Eio.Promise.or_exn;
+  delivery_complete : unit Eio.Promise.t;
   completed : bool Atomic.t;
 }
 
@@ -163,7 +164,9 @@ let emit_result_metadata context result =
   if
     result.Backend_types.agent_text <> ""
     && not (Task_execution_context.agent_text_emitted context)
-    && not (Task_execution_context.structured_text_claimed context)
+    &&
+    (not (Task_execution_context.structured_text_claimed context)
+    || Task_execution_context.final_public_text context)
   then
     Task_execution_context.emit
       context
@@ -208,20 +211,23 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
   let ready, resolve_ready = Eio.Promise.create () in
   let completed = Atomic.make false in
   Eio.Fiber.fork ~sw (fun () ->
+      let mono_clock = Eio.Stdenv.mono_clock env in
+      let started_at = Eio.Time.Mono.now mono_clock in
+      let sink =
+        Task_event.create_sink
+          ~sw
+          ~now:(fun () ->
+            seconds_of_span
+              (Mtime.span started_at (Eio.Time.Mono.now mono_clock)))
+          ?on_event
+          ()
+      in
+      Task_event.emit sink Task_event.Task_started ;
       Eio.Cancel.sub (fun cancellation ->
-          Eio.Promise.resolve resolve_ready cancellation ;
+          Eio.Promise.resolve
+            resolve_ready
+            (cancellation, Task_event.Private.delivery_complete sink) ;
           try
-            let mono_clock = Eio.Stdenv.mono_clock env in
-            let started_at = Eio.Time.Mono.now mono_clock in
-            let sink =
-              Task_event.create_sink
-                ~now:(fun () ->
-                  seconds_of_span
-                    (Mtime.span started_at (Eio.Time.Mono.now mono_clock)))
-                ?on_event
-                ()
-            in
-            Task_event.emit sink Task_event.Task_started ;
             let result, context =
               match Task_deadline.create mono_clock spec.Backend_types.timeout with
               | Error Task_deadline.Invalid_timeout ->
@@ -269,10 +275,15 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
           with
           | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
               Eio.Cancel.protect (fun () ->
+                  (try
+                     Task_event.emit_terminal
+                       sink
+                       (Task_event.Failed "backend execution failed")
+                   with _ -> ()) ;
                   Atomic.set completed true ;
                   Eio.Promise.resolve_error resolve_outcome fatal))) ;
-  let cancellation = Eio.Promise.await ready in
-  {cancellation; outcome; completed}
+  let cancellation, delivery_complete = Eio.Promise.await ready in
+  {cancellation; outcome; delivery_complete; completed}
 
 let cancel handle =
   if not (Atomic.get handle.completed) then
@@ -280,6 +291,8 @@ let cancel handle =
     with Invalid_argument _ -> ()
 
 let await handle = Eio.Promise.await_exn handle.outcome
+
+let await_event_delivery handle = Eio.Promise.await handle.delivery_complete
 
 module Private = struct
   type nonrec task_handle = task_handle
@@ -289,6 +302,8 @@ module Private = struct
   let cancel = cancel
 
   let await = await
+
+  let await_event_delivery = await_event_delivery
 end
 
 let run_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =

@@ -765,8 +765,18 @@ let test_dispatch_reraises_fatal_exceptions () =
         true
     | _ -> false
   in
-  let expect_fatal label expected invoke =
-    match invoke () with
+  let expect_fatal label expected backend_id =
+    let events = ref [] in
+    let handle =
+      Task_runtime.start_task
+        ~sw
+        ~env
+        ~limits
+        ~backend_id
+        ~on_event:(fun event -> events := event :: !events)
+        (spec ())
+    in
+    (match Task_runtime.await handle with
     | exception actual when same_fatal expected actual -> ()
     | exception actual ->
         Alcotest.failf
@@ -778,7 +788,26 @@ let test_dispatch_reraises_fatal_exceptions () =
         Alcotest.failf
           "%s was sanitized as %s"
           label
-          (Runtime_dispatch.render_error error)
+          (Runtime_dispatch.render_error error)) ;
+    Task_runtime.await_event_delivery handle ;
+    let terminals =
+      List.filter_map
+        (fun event ->
+          match event.Task_event.payload with
+          | Task_event.Terminal terminal -> Some terminal
+          | _ -> None)
+        !events
+    in
+    Alcotest.(check int) (label ^ " has one terminal") 1 (List.length terminals) ;
+    Alcotest.(check bool)
+      (label ^ " terminal is generic and redacted")
+      true
+      (match terminals with
+      | [Task_event.Failed reason] ->
+          reason
+          = Backend_event_redaction.redact_error_message
+              "backend execution failed"
+      | _ -> false)
   in
   List.iter
     (fun (label, fatal) ->
@@ -793,7 +822,7 @@ let test_dispatch_reraises_fatal_exceptions () =
       expect_fatal
         (label ^ " availability")
         fatal
-        (fun () -> run ~env ~sw ~backend_id:availability_id (spec ())) ;
+        availability_id ;
 
       let execution_id = "dispatch-fatal-execution-" ^ label in
       register_pair
@@ -805,7 +834,7 @@ let test_dispatch_reraises_fatal_exceptions () =
       expect_fatal
         (label ^ " execution")
         fatal
-        (fun () -> run ~env ~sw ~backend_id:execution_id (spec ())))
+        execution_id)
     fatal_cases
 
 let test_dispatch_normalizes_cancellation () =

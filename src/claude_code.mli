@@ -209,6 +209,17 @@ val parse_session_id_from_stdout : string -> string option
     (none) *)
 val parse_stdout_text : string -> string
 
+(** Strict public-output parser used by normalized runtime paths. Malformed,
+    error, user, reasoning, system, and unknown records contribute no text. *)
+val parse_public_stdout_text : string -> string
+
+(** Strict session parser accepting only documented init or successful result
+    records. *)
+val parse_public_session_id : string -> string option
+
+(** Strict usage parser accepting only successful result records. *)
+val parse_public_cost : string -> Backend_types.cost option
+
 (** [parse_stream_event line] parses a stream-json event line and extracts
     displayable content. Returns [Some text] if there is content to display,
     [None] otherwise.

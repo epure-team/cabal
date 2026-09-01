@@ -325,38 +325,40 @@ let parse_gemini_stream_json stdout =
   in
   (text, !last_cost, !last_session_id)
 
-let parse_cost_from_stdout stdout =
-  let _, cost, _ = parse_gemini_stream_json stdout in
-  cost
-
-(* Extract session_id from Gemini stream-json NDJSON stdout *)
-let parse_session_id_from_stdout stdout =
-  let _, _, session_id = parse_gemini_stream_json stdout in
-  session_id
-
 let normalized_events_of_line line =
   try
     let json = Yojson.Safe.from_string line in
     let open Yojson.Safe.Util in
     let events = ref [] in
     let add event = events := event :: !events in
-    let text =
-      match json |> member "response" |> to_string_option with
-      | Some text -> Some text
-      | None -> (
-          match json |> member "result" |> to_string_option with
-          | Some text -> Some text
-          | None -> json |> member "text" |> to_string_option)
+    let event_type = json |> member "type" |> to_string_option in
+    let successful_result =
+      event_type = Some "result"
+      && json |> member "status" |> to_string_option = Some "success"
     in
-    Option.iter (fun text -> add (Task_event.Agent_text_delta text)) text ;
-    Option.iter
-      (fun id -> add (Task_event.Session_id id))
-      (json |> member "session_id" |> to_string_option) ;
+    (match event_type with
+    | Some "init" ->
+        Option.iter
+          (fun id -> add (Task_event.Session_id id))
+          (json |> member "session_id" |> to_string_option)
+    | Some "message"
+      when json |> member "role" |> to_string_option = Some "assistant" ->
+        Option.iter
+          (fun text -> add (Task_event.Agent_text_delta text))
+          (json |> member "content" |> to_string_option)
+    | Some "result" when successful_result ->
+        Option.iter
+          (fun text -> add (Task_event.Agent_text_delta text))
+          (json |> member "response" |> to_string_option)
+    | Some _ | None -> ()) ;
     let usage =
       let metadata = json |> member "usageMetadata" in
-      if metadata = `Null then json |> member "usage" else metadata
+      if metadata <> `Null then metadata
+      else
+        let usage = json |> member "usage" in
+        if usage <> `Null then usage else json |> member "stats"
     in
-    if usage <> `Null then begin
+    if successful_result && usage <> `Null then begin
       let first_int first second =
         match usage |> member first |> to_int_option with
         | Some value -> Some value
@@ -376,6 +378,24 @@ let normalized_events_of_line line =
     end ;
     List.rev !events
   with _ -> []
+
+let normalized_events_of_stdout stdout =
+  String.split_on_char '\n' stdout |> List.concat_map normalized_events_of_line
+
+let parse_public_stdout_text stdout =
+  normalized_events_of_stdout stdout
+  |> List.filter_map (function
+       | Task_event.Agent_text_delta text -> Some text
+       | _ -> None)
+  |> String.concat ""
+
+let parse_public_session_id stdout =
+  normalized_events_of_stdout stdout
+  |> List.find_map (function Task_event.Session_id id -> Some id | _ -> None)
+
+let parse_public_cost stdout =
+  normalized_events_of_stdout stdout
+  |> List.find_map (function Task_event.Token_usage cost -> Some cost | _ -> None)
 
 (* Build the gemini command for non-interactive stream-json execution *)
 let build_command ~mcp_config_path:_ (spec : task_spec) =
@@ -506,14 +526,18 @@ let run_task ~sw ~env ?context ?on_raw_line spec =
               context
           in
           Option.iter Task_execution_context.claim_structured_text context ;
-          Backend_process.run_task_with
-            ~sw
-            ~env
-            ~spec:runtime_spec
-            ~build_command
-            ?context
-            ~parse_cost:parse_cost_from_stdout
-            ~parse_stdout:parse_stdout_text
-            ~parse_session_id:parse_session_id_from_stdout
-            ~on_stdout
-            ())
+          let result =
+            Backend_process.run_task_with
+              ~sw
+              ~env
+              ~spec:runtime_spec
+              ~build_command
+              ?context
+              ~parse_cost:parse_public_cost
+              ~parse_stdout:parse_public_stdout_text
+              ~parse_session_id:parse_public_session_id
+              ~on_stdout
+              ()
+          in
+          Option.iter Task_execution_context.mark_final_public_text context ;
+          result)

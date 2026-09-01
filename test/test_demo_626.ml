@@ -582,6 +582,68 @@ let test_fresh_prompt_matches_template () =
     expected
     second_prompt
 
+let test_expired_deadline_suppresses_retry_lifecycle () =
+  let backend, call_count, _ =
+    make_mock ~supports_resume:false ~responses:[make_invalid_result ()]
+  in
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:"expired"
+      ~working_dir:"/tmp"
+      ~json_schema:object_schema
+      ()
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let events = ref [] in
+  let sink =
+    Task_event.create_sink
+      ~sw
+      ~now:(fun () -> 0.0)
+      ~on_event:(fun event -> events := event :: !events)
+      ()
+  in
+  let context =
+    Task_execution_context.create ~remaining_time:(fun () -> Some 0.0) sink
+  in
+  let result =
+    Json_schema_enforcer.run_task ~sw ~env ~context ~backend spec
+  in
+  Task_event.emit_terminal sink Task_event.Timed_out ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  Alcotest.(check int) "expired budget invokes only attempt one" 1 !call_count ;
+  Alcotest.(check bool)
+    "expired budget returns timeout"
+    true
+    (match result with
+    | Ok {Backend_types.status = Timeout; _} -> true
+    | Ok _ | Error _ -> false) ;
+  let payloads = List.rev_map (fun event -> event.Task_event.payload) !events in
+  Alcotest.(check bool)
+    "no retry transition after deadline"
+    false
+    (List.exists
+       (function Task_event.Retry_transition _ -> true | _ -> false)
+       payloads) ;
+  Alcotest.(check int)
+    "one attempt start"
+    1
+    (List.fold_left
+       (fun count -> function
+         | Task_event.Attempt_started _ -> count + 1
+         | _ -> count)
+       0
+       payloads) ;
+  Alcotest.(check int)
+    "one attempt finish"
+    1
+    (List.fold_left
+       (fun count -> function
+         | Task_event.Attempt_finished _ -> count + 1
+         | _ -> count)
+       0
+       payloads)
+
 (** {1 Suite} *)
 
 let () =
@@ -681,5 +743,12 @@ let () =
             "prompt equals template with substitutions"
             `Quick
             test_fresh_prompt_matches_template;
+        ] );
+      ( "deadline lifecycle",
+        [
+          Alcotest.test_case
+            "expired deadline suppresses retry events"
+            `Quick
+            test_expired_deadline_suppresses_retry_lifecycle;
         ] );
     ]

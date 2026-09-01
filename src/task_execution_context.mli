@@ -26,6 +26,9 @@ val emit : t -> Task_event.payload -> unit
 (** Emit an attempt-start event. *)
 val begin_attempt : t -> Task_event.attempt_kind -> unit
 
+(** Emit the transport-level outcome of the current backend attempt. *)
+val finish_attempt : t -> Task_event.attempt_outcome -> unit
+
 (** Emit a retry transition and begin its next attempt. *)
 val transition_to_retry :
   t -> kind:Task_event.retry_kind -> reason:string -> unit
@@ -39,9 +42,16 @@ val session_id_emitted : t -> bool
 (** Whether a backend parser already emitted token usage. *)
 val token_usage_emitted : t -> bool
 
-(** Mark that a structured backend parser is authoritative for public text.
-    This suppresses fallback promotion of unparsed raw stdout. *)
+(** Mark that a structured backend parser is authoritative for result text.
+    Its non-empty final text is suppressed until {!mark_final_public_text}. *)
 val claim_structured_text : t -> unit
 
 (** Whether a structured parser claimed authority over public text events. *)
 val structured_text_claimed : t -> bool
+
+(** Mark the current [task_result.agent_text] as having been produced by the
+    authoritative public-output parser rather than raw-output fallback. *)
+val mark_final_public_text : t -> unit
+
+(** Whether final result text was proven public by the authoritative parser. *)
+val final_public_text : t -> bool

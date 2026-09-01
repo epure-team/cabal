@@ -100,6 +100,12 @@ val parse_jsonl_output : string -> string * Backend_types.cost option
     (none) *)
 val parse_stdout_text : string -> string
 
+(** Strict final public assistant text parser for Codex JSONL. *)
+val parse_public_stdout_text : string -> string
+
+(** Strict session parser accepting only [thread.started]. *)
+val parse_public_session_id : string -> string option
+
 (** [build_command ~mcp_config_path spec] constructs the Codex CLI command and
     stdin content for a task invocation.  When [spec.read_only] is [true],
     passes [-s read-only] (OS-level sandbox); otherwise [--full-auto].

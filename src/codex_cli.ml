@@ -302,6 +302,7 @@ let parse_jsonl_output stdout =
       try
         let json = Yojson.Safe.from_string line in
         let open Yojson.Safe.Util in
+        let event_type = json |> member "type" |> to_string_option in
         (* Codex item.completed events with agent_message carry the response *)
         (try
            let item = json |> member "item" in
@@ -316,9 +317,9 @@ let parse_jsonl_output stdout =
                if String.length text > 0 then last_text := text
          with _ -> ()) ;
         (* Codex turn.completed events carry usage at top level *)
-        try
-          let usage = json |> member "usage" in
-          if usage <> `Null then (
+         try
+           let usage = json |> member "usage" in
+           if event_type = Some "turn.completed" && usage <> `Null then (
             has_usage := true ;
             (try
                total_input :=
@@ -352,60 +353,39 @@ let parse_cost_from_stdout stdout =
   let _, cost = parse_jsonl_output stdout in
   cost
 
-(* Extract session_id from Codex JSONL stdout *)
-let parse_session_id_from_stdout stdout =
-  let lines =
-    stdout |> String.split_on_char '\n'
-    |> List.filter (fun s -> String.length (String.trim s) > 0)
-  in
-  let session_id = ref None in
-  List.iter
-    (fun line ->
-      try
-        let json = Yojson.Safe.from_string line in
-        let open Yojson.Safe.Util in
-        try
-          let sid = json |> member "session_id" |> to_string in
-          if String.length sid > 0 then session_id := Some sid
-        with _ -> ()
-      with _ -> ())
-    lines ;
-  !session_id
-
 let normalized_events_of_line line =
   try
     let json = Yojson.Safe.from_string line in
     let open Yojson.Safe.Util in
     let events = ref [] in
     let add event = events := event :: !events in
-    let session_id =
-      match json |> member "session_id" |> to_string_option with
-      | Some id -> Some id
-      | None -> json |> member "thread_id" |> to_string_option
-    in
-    Option.iter (fun id -> add (Task_event.Session_id id)) session_id ;
     let event_type = json |> member "type" |> to_string_option in
     let item = json |> member "item" in
     let item_type = item |> member "type" |> to_string_option in
     (match event_type, item_type with
+    | Some "thread.started", _ ->
+        let session_id =
+          match json |> member "thread_id" |> to_string_option with
+          | Some id -> Some id
+          | None -> json |> member "session_id" |> to_string_option
+        in
+        Option.iter (fun id -> add (Task_event.Session_id id)) session_id
     | Some "item.completed", Some "agent_message" ->
         Option.iter
           (fun text -> add (Task_event.Agent_text_delta text))
           (item |> member "text" |> to_string_option)
-    | (Some "item.started" | Some "item.completed"), Some item_kind
-      when item_kind <> "agent_message" ->
+    | (Some "item.started" | Some "item.completed"),
+      Some
+        (( "command_execution" | "file_change" | "mcp_tool_call" | "web_search" )
+        as item_kind) ->
         let id = item |> member "id" |> to_string_option in
-        let name =
-          match item |> member "name" |> to_string_option with
-          | Some name -> name
-          | None -> item_kind
-        in
+        let name = item_kind in
         if event_type = Some "item.started" then
           add (Task_event.Tool_started {id; name})
         else add (Task_event.Tool_finished {id; name = Some name})
     | _ -> ()) ;
     let usage = json |> member "usage" in
-    if usage <> `Null then begin
+    if event_type = Some "turn.completed" && usage <> `Null then begin
       add
         (Task_event.Token_usage
            {
@@ -488,6 +468,21 @@ let parse_stdout_text stdout =
   let text, _ = parse_jsonl_output stdout in
   text
 
+let normalized_events_of_stdout stdout =
+  String.split_on_char '\n' stdout |> List.concat_map normalized_events_of_line
+
+let parse_public_stdout_text stdout =
+  normalized_events_of_stdout stdout
+  |> List.fold_left
+       (fun last -> function
+         | Task_event.Agent_text_delta text -> text
+         | _ -> last)
+       ""
+
+let parse_public_session_id stdout =
+  normalized_events_of_stdout stdout
+  |> List.find_map (function Task_event.Session_id id -> Some id | _ -> None)
+
 let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
@@ -527,17 +522,21 @@ let run_task ~sw ~env ?context ?on_raw_line spec =
           in
           Option.iter Task_execution_context.claim_structured_text context ;
           let run build_command =
-            Backend_process.run_task_with
-              ~sw
-              ~env
-              ~spec:runtime_spec
-              ~build_command
-              ?context
-              ~parse_cost:parse_cost_from_stdout
-              ~parse_stdout:parse_stdout_text
-              ~parse_session_id:parse_session_id_from_stdout
-              ~on_stdout
-              ()
+            let result =
+              Backend_process.run_task_with
+                ~sw
+                ~env
+                ~spec:runtime_spec
+                ~build_command
+                ?context
+                ~parse_cost:parse_cost_from_stdout
+                ~parse_stdout:parse_public_stdout_text
+                ~parse_session_id:parse_public_session_id
+                ~on_stdout
+                ()
+            in
+            Option.iter Task_execution_context.mark_final_public_text context ;
+            result
           in
           match runtime_spec.json_schema with
           | None -> run build_command

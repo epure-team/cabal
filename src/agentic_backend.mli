@@ -109,6 +109,14 @@ module type S = sig
   (** [run_task ~sw ~env ?context ?on_raw_line spec] executes a task using this
       backend.
 
+      {b Migration note:} adding [?context] is a source-breaking change for
+      modules implementing [S]. A previous implementation shaped as
+      [let run_task ~sw ~env ?on_raw_line spec = ...] must become
+      [let run_task ~sw ~env ?context ?on_raw_line spec = ...]. Backends that
+      do not emit lifecycle events may bind it as [?context:_]. Calls through
+      the first-class {!run_task} wrapper remain source-compatible because that
+      wrapper still omits the optional context argument.
+
       The backend should:
       1. Spawn the agentic client with the given task spec
       2. Wait for completion (or timeout)
@@ -328,9 +336,11 @@ val run_task :
   task_spec ->
   task_result
 
-(** Context-aware internal execution path. The original {!run_task} type is
-    retained for source compatibility; central runtime code uses this function
-    to thread one neutral lifecycle/deadline context through backend retries. *)
+(** Context-aware internal execution path. The first-class {!run_task} wrapper
+    retains its prior call-site type; central runtime code uses this function to
+    thread one neutral lifecycle/deadline context through backend retries. This
+    does not make old [S] implementations source-compatible: they must add the
+    optional argument documented on [S.run_task]. *)
 val run_task_with_context :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->

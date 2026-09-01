@@ -119,6 +119,15 @@ val parse_gemini_stream_json :
     (none) *)
 val parse_stdout_text : string -> string
 
+(** Strict public assistant response parser for documented stream-json events. *)
+val parse_public_stdout_text : string -> string
+
+(** Strict session parser accepting only the documented init event. *)
+val parse_public_session_id : string -> string option
+
+(** Strict usage parser accepting only successful result events. *)
+val parse_public_cost : string -> Backend_types.cost option
+
 (** [build_command ~mcp_config_path spec] constructs the Gemini CLI command and
     stdin content.  Gemini CLI 0.38.2 has no native read-only sandbox;
     [spec.read_only] is acknowledged as documented limitation and the baseline

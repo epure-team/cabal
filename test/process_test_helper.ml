@@ -370,6 +370,17 @@ let run_if_requested () =
       print_endline "helper-stdout" ;
       prerr_endline "helper-stderr" ;
       exit 0
+  | Some ("emit-private-claude", _) ->
+      print_endline
+        {|{"type":"result","is_error":true,"result":"private claude failure"}|} ;
+      exit 0
+  | Some ("emit-private-codex", _) ->
+      print_endline
+        {|{"type":"item.completed","item":{"type":"reasoning","text":"private codex chain"}}|} ;
+      exit 0
+  | Some ("emit-malformed-claude", _) ->
+      print_endline "not-json-private-claude-output" ;
+      exit 0
   | Some ("sleep", _) | Some ("nonreading", _) | Some ("broken-launcher", _) ->
       sleep_forever ()
   | Some ("spawn-child", marker :: _) -> spawn_child marker

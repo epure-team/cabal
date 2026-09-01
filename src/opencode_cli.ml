@@ -712,16 +712,23 @@ let run_task ~sw ~env ?context ?on_raw_line spec =
                     ~on_stdout
                     ()
                 in
+                Option.iter
+                  Task_execution_context.mark_final_public_text
+                  context ;
                 (* Story #515 AC2: detect mutation and restore *)
                 check_opencode_mutation ~env ~config_path ~backup result
           else
-            Backend_process.run_task_with
-              ~sw
-              ~env
-              ~spec:runtime_spec
-              ~build_command
-              ?context
-              ~parse_cost:parse_cost_from_stdout
-              ~parse_stdout:parse_stdout_text
-              ~on_stdout
-              ())
+            let result =
+              Backend_process.run_task_with
+                ~sw
+                ~env
+                ~spec:runtime_spec
+                ~build_command
+                ?context
+                ~parse_cost:parse_cost_from_stdout
+                ~parse_stdout:parse_stdout_text
+                ~on_stdout
+                ()
+            in
+            Option.iter Task_execution_context.mark_final_public_text context ;
+            result)

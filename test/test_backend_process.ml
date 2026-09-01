@@ -934,6 +934,7 @@ let test_missing_exec_handshake_cannot_report_backend_success () =
       let events = ref [] in
       let sink =
         Task_event.create_sink
+          ~sw
           ~now:(fun () -> 0.0)
           ~on_event:(fun event -> events := event :: !events)
           ()
@@ -964,6 +965,8 @@ let test_missing_exec_handshake_cannot_report_backend_success () =
         | Backend_types.Timeout | Backend_types.Cancelled ->
             Alcotest.fail "invalid handshake did not return an explicit failure"
       in
+      Task_event.emit_terminal sink (Task_event.Failed failure) ;
+      Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
       Alcotest.(check bool)
         "failure identifies the invalid EXEC handshake"
         true
@@ -1000,6 +1003,7 @@ let test_shared_deadline_and_process_lifecycle_events () =
   let events = ref [] in
   let sink =
     Task_event.create_sink
+      ~sw
       ~now:(fun () -> Task_deadline.elapsed deadline)
       ~on_event:(fun event -> events := event :: !events)
       ()
@@ -1024,6 +1028,8 @@ let test_shared_deadline_and_process_lifecycle_events () =
     "process uses remaining whole-task deadline"
     true
     (result.Backend_process.status = Backend_types.Timeout) ;
+  Task_event.emit_terminal sink Task_event.Timed_out ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
   let payloads =
     List.rev_map (fun event -> event.Task_event.payload) !events
   in

@@ -141,6 +141,7 @@ let test_success_repeatable_await_and_event_dedup () =
   in
   let first = Task_runtime.await handle in
   let second = Task_runtime.await handle in
+  Task_runtime.await_event_delivery handle ;
   Alcotest.(check bool) "repeatable await" true (first = second) ;
   Alcotest.(check int) "one backend call" 1 !calls ;
   let events = List.rev !events in
@@ -214,6 +215,97 @@ let test_concurrent_await_is_repeatable () =
     true
     (Eio.Promise.await_exn first = Eio.Promise.await_exn second)
 
+let test_await_is_independent_from_callback_completion () =
+  with_registry @@ fun () ->
+  register_backend
+    ~id:"callback-independent"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ _ -> success ()) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let terminal_callback_started, resolve_terminal_callback_started =
+    Eio.Promise.create ()
+  in
+  let release_terminal_callback, resolve_release_terminal_callback =
+    Eio.Promise.create ()
+  in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"callback-independent"
+      ~on_event:(fun event ->
+        match event.Task_event.payload with
+        | Task_event.Terminal _ ->
+            Eio.Promise.resolve resolve_terminal_callback_started () ;
+            Eio.Promise.await release_terminal_callback
+        | _ -> ())
+      (spec ())
+  in
+  Eio.Promise.await terminal_callback_started ;
+  Alcotest.(check bool)
+    "await completes while terminal callback is blocked"
+    true
+    (status_of_result (Task_runtime.await handle) = Backend_types.Success) ;
+  Eio.Promise.resolve resolve_release_terminal_callback () ;
+  Task_runtime.await_event_delivery handle
+
+let test_process_callback_can_await_same_handle () =
+  with_registry @@ fun () ->
+  register_backend
+    ~id:"callback-self-await"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env:_ ?context ?on_raw_line:_ _ ->
+      Option.iter
+        (fun context ->
+          Task_execution_context.emit
+            context
+            (Task_event.Process_started {pid = None}))
+        context ;
+      success ()) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let handle_ready, resolve_handle_ready = Eio.Promise.create () in
+  let terminal_callback_done, resolve_terminal_callback_done =
+    Eio.Promise.create ()
+  in
+  let callback_statuses = ref [] in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"callback-self-await"
+      ~on_event:(fun event ->
+        match event.Task_event.payload with
+        | Task_event.Process_started _ | Task_event.Terminal _ ->
+            let handle = Eio.Promise.await handle_ready in
+            let status = status_of_result (Task_runtime.await handle) in
+            callback_statuses := status :: !callback_statuses ;
+            (match event.payload with
+            | Task_event.Terminal _ ->
+                Eio.Promise.resolve resolve_terminal_callback_done ()
+            | _ -> ())
+        | _ -> ())
+      (spec ())
+  in
+  Eio.Promise.resolve resolve_handle_ready handle ;
+  Alcotest.(check bool)
+    "owner completes"
+    true
+    (status_of_result (Task_runtime.await handle) = Backend_types.Success) ;
+  Eio.Promise.await terminal_callback_done ;
+  Task_runtime.await_event_delivery handle ;
+  Alcotest.(check int)
+    "process and terminal callbacks both await"
+    2
+    (List.length !callback_statuses) ;
+  Alcotest.(check bool)
+    "same-handle callback awaits complete"
+    true
+    (List.for_all (( = ) Backend_types.Success) !callback_statuses)
+
 let test_timeout_and_invalid_timeout_before_call () =
   with_registry @@ fun () ->
   let calls = ref 0 in
@@ -269,8 +361,8 @@ let test_unbounded_default_and_callback_exception () =
     (fun ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ _ -> success ()) ;
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let result =
-    Task_runtime.run_task
+  let handle =
+    Task_runtime.start_task
       ~sw
       ~env
       ~limits
@@ -278,6 +370,8 @@ let test_unbounded_default_and_callback_exception () =
       ~on_event:(fun _ -> failwith "event callback secret")
       (spec ())
   in
+  let result = Task_runtime.await handle in
+  Task_runtime.await_event_delivery handle ;
   Alcotest.(check bool)
     "max_float default remains unbounded"
     true
@@ -295,8 +389,8 @@ let test_raw_reasoning_is_not_promoted () =
   Eio.Switch.run @@ fun sw ->
   let raw = ref [] in
   let events = ref [] in
-  let result =
-    Task_runtime.run_task
+  let handle =
+    Task_runtime.start_task
       ~sw
       ~env
       ~limits
@@ -305,6 +399,8 @@ let test_raw_reasoning_is_not_promoted () =
       ~on_event:(fun event -> events := event :: !events)
       (spec ())
   in
+  let result = Task_runtime.await handle in
+  Task_runtime.await_event_delivery handle ;
   ignore (status_of_result result) ;
   Alcotest.(check (list string))
     "raw callback unchanged"
@@ -323,6 +419,80 @@ let test_raw_reasoning_is_not_promoted () =
     ["public answer"]
     normalized_text
 
+let test_structured_final_text_is_emitted_without_stream_delta () =
+  with_registry @@ fun () ->
+  register_backend
+    ~id:"structured-final"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env:_ ?context ?on_raw_line:_ _ ->
+      Option.iter
+        (fun context ->
+          Task_execution_context.claim_structured_text context ;
+          Task_execution_context.mark_final_public_text context)
+        context ;
+      success ~text:"proven final answer" ()) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let events = ref [] in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"structured-final"
+      ~on_event:(fun event -> events := event :: !events)
+      (spec ())
+  in
+  ignore (status_of_result (Task_runtime.await handle)) ;
+  Task_runtime.await_event_delivery handle ;
+  let texts =
+    List.filter_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Agent_text_delta text -> Some text
+        | _ -> None)
+      (List.rev !events)
+  in
+  Alcotest.(check (list string))
+    "strict final public text is emitted once"
+    ["proven final answer"]
+    texts
+
+let test_unproven_structured_final_text_is_suppressed () =
+  with_registry @@ fun () ->
+  register_backend
+    ~id:"structured-unproven"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env:_ ?context ?on_raw_line:_ _ ->
+      Option.iter Task_execution_context.claim_structured_text context ;
+      success ~text:"private malformed fallback" ()) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let events = ref [] in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"structured-unproven"
+      ~on_event:(fun event -> events := event :: !events)
+      (spec ())
+  in
+  ignore (status_of_result (Task_runtime.await handle)) ;
+  Task_runtime.await_event_delivery handle ;
+  let texts =
+    List.filter_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Agent_text_delta text -> Some text
+        | _ -> None)
+      !events
+  in
+  Alcotest.(check (list string))
+    "unproven strict result text is suppressed"
+    []
+    texts
+
 let test_retry_attempts_share_deadline () =
   with_registry @@ fun () ->
   let calls = ref 0 in
@@ -338,8 +508,8 @@ let test_retry_attempts_share_deadline () =
   Eio.Switch.run @@ fun sw ->
   let events = ref [] in
   let schema = `Assoc [("type", `String "object")] in
-  let result =
-    Task_runtime.run_task
+  let handle =
+    Task_runtime.start_task
       ~sw
       ~env
       ~limits
@@ -347,6 +517,8 @@ let test_retry_attempts_share_deadline () =
       ~on_event:(fun event -> events := event :: !events)
       (spec ~timeout:0.05 ~json_schema:schema ())
   in
+  let result = Task_runtime.await handle in
+  Task_runtime.await_event_delivery handle ;
   Alcotest.(check bool)
     "retry cannot reset deadline"
     true
@@ -362,6 +534,21 @@ let test_retry_attempts_share_deadline () =
       events
   in
   Alcotest.(check int) "two attempt events" 2 (List.length attempts) ;
+  let finishes =
+    List.filter_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Attempt_finished outcome -> Some (event.attempt, outcome)
+        | _ -> None)
+      events
+  in
+  Alcotest.(check int) "two attempt finishes" 2 (List.length finishes) ;
+  Alcotest.(check bool)
+    "second attempt records timeout"
+    true
+    (match List.rev finishes with
+    | (_, Task_event.Attempt_timed_out) :: _ -> true
+    | _ -> false) ;
   Alcotest.(check int) "one terminal after retry timeout" 1 (terminal_count events)
 
 let test_non_success_stops_retry_and_emits_one_terminal () =
@@ -378,8 +565,8 @@ let test_non_success_stops_retry_and_emits_one_terminal () =
           incr calls ;
           Backend_types.make_task_result ~status ()) ;
       let events = ref [] in
-      let result =
-        Task_runtime.run_task
+      let handle =
+        Task_runtime.start_task
           ~sw
           ~env
           ~limits
@@ -394,6 +581,8 @@ let test_non_success_stops_retry_and_emits_one_terminal () =
                  ])
              ())
       in
+      let result = Task_runtime.await handle in
+      Task_runtime.await_event_delivery handle ;
       Alcotest.(check bool)
         (id ^ " status propagated")
         true
@@ -402,7 +591,26 @@ let test_non_success_stops_retry_and_emits_one_terminal () =
       Alcotest.(check int)
         (id ^ " one terminal")
         1
-        (terminal_count !events))
+        (terminal_count !events) ;
+      let finishes =
+        List.filter_map
+          (fun event ->
+            match event.Task_event.payload with
+            | Task_event.Attempt_finished outcome -> Some outcome
+            | _ -> None)
+          !events
+      in
+      let expected_outcome =
+        match status with
+        | Backend_types.Success -> Task_event.Attempt_succeeded
+        | Backend_types.Failed _ -> Task_event.Attempt_failed
+        | Backend_types.Timeout -> Task_event.Attempt_timed_out
+        | Backend_types.Cancelled -> Task_event.Attempt_cancelled
+      in
+      Alcotest.(check bool)
+        (id ^ " has one matching attempt finish")
+        true
+        (finishes = [expected_outcome]))
     [
       ("first-failed", Backend_types.Failed "secret /private/failure");
       ("first-timeout", Backend_types.Timeout);
@@ -420,6 +628,7 @@ let test_parent_switch_cancellation () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun outer_sw ->
   let handle = ref None in
+  let events = ref [] in
   (match
      Eio.Switch.run (fun parent_sw ->
          handle :=
@@ -427,9 +636,10 @@ let test_parent_switch_cancellation () =
              (Task_runtime.start_task
                 ~sw:parent_sw
                 ~env
-                ~limits
-                ~backend_id:"parent-cancel"
-                (spec ())) ;
+                 ~limits
+                 ~backend_id:"parent-cancel"
+                 ~on_event:(fun event -> events := event :: !events)
+                 (spec ())) ;
          Eio.Switch.fail parent_sw Parent_cancelled)
    with
   | exception Parent_cancelled -> ()
@@ -439,10 +649,12 @@ let test_parent_switch_cancellation () =
     match !handle with Some handle -> handle | None -> Alcotest.fail "no handle"
   in
   let result = Eio.Cancel.protect (fun () -> Task_runtime.await handle) in
+  Eio.Cancel.protect (fun () -> Task_runtime.await_event_delivery handle) ;
   Alcotest.(check bool)
     "parent cancellation normalizes"
     true
     (status_of_result result = Backend_types.Cancelled) ;
+  Alcotest.(check int) "parent cancellation terminal delivered" 1 (terminal_count !events) ;
   ignore outer_sw
 
 let test_cancellation_checkpoints_before_preflight_version_and_availability () =
@@ -483,6 +695,7 @@ let test_cancellation_checkpoints_before_preflight_version_and_availability () =
       "checkpoint cancellation normalized"
       true
       (status_of_result (Task_runtime.await handle) = Backend_types.Cancelled) ;
+    Task_runtime.await_event_delivery handle ;
     Alcotest.(check bool)
       "later lifecycle phase absent"
       false
@@ -523,8 +736,8 @@ let test_prepared_dispatch_snapshot_ignores_registry_replacement () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let replaced = ref false in
-  let result =
-    Task_runtime.run_task
+  let handle =
+    Task_runtime.start_task
       ~sw
       ~env
       ~limits
@@ -537,6 +750,8 @@ let test_prepared_dispatch_snapshot_ignores_registry_replacement () =
         | _ -> ())
       (spec ())
   in
+  let result = Task_runtime.await handle in
+  Task_runtime.await_event_delivery handle ;
   let result =
     match result with Ok result -> result | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
   in
@@ -595,6 +810,7 @@ let test_real_process_cancellation_reaps_before_terminal () =
   in
   handle_ref := Some handle ;
   let result = Task_runtime.await handle in
+  Task_runtime.await_event_delivery handle ;
   Alcotest.(check bool)
     "real process cancellation normalized"
     true
@@ -626,6 +842,7 @@ let test_real_process_cancellation_reaps_before_terminal () =
       index (function Task_event.Attempt_started _ -> true | _ -> false);
       index (function Task_event.Process_started _ -> true | _ -> false);
       index (function Task_event.Process_exited _ -> true | _ -> false);
+      index (function Task_event.Attempt_finished _ -> true | _ -> false);
       index (function Task_event.Terminal _ -> true | _ -> false);
     ]
   in
@@ -636,6 +853,78 @@ let test_real_process_cancellation_reaps_before_terminal () =
   let exited = index (function Task_event.Process_exited _ -> true | _ -> false) in
   let terminal = index (function Task_event.Terminal _ -> true | _ -> false) in
   Alcotest.(check bool) "cleanup event precedes terminal" true (exited < terminal)
+
+let test_fatal_await_preserves_exception_after_process_cleanup () =
+  Process_test_helper.install_launcher () ;
+  with_registry @@ fun () ->
+  register_backend
+    ~id:"fatal-after-process"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw ~env ?context ?on_raw_line:_ spec ->
+      ignore
+        (Backend_process.run_process
+           ~sw
+           ~env
+           ~cmd:
+             [
+               Unix.realpath Sys.executable_name;
+               "--process-descendant-helper";
+               "success";
+             ]
+           ~working_dir:spec.Backend_types.working_dir
+           ~timeout_seconds:3.0
+           ?context
+           ()) ;
+      raise Out_of_memory) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let events = ref [] in
+  let pid = ref None in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"fatal-after-process"
+      ~on_event:(fun event ->
+        events := event :: !events ;
+        match event.Task_event.payload with
+        | Task_event.Process_started {pid = Some value} -> pid := Some value
+        | _ -> ())
+      (spec ())
+  in
+  (match Task_runtime.await handle with
+  | exception Out_of_memory -> ()
+  | exception error ->
+      Alcotest.failf "wrong fatal exception: %s" (Printexc.to_string error)
+  | Ok _ | Error _ -> Alcotest.fail "fatal exception was converted to a result") ;
+  Task_runtime.await_event_delivery handle ;
+  let pid = match !pid with Some value -> value | None -> Alcotest.fail "no pid" in
+  let process_exists =
+    try
+      Unix.kill pid 0 ;
+      true
+    with Unix.Unix_error (Unix.ESRCH, _, _) -> false
+  in
+  Alcotest.(check bool) "fatal child reaped before await" false process_exists ;
+  let payloads = List.rev_map (fun event -> event.Task_event.payload) !events in
+  let index predicate =
+    let rec loop offset = function
+      | [] -> Alcotest.fail "missing fatal lifecycle event"
+      | payload :: rest ->
+          if predicate payload then offset else loop (offset + 1) rest
+    in
+    loop 0 payloads
+  in
+  let exited = index (function Task_event.Process_exited _ -> true | _ -> false) in
+  let finished =
+    index (function Task_event.Attempt_finished _ -> true | _ -> false)
+  in
+  let terminal = index (function Task_event.Terminal _ -> true | _ -> false) in
+  Alcotest.(check bool)
+    "cleanup and attempt finish precede fatal terminal"
+    true
+    (exited < finished && finished < terminal)
 
 let () =
   Alcotest.run
@@ -651,6 +940,14 @@ let () =
             "concurrent await"
             `Quick
             test_concurrent_await_is_repeatable;
+          Alcotest.test_case
+            "await independent from callback"
+            `Quick
+            test_await_is_independent_from_callback_completion;
+          Alcotest.test_case
+            "process callback can await same handle"
+            `Quick
+            test_process_callback_can_await_same_handle;
           Alcotest.test_case
             "unbounded and callback exception"
             `Quick
@@ -674,6 +971,10 @@ let () =
             "real process is reaped before terminal"
             `Quick
             test_real_process_cancellation_reaps_before_terminal;
+          Alcotest.test_case
+            "fatal await follows process cleanup"
+            `Quick
+            test_fatal_await_preserves_exception_after_process_cleanup;
         ] );
       ( "deadline",
         [
@@ -696,6 +997,14 @@ let () =
             "raw reasoning remains raw-only"
             `Quick
             test_raw_reasoning_is_not_promoted;
+          Alcotest.test_case
+            "structured final text fallback"
+            `Quick
+            test_structured_final_text_is_emitted_without_stream_delta;
+          Alcotest.test_case
+            "unproven structured text suppressed"
+            `Quick
+            test_unproven_structured_final_text_is_suppressed;
         ] );
       ( "dispatch snapshot",
         [

@@ -28,8 +28,14 @@ val start_task :
 val cancel : t -> unit
 
 (** Await the memoized terminal result. Concurrent and repeated calls return
-    the same value. *)
+    the same value. This never waits for event callbacks. It is safe to invoke
+    from this handle's own callback, including process and terminal callbacks. *)
 val await : t -> (Backend_types.task_result, Runtime_dispatch.error) result
+
+(** Wait until the terminal event callback has returned and all earlier queued
+    callbacks have completed. Call this after {!await} when deterministic event
+    delivery is required. Do not call it from this handle's own callback. *)
+val await_event_delivery : t -> unit
 
 (** Synchronous compatibility entry point implemented through a task handle. *)
 val run_task :

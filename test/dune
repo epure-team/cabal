@@ -44,6 +44,11 @@
  (modules test_task_runtime))
 
 (test
+ (name test_custom_backend_compile)
+ (libraries cabal eio)
+ (modules test_custom_backend_compile))
+
+(test
  (name test_runtime_bootstrap)
  (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
  (deps ../bin/process_group_launcher.exe)
@@ -90,7 +95,8 @@
 
 (test
  (name test_adapter_loader)
- (libraries cabal alcotest unix)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_adapter_loader))
 
 (test
