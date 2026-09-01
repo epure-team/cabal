@@ -70,9 +70,57 @@ let both_attempts_error ~attempt1 ~attempt2 =
     ("Both schema enforcement attempts failed.\nAttempt 1: " ^ attempt1
    ^ "\nAttempt 2: " ^ attempt2)
 
-let run_task ~sw ~env ?on_raw_line ~backend spec =
+let attempt_outcome_of_status = function
+  | Backend_types.Success -> Task_event.Attempt_succeeded
+  | Backend_types.Failed _ -> Task_event.Attempt_failed
+  | Backend_types.Timeout -> Task_event.Attempt_timed_out
+  | Backend_types.Cancelled -> Task_event.Attempt_cancelled
+
+let finish_attempt context outcome =
+  Option.iter
+    (fun value -> Task_execution_context.finish_attempt value outcome)
+    context
+
+let run_backend ~sw ~env ?context ?on_raw_line backend spec =
+  try
+    let result =
+      match context with
+      | None -> Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
+      | Some context ->
+          Agentic_backend.run_task_with_context
+            ~sw
+            ~env
+            ~context
+            ?on_raw_line
+            backend
+            spec
+    in
+    finish_attempt context (attempt_outcome_of_status result.Backend_types.status) ;
+    result
+  with
+  | Eio.Cancel.Cancelled _ as cancellation ->
+      let outcome =
+        match context with
+        | Some value when Task_execution_context.deadline_expired value ->
+            Task_event.Attempt_timed_out
+        | Some _ | None -> Task_event.Attempt_cancelled
+      in
+      finish_attempt context outcome ;
+      raise cancellation
+  | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
+      finish_attempt context Task_event.Attempt_failed ;
+      raise fatal
+  | error ->
+      finish_attempt context Task_event.Attempt_failed ;
+      raise error
+
+let run_task ~sw ~env ?context ?on_raw_line ~backend spec =
+  Option.iter
+    (fun value ->
+      Task_execution_context.begin_attempt value Task_event.Initial_attempt)
+    context ;
   match spec.Backend_types.json_schema with
-  | None -> Ok (Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec)
+  | None -> Ok (run_backend ~sw ~env ?context ?on_raw_line backend spec)
   | Some schema -> (
       if Agentic_backend.native_json_schema_output backend then
         (* Native path (Story #625): the schema is in spec.json_schema and the
@@ -84,7 +132,7 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
            includes a rejected schema but equally a rate limit, a network
            failure, a bad flag, or the process being killed. *)
         let result =
-          Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
+          run_backend ~sw ~env ?context ?on_raw_line backend spec
         in
         match result.Backend_types.status with
         | Backend_types.Failed msg ->
@@ -117,7 +165,7 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
            Hard cap of two backend calls per run_task invocation. *)
         let schema_json = Yojson.Safe.to_string ~std:true schema in
         let result1 =
-          Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
+          run_backend ~sw ~env ?context ?on_raw_line backend spec
         in
         (* Schema validation only makes sense for successful invocations.
            Propagate Failed/Timeout/Cancelled results directly so callers see
@@ -132,41 +180,73 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
             with
             | Ok () -> Ok result1
             | Error err1 -> (
-                let retry_spec =
+                let retry_spec, retry_kind =
                   if Agentic_backend.supports_session_resume backend then
                     match result1.Backend_types.session_id with
                     | Some sid ->
-                        make_resume_retry_spec
-                          ~base:spec
-                          ~session_id:sid
-                          ~schema_json
-                          ~err:err1
+                        ( make_resume_retry_spec
+                            ~base:spec
+                            ~session_id:sid
+                            ~schema_json
+                            ~err:err1,
+                          Task_event.Resume_retry )
                     | None ->
-                        make_fresh_retry_spec ~base:spec ~schema_json ~err:err1
-                  else make_fresh_retry_spec ~base:spec ~schema_json ~err:err1
+                        ( make_fresh_retry_spec ~base:spec ~schema_json ~err:err1,
+                          Task_event.Fresh_retry )
+                  else
+                    ( make_fresh_retry_spec ~base:spec ~schema_json ~err:err1,
+                      Task_event.Fresh_retry )
                 in
-                let result2 =
-                  Agentic_backend.run_task
-                    ~sw
-                    ~env
-                    ?on_raw_line
-                    backend
-                    retry_spec
+                let deadline_expired =
+                  match context with
+                  | Some value -> Task_execution_context.deadline_expired value
+                  | None -> false
                 in
-                match result2.Backend_types.status with
-                | Backend_types.Failed _ | Backend_types.Timeout
-                | Backend_types.Cancelled ->
-                    both_attempts_error
-                      ~attempt1:err1
-                      ~attempt2:
-                        (backend_status_error_text result2.Backend_types.status)
-                | Backend_types.Success -> (
-                    let agent_text2 = result2.Backend_types.agent_text in
-                    match
-                      Json_schema_validator.validate
-                        ~schema
-                        ~document:agent_text2
-                    with
-                    | Ok () -> Ok result2
-                    | Error err2 ->
-                        both_attempts_error ~attempt1:err1 ~attempt2:err2))))
+                if deadline_expired then
+                  Ok
+                    (Backend_types.make_task_result
+                       ~status:Backend_types.Timeout
+                       ())
+                else begin
+                  Option.iter
+                    (fun value ->
+                      Task_execution_context.transition_to_retry
+                        value
+                        ~kind:retry_kind
+                        ~reason:err1)
+                    context ;
+                  let result2 =
+                    run_backend
+                      ~sw
+                      ~env
+                      ?context
+                      ?on_raw_line
+                      backend
+                      retry_spec
+                  in
+                  match result2.Backend_types.status with
+                  | Backend_types.Timeout | Backend_types.Cancelled -> (
+                      match context with
+                      | Some _ -> Ok result2
+                      | None ->
+                          both_attempts_error
+                            ~attempt1:err1
+                            ~attempt2:
+                              (backend_status_error_text
+                                 result2.Backend_types.status))
+                  | Backend_types.Failed _ ->
+                      both_attempts_error
+                        ~attempt1:err1
+                        ~attempt2:
+                          (backend_status_error_text result2.Backend_types.status)
+                  | Backend_types.Success -> (
+                      let agent_text2 = result2.Backend_types.agent_text in
+                      match
+                        Json_schema_validator.validate
+                          ~schema
+                          ~document:agent_text2
+                      with
+                      | Ok () -> Ok result2
+                      | Error err2 ->
+                          both_attempts_error ~attempt1:err1 ~attempt2:err2)
+                end)))

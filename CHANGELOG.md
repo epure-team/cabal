@@ -9,6 +9,28 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Cancellable task runtime and normalized lifecycle events.**
+  `Task_runtime` now exposes isolated Eio-backed handles with idempotent
+  cancellation and repeatable/concurrent await. `Runtime_dispatch.run_task`
+  forwards through the same handle state machine. One absolute monotonic
+  `task_spec.timeout` covers resolution, preflight, version/availability checks,
+  schema retries, process execution, parsing, and finalization; retries cannot
+  reset the budget, invalid negative/NaN values fail before backend calls, and
+  the legacy `max_float` default remains unbounded. `Task_event` provides strict
+  task-local sequence/attempt numbers, start-relative timestamps, process and
+  retry lifecycle, public output/session/usage events, and exactly one terminal
+  event. Each backend invocation now has paired `Attempt_started` /
+  `Attempt_finished` events. One asynchronous task-local callback drain preserves
+  sequence order without blocking backend execution or handle outcomes;
+  `Task_runtime.await_event_delivery` explicitly waits for terminal callback
+  completion. Its pending queue is capped at 256 events (192 observations plus a
+  64-slot lifecycle/marker/terminal reserve), 64 KiB of assistant text, and
+  16 KiB per text delta. Backpressure omissions are summarized without raw data
+  by `Event_delivery_truncated`; one bounded marker accumulates counts while
+  pending, and fully omitted events leave delivered sequence gaps. Callback
+  exceptions are isolated with sanitized diagnostics, while raw lines and
+  reasoning remain confined to `on_raw_line`. Process cleanup/reaping and
+  task-scoped Codex schema-file cleanup complete before terminal enqueue.
 - **Validated runtime bootstrap and central dispatch.**
   `Runtime_bootstrap` now offers compatibility-preserving `Extensible` loading
   and an atomic `Hardened_builtins` profile that ignores user/project adapters,
@@ -18,8 +40,9 @@ by the date a change merged to `main`.
    resolves one immutable validated entry at every invocation, and rejects raw
    runtime-only overrides before side effects rather than lending them catalog
    claims. Input/capability preflight precedes version or availability work;
-   ordinary exceptions are sanitized while cancellation/fatal exceptions
-   propagate. Hardened entries bind independent full capability snapshots,
+   ordinary exceptions are sanitized, cancellation is normalized after cleanup,
+   and fatal exceptions propagate through handle await. Hardened entries bind
+   independent full capability snapshots,
    approved descriptors, explicit origins, and `Enforce_baseline`. Extensible
    YAML entries bind conservative effective descriptors and `No_version_gate`
    with global → project whole-entry precedence, including built-in-id overrides.
@@ -71,6 +94,13 @@ by the date a change merged to `main`.
   not yet populated `agent_text`).
 
 ### Changed
+- **`Agentic_backend.S.run_task` gained `?context` (breaking for backend module
+  implementers).** Downstream modules must change
+  `let run_task ~sw ~env ?on_raw_line spec = ...` to
+  `let run_task ~sw ~env ?context ?on_raw_line spec = ...`, using
+  `?context:_` when lifecycle events are not consumed. Existing call sites using
+  the first-class `Agentic_backend.run_task` wrapper remain source-compatible.
+  `test/test_custom_backend_compile.ml` pins both sides of this contract.
 - **Adapter override directory renamed from `.epure/` to `.cabal/`** (breaking).
   `Adapter_loader.register_all` now reads user-global overrides from
   `~/.cabal/adapters/*.yaml` and project-local overrides from
@@ -122,6 +152,11 @@ by the date a change merged to `main`.
   application" instead of "Epure".
 
 ### Security
+- **Structured public-output parsing now fails closed.** Claude, Codex, Gemini,
+  OpenCode, and Pi normalized paths accept only documented successful assistant
+  or tool records. Error, reasoning, user, unknown, and malformed records stay
+  raw-only. Extensible YAML overrides of those built-in ids use the same strict
+  parser and cannot promote raw fallback text.
 - **Session NDJSON files now created with mode `0o600`** (previously `0o640`,
   group-readable). Post-redaction backend events could leak to any user in the
   file owner's group on shared/CI machines.

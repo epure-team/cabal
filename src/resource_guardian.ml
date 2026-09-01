@@ -16,8 +16,14 @@ type cpu_sample = {total : int; idle : int}
 
 type t = {
   config : config;
+  registry_lock : Mutex.t;
+      (** Serializes registry updates across OCaml domains. *)
+  targets : Process_group.t list Atomic.t;
+      (** Owned process groups. These are terminated through their abstraction
+          so a pressure event reaches descendants and reaps only the child we
+          own. *)
   pids : int list Atomic.t;
-      (** Tracked child PIDs. Lock-free updates via CAS so register/unregister
+      (** Tracked child PIDs. Updates are serialized so register/unregister
           are safe across domains and Eio fibres. *)
   mutable current : stats;
   mutable mem_history : float list;
@@ -53,6 +59,8 @@ let default_config =
 let create config =
   {
     config;
+    registry_lock = Mutex.create ();
+    targets = Atomic.make [];
     pids = Atomic.make [];
     current = {memory_percent = 0.0; cpu_percent = 0.0};
     mem_history = [];
@@ -62,12 +70,34 @@ let create config =
     proc_available = None;
   }
 
-(** [update_pids t f] swaps the pid list atomically with [f current].
-    Retries under contention. Pure-functional [f] is mandatory. *)
-let rec update_pids t f =
-  let old = Atomic.get t.pids in
-  let next = f old in
-  if Atomic.compare_and_set t.pids old next then () else update_pids t f
+let with_registry_lock t f =
+  Mutex.lock t.registry_lock ;
+  Fun.protect ~finally:(fun () -> Mutex.unlock t.registry_lock) f
+
+(** [update_pids t f] swaps the pid list atomically with [f current]. *)
+let update_pids t f =
+  with_registry_lock t (fun () -> Atomic.set t.pids (f (Atomic.get t.pids)))
+
+let update_targets t f =
+  with_registry_lock t (fun () ->
+      Atomic.set t.targets (f (Atomic.get t.targets)))
+
+(* Targets are owned handles. Physical identity avoids conflating a stale PID
+   with a distinct target after the operating system has recycled that PID. *)
+let same_target left right = left == right
+
+let register_target t target =
+  update_targets t (fun targets ->
+      if List.exists (fun current -> same_target current target) targets then
+        targets
+      else target :: targets)
+
+let unregister_target t target =
+  update_targets
+    t
+    (List.filter (fun current -> not (same_target current target)))
+
+let registered_targets t = Atomic.get t.targets
 
 let register_pid t pid = update_pids t (fun xs -> pid :: xs)
 
@@ -167,8 +197,9 @@ let compute_cpu_percent prev curr =
     100.0 *. float_of_int (total_diff - idle_diff) /. float_of_int total_diff
   else 0.0
 
-(** Try to kill a PID with the given signal. Ignores ESRCH (already exited)
-    but logs EPERM and other unexpected errors. *)
+(** Try to kill a legacy PID with the given signal. Ignores ESRCH (already
+    exited) but logs EPERM and other unexpected errors. Legacy PIDs are never
+    reaped here because the guardian has no ownership handle for them. *)
 let try_kill pid signal =
   try Unix.kill pid signal
   with Unix.Unix_error (errno, _, _) ->
@@ -179,15 +210,20 @@ let try_kill pid signal =
         signal
         (Unix.error_message errno)
 
-(** Kill all registered PIDs: SIGTERM first, wait, then SIGKILL survivors. *)
+(** Kill registered process-group targets through their owned abstraction. *)
+let kill_registered_targets t ~clock =
+  let targets = Atomic.get t.targets in
+  Eio.Fiber.all
+    (List.map
+       (fun target () ->
+         try Process_group.terminate ~clock target with _ -> ())
+       targets)
+
+(** Kill all registered legacy PIDs: SIGTERM first, wait, then SIGKILL
+    survivors. This intentionally does not waitpid/reap them. *)
 let kill_registered_pids t ~clock =
   let pids = Atomic.get t.pids in
   if pids <> [] then begin
-    Diagnostics.error
-      "Memory threshold exceeded (%.0f%% >= %d%%), killing %d child processes"
-      t.current.memory_percent
-      t.config.kill_percent
-      (List.length pids) ;
     (* SIGTERM all *)
     List.iter (fun pid -> try_kill pid Sys.sigterm) pids ;
     (* Wait 2 seconds for graceful shutdown *)
@@ -195,6 +231,23 @@ let kill_registered_pids t ~clock =
     (* SIGKILL survivors *)
     List.iter (fun pid -> try_kill pid Sys.sigkill) pids
   end
+
+let terminate_registered t ~clock =
+  let targets = Atomic.get t.targets in
+  let pids = Atomic.get t.pids in
+  if targets <> [] || pids <> [] then
+    Diagnostics.error
+      "Memory threshold exceeded (%.0f%% >= %d%%), terminating %d process \
+       groups and %d legacy child PIDs"
+      t.current.memory_percent
+      t.config.kill_percent
+      (List.length targets)
+      (List.length pids) ;
+  Eio.Fiber.all
+    [
+      (fun () -> kill_registered_targets t ~clock);
+      (fun () -> kill_registered_pids t ~clock);
+    ]
 
 let run t ~clock =
   (* Take initial CPU sample so the first poll produces a real delta *)
@@ -223,7 +276,7 @@ let run t ~clock =
     t.cpu_history <- push_history t.cpu_history cpu_pct ;
     (* Check thresholds with hysteresis *)
     if mem_pct >= float_of_int t.config.kill_percent then
-      kill_registered_pids t ~clock
+      terminate_registered t ~clock
     else if mem_pct >= float_of_int t.config.warn_percent then begin
       if not t.warned then begin
         Diagnostics.warn "Memory pressure: %.0f%% used" mem_pct ;

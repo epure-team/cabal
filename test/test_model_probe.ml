@@ -55,7 +55,8 @@ let make_mock ~id ~models ~models_probe : Agentic_backend.t =
     let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =
       Agentic_backend.Config_check_unsupported "mock probe backend"
 
-    let run_task ~sw:_ ~env:_ ?on_raw_line:_ (_spec : Backend_types.task_spec) =
+    let run_task ~sw:_ ~env:_ ?context:_ ?on_raw_line:_
+        (_spec : Backend_types.task_spec) =
       Backend_types.make_task_result
         ~status:Backend_types.Success
         ~stdout:"mock"

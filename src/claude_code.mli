@@ -209,6 +209,17 @@ val parse_session_id_from_stdout : string -> string option
     (none) *)
 val parse_stdout_text : string -> string
 
+(** Strict public-output parser used by normalized runtime paths. Malformed,
+    error, user, reasoning, system, and unknown records contribute no text. *)
+val parse_public_stdout_text : string -> string
+
+(** Strict session parser accepting only documented init or successful result
+    records. *)
+val parse_public_session_id : string -> string option
+
+(** Strict usage parser accepting only successful result records. *)
+val parse_public_cost : string -> Backend_types.cost option
+
 (** [parse_stream_event line] parses a stream-json event line and extracts
     displayable content. Returns [Some text] if there is content to display,
     [None] otherwise.
@@ -229,6 +240,12 @@ val parse_stdout_text : string -> string
     {violates}
     (none) *)
 val parse_stream_event : string -> string option
+
+(** [normalized_events_of_stream_line line] extracts only public assistant
+    text, tool identity, and session identity from one Claude stream event.
+    Thinking blocks, tool arguments, and malformed input produce no sensitive
+    normalized payload. *)
+val normalized_events_of_stream_line : string -> Task_event.payload list
 
 (** [run_task_streaming ~sw ~env ~on_stdout spec] runs a task with streaming
     stdout output. The [on_stdout] callback is called for each line of output
@@ -252,6 +269,7 @@ val run_task_streaming :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
   on_stdout:(string -> unit) ->
+  ?context:Task_execution_context.t ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->
   Backend_types.task_result

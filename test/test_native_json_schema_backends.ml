@@ -40,6 +40,8 @@
 
 open Cabal
 
+let () = Process_test_helper.install_launcher ()
+
 (* -------------------------------------------------------------------------
    Harness setup.  Backend-specific model defaults live in
    [E2e_harness_config]; credentials are left to each CLI's own auth mechanism.

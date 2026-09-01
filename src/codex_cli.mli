@@ -28,6 +28,15 @@
 (** @inline *)
 include Agentic_backend.S
 
+(** Extract safe normalized payloads from one Codex JSONL event. Agent text,
+    session/tool identity, and token counts are retained; raw tool arguments
+    and outputs are omitted. *)
+val normalized_events_of_line : string -> Task_event.payload list
+
+(** [with_output_schema_file schema f] writes [schema] to a private temporary
+    file for Codex, calls [f path], and unlinks the file on every exit path. *)
+val with_output_schema_file : Yojson.Safe.t -> (string -> 'a) -> 'a
+
 (** {1 Additional Utilities} *)
 
 (** [project_config_artifacts ~mcp_servers ~lsp_servers] returns the
@@ -91,6 +100,12 @@ val parse_jsonl_output : string -> string * Backend_types.cost option
     (none) *)
 val parse_stdout_text : string -> string
 
+(** Strict final public assistant text parser for Codex JSONL. *)
+val parse_public_stdout_text : string -> string
+
+(** Strict session parser accepting only [thread.started]. *)
+val parse_public_session_id : string -> string option
+
 (** [build_command ~mcp_config_path spec] constructs the Codex CLI command and
     stdin content for a task invocation.  When [spec.read_only] is [true],
     passes [-s read-only] (OS-level sandbox); otherwise [--full-auto].
@@ -102,6 +117,9 @@ val parse_stdout_text : string -> string
     {post}
     Returns [(cmd_list, stdin_content)].  When [spec.read_only = true] the
     command includes [-s read-only]; when [false] it includes [--full-auto].
+    With a schema, this testing helper creates the referenced temporary file and
+    the caller must unlink it. Normal {!run_task} owns and unlinks that file with
+    {!with_output_schema_file} on success, failure, timeout, and cancellation.
 
     {violators}
     (none)

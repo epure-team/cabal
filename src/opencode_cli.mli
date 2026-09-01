@@ -33,6 +33,10 @@
 (** @inline *)
 include Agentic_backend.S
 
+(** Extract public assistant text and token usage from one OpenCode JSON event.
+    Raw event content is otherwise omitted. *)
+val normalized_events_of_line : string -> Task_event.payload list
+
 (** {1 Additional Utilities} *)
 
 (** [project_config_artifacts ~mcp_servers ~lsp_servers] returns the

@@ -1,6 +1,6 @@
 name: gemini-cli
 display_name: Gemini CLI
-invocation_command: "gemini --output-format json -y -p -"
+invocation_command: "gemini --output-format stream-json -y -p -"
 template_set: default
 timeout_seconds: 300.0
 models:

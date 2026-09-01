@@ -28,9 +28,10 @@
 
     {b Retry budget.}  Hard cap of two backend calls per [run_task] invocation
     (validate-and-retry path only).  No backoff, no configurable budget, no
-    internal timeout beyond the existing [task_spec.timeout] which applies per
-    attempt.  Callers wanting more attempts must call [run_task] again
-    themselves.
+    internal timeout beyond [task_spec.timeout]. Under the central
+    {!Task_runtime} path, one absolute deadline is shared by both attempts;
+    direct low-level calls retain their historical per-backend-call behavior.
+    Callers wanting more attempts must call [run_task] again themselves.
 
     {b Validate-and-retry sub-paths.}
     - {i Session-resume path} (when [backend] advertises [session_resume] and
@@ -52,7 +53,7 @@ val resume_retry_template : string
     that order. *)
 val fresh_retry_template : string
 
-(** [run_task ~sw ~env ?on_raw_line ~backend spec] executes [spec] with
+(** [run_task ~sw ~env ?context ?on_raw_line ~backend spec] executes [spec] with
     optional JSON schema enforcement.
 
     This remains a low-level compatibility API. It intentionally accepts an
@@ -87,6 +88,7 @@ val fresh_retry_template : string
 val run_task :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
+  ?context:Task_execution_context.t ->
   ?on_raw_line:(string -> unit) ->
   backend:Agentic_backend.t ->
   task_spec ->

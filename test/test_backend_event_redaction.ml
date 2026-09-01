@@ -140,6 +140,17 @@ let test_nested_environment_inside_object_redacted () =
   in
   Alcotest.(check bool) "nested env leaks" false (leaks "ghp_secrettoken" j)
 
+let test_extended_yojson_containers_are_exhaustive () =
+  let tuple = `Tuple [`Assoc [("prompt", `String "tuple-secret")]] in
+  let variant =
+    `Variant ("Envelope", Some (`Assoc [("token", `String "variant-secret")]))
+  in
+  Alcotest.(check bool) "tuple secret redacted" false (leaks "tuple-secret" tuple) ;
+  Alcotest.(check bool)
+    "variant secret redacted"
+    false
+    (leaks "variant-secret" variant)
+
 (* ---- error fields ---------------------------------------------------------*)
 
 let test_error_field_with_secret_redacted () =
@@ -219,5 +230,9 @@ let () =
             "nested environment inside object"
             `Quick
             test_nested_environment_inside_object_redacted;
+          Alcotest.test_case
+            "tuple and variant containers"
+            `Quick
+            test_extended_yojson_containers_are_exhaustive;
         ] );
     ]

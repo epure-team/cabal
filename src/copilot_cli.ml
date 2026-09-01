@@ -480,7 +480,7 @@ let runtime_project_config_artifacts ~project_dir ~managed_namespace
   |> List.filter (fun artifact ->
       not (preserves_existing_lsp_artifact ~project_dir lsp_servers artifact))
 
-let run_task ~sw ~env ?on_raw_line:_ spec =
+let run_task ~sw ~env ?context ?on_raw_line:_ spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
@@ -518,5 +518,6 @@ let run_task ~sw ~env ?on_raw_line:_ spec =
             ~env
             ~spec:runtime_spec
             ~build_command
+            ?context
             ~parse_stdout:parse_stdout_text
             ())

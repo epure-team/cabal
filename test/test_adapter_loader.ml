@@ -9,6 +9,8 @@
 
 open Cabal
 
+let () = Process_test_helper.run_if_requested ()
+
 (* --- helpers --------------------------------------------------------------- *)
 
 let with_temp_dir f =
@@ -395,6 +397,108 @@ let test_yaml_config_metadata_is_bounded_and_cleared () =
     true
     (Option.is_none (Yaml_adapter.config_of second))
 
+let test_builtin_id_yaml_override_keeps_private_json_raw_only () =
+  Process_test_helper.install_launcher () ;
+  let run_case name action expected_raw =
+    with_temp_dir @@ fun working_dir ->
+    let invocation_command =
+      String.concat
+        " "
+        [
+          Unix.realpath Sys.executable_name;
+          "--process-descendant-helper";
+          action;
+        ]
+    in
+    let adapter_path =
+      Filename.concat
+        working_dir
+        (Filename.concat ".cabal/adapters" (name ^ ".yaml"))
+    in
+    write_file
+      adapter_path
+      (Printf.sprintf
+         "name: %s\ndisplay_name: Structured override\ninvocation_command: \"%s\"\ntemplate_set: default\ntimeout_seconds: 3.0\n"
+         name
+         invocation_command) ;
+    Registry.clear () ;
+    (match
+       Runtime_bootstrap.register_runtime
+         ~project_dir:working_dir
+         ~profile:Runtime_bootstrap.Extensible
+         ()
+     with
+    | Ok () -> ()
+    | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
+    let backend =
+      match Registry.get name with
+      | Some backend -> backend
+      | None -> Alcotest.failf "%s override was not registered" name
+    in
+    Eio_posix.run @@ fun env ->
+    Eio.Switch.run @@ fun sw ->
+    let events = ref [] in
+    let raw = ref [] in
+    let sink =
+      Task_event.create_sink
+        ~sw
+        ~now:(fun () -> 0.0)
+        ~on_event:(fun event -> events := event :: !events)
+        ()
+    in
+    let context =
+      Task_execution_context.create ~remaining_time:(fun () -> None) sink
+    in
+    let spec =
+      Backend_types.make_task_spec ~prompt:"test" ~working_dir ()
+    in
+    let result =
+      Agentic_backend.run_task_with_context
+        ~sw
+        ~env
+        ~context
+        ~on_raw_line:(fun line -> raw := line :: !raw)
+        backend
+        spec
+    in
+    Task_event.emit_terminal sink Task_event.Succeeded ;
+    Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+    Alcotest.(check bool)
+      (name ^ " process succeeds")
+      true
+      (result.Backend_types.status = Backend_types.Success) ;
+    Alcotest.(check string) (name ^ " private JSON is not result text") "" result.agent_text ;
+    Alcotest.(check (list string))
+      (name ^ " raw callback is unchanged")
+      [expected_raw]
+      (List.rev !raw) ;
+    let normalized_text =
+      List.filter_map
+        (fun event ->
+          match event.Task_event.payload with
+          | Task_event.Agent_text_delta text -> Some text
+          | _ -> None)
+        !events
+    in
+    Alcotest.(check (list string))
+      (name ^ " private JSON is never normalized")
+      []
+      normalized_text ;
+    Registry.clear ()
+  in
+  run_case
+    "claude-code"
+    "emit-private-claude"
+    {|{"type":"result","is_error":true,"result":"private claude failure"}|} ;
+  run_case
+    "codex"
+    "emit-private-codex"
+    {|{"type":"item.completed","item":{"type":"reasoning","text":"private codex chain"}}|} ;
+  run_case
+    "claude-code"
+    "emit-malformed-claude"
+    "not-json-private-claude-output"
+
 (* --- test suite ------------------------------------------------------------ *)
 
 let () =
@@ -459,5 +563,12 @@ let () =
             "same-id replacement is bounded and clear resets"
             `Quick
             test_yaml_config_metadata_is_bounded_and_cleared;
+        ] );
+      ( "structured override privacy",
+        [
+          Alcotest.test_case
+            "private JSON remains raw-only"
+            `Quick
+            test_builtin_id_yaml_override_keeps_private_json_raw_only;
         ] );
     ]

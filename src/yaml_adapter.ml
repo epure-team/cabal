@@ -87,6 +87,41 @@ let parse_pi_session_id stdout =
         | _ -> None
       with Yojson.Json_error _ -> None)
 
+let normalized_pi_events_of_line line =
+  try
+    match Yojson.Safe.from_string line with
+    | `Assoc fields -> (
+        match List.assoc_opt "type" fields with
+        | Some (`String "session") -> (
+            match List.assoc_opt "id" fields with
+            | Some (`String id) -> [Task_event.Session_id id]
+            | _ -> [])
+        | Some (`String "message_end") -> (
+            match List.assoc_opt "message" fields with
+            | Some (`Assoc message) -> (
+                match
+                  List.assoc_opt "role" message,
+                  List.assoc_opt "content" message
+                with
+                | Some (`String "assistant"), Some (`List blocks) ->
+                    List.filter_map
+                      (function
+                        | `Assoc block -> (
+                            match
+                              List.assoc_opt "type" block,
+                              List.assoc_opt "text" block
+                            with
+                            | Some (`String "text"), Some (`String text) ->
+                                Some (Task_event.Agent_text_delta text)
+                            | _ -> None)
+                        | _ -> None)
+                      blocks
+                | _ -> [])
+            | _ -> [])
+        | _ -> [])
+    | _ -> []
+  with Yojson.Json_error _ -> []
+
 (* Ollama occasionally closes an OpenAI-compatible streamed response from a
    local coding model without a terminal [finish_reason].  Pi retries a turn
    internally, but ultimately exits non-zero and Cabal would otherwise turn a
@@ -147,17 +182,42 @@ let make_backend (cfg : config) : Agentic_backend.t =
        YAML-loaded backends populate task_result.agent_text instead of leaving
        it empty. Without this, every host using a YAML-registered adapter sees
        agent_text = "" and has to re-parse raw stdout itself. *)
-    let parse_stdout_for_id =
+    let structured_parser_for_id =
       match cfg.name with
-      | "claude-code" -> Some Claude_code.parse_stdout_text
-      | "codex" -> Some Codex_cli.parse_stdout_text
-      | "gemini-cli" -> Some Gemini_cli.parse_stdout_text
-      | "copilot-cli" -> Some Copilot_cli.parse_stdout_text
-      | "opencode" -> Some Opencode_cli.parse_stdout_text
-      | "pi" -> Some parse_pi_json_events
+      | "claude-code" ->
+          Some
+            ( Claude_code.parse_public_stdout_text,
+              Some Claude_code.parse_public_session_id,
+              Claude_code.normalized_events_of_stream_line )
+      | "codex" ->
+          Some
+            ( Codex_cli.parse_public_stdout_text,
+              Some Codex_cli.parse_public_session_id,
+              Codex_cli.normalized_events_of_line )
+      | "gemini-cli" ->
+          Some
+            ( Gemini_cli.parse_public_stdout_text,
+              Some Gemini_cli.parse_public_session_id,
+              Gemini_cli.normalized_events_of_line )
+      | "opencode" ->
+          Some
+            ( Opencode_cli.parse_stdout_text,
+              None,
+              Opencode_cli.normalized_events_of_line )
+      | "pi" ->
+          Some
+            ( parse_pi_json_events,
+              Some parse_pi_session_id,
+              normalized_pi_events_of_line )
       | _ -> None
 
-    let run_task ~sw ~env ?on_raw_line:_ (spec : task_spec) =
+    let parse_stdout_for_id =
+      match structured_parser_for_id with
+      | Some (parse_stdout, _, _) -> Some parse_stdout
+      | None when cfg.name = "copilot-cli" -> Some Copilot_cli.parse_stdout_text
+      | None -> None
+
+    let run_task ~sw ~env ?context ?on_raw_line (spec : task_spec) =
       let args = invocation_argv cfg in
       let full_prompt =
         if String.length spec.instructions > 0 then
@@ -166,19 +226,46 @@ let make_backend (cfg : config) : Agentic_backend.t =
       in
       let build_command ~mcp_config_path:_ s =
         if cfg.name = "pi" then
-          let model_args = match s.model with None -> [] | Some m -> ["--model"; m] in
+          let model_args =
+            match s.model with None -> [] | Some m -> ["--model"; m]
+          in
           (args @ ["--print"; "--mode"; "json"; "--approve"] @ model_args, full_prompt)
         else (args, full_prompt)
       in
       let run_once () =
-        Backend_process.run_task_with
-          ~sw
-          ~env
-          ~spec:{spec with timeout = cfg.timeout_seconds}
-          ~build_command
-          ?parse_stdout:parse_stdout_for_id
-          ?parse_session_id:(if cfg.name = "pi" then Some parse_pi_session_id else None)
-          ()
+        (match context, structured_parser_for_id with
+        | Some context, Some _ ->
+            Task_execution_context.claim_structured_text context
+        | Some _, None | None, _ -> ()) ;
+        let on_stdout line =
+          Option.iter (fun callback -> callback line) on_raw_line ;
+          match context, structured_parser_for_id with
+          | Some context, Some (_, _, normalized_events_of_line) ->
+              List.iter
+                (Task_execution_context.emit context)
+                (normalized_events_of_line line)
+          | Some _, None | None, _ -> ()
+        in
+        let result =
+          Backend_process.run_task_with
+            ~sw
+            ~env
+            ~spec:{spec with timeout = cfg.timeout_seconds}
+            ~build_command
+            ?context
+            ?parse_stdout:parse_stdout_for_id
+            ?parse_session_id:
+              (match structured_parser_for_id with
+              | Some (_, parse_session_id, _) -> parse_session_id
+              | None -> None)
+            ~on_stdout
+            ()
+        in
+        (match context, structured_parser_for_id with
+        | Some context, Some _ ->
+            Task_execution_context.mark_final_public_text context
+        | Some _, None | None, _ -> ()) ;
+        result
       in
       let first = run_once () in
       if cfg.name = "pi" && pi_stream_ended_without_finish_reason first then

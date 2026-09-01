@@ -29,6 +29,10 @@
 (** @inline *)
 include Agentic_backend.S
 
+(** Extract public assistant text, session identity, and token usage from one
+    Gemini stream-JSON event. Malformed or private-only records return [[]]. *)
+val normalized_events_of_line : string -> Task_event.payload list
+
 (** {1 Additional Utilities} *)
 
 (** [project_config_artifacts ~mcp_servers ~lsp_servers] returns the
@@ -114,6 +118,15 @@ val parse_gemini_stream_json :
     {violates}
     (none) *)
 val parse_stdout_text : string -> string
+
+(** Strict public assistant response parser for documented stream-json events. *)
+val parse_public_stdout_text : string -> string
+
+(** Strict session parser accepting only the documented init event. *)
+val parse_public_session_id : string -> string option
+
+(** Strict usage parser accepting only successful result events. *)
+val parse_public_cost : string -> Backend_types.cost option
 
 (** [build_command ~mcp_config_path spec] constructs the Gemini CLI command and
     stdin content.  Gemini CLI 0.38.2 has no native read-only sandbox;

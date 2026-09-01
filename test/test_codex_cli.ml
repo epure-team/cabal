@@ -183,6 +183,32 @@ let test_build_command_without_output_schema () =
         (command_contains "--output-schema" cmd))
     specs
 
+let test_output_schema_file_is_task_scoped () =
+  let path = ref None in
+  Codex_cli.with_output_schema_file sample_output_schema (fun schema_path ->
+      path := Some schema_path ;
+      Alcotest.(check bool) "schema exists in scope" true (Sys.file_exists schema_path)) ;
+  let schema_path =
+    match !path with Some value -> value | None -> Alcotest.fail "no schema path"
+  in
+  Alcotest.(check bool)
+    "schema removed after scope"
+    false
+    (Sys.file_exists schema_path) ;
+  let exceptional_path = ref None in
+  (try
+     Codex_cli.with_output_schema_file sample_output_schema (fun schema_path ->
+         exceptional_path := Some schema_path ;
+         failwith "cancelled task")
+   with Failure _ -> ()) ;
+  match !exceptional_path with
+  | Some schema_path ->
+      Alcotest.(check bool)
+        "schema removed on exception"
+        false
+        (Sys.file_exists schema_path)
+  | None -> Alcotest.fail "no exceptional schema path"
+
 let command_construction_tests =
   [
     ( "build_command with output schema",
@@ -194,6 +220,9 @@ let command_construction_tests =
     ( "build_command without output schema",
       `Quick,
       test_build_command_without_output_schema );
+    ( "output schema file is task scoped",
+      `Quick,
+      test_output_schema_file_is_task_scoped );
   ]
 
 (** {1 Availability Tests} *)

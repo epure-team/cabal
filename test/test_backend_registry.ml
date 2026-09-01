@@ -359,6 +359,27 @@ let test_runtime_native_schema_capabilities_match_descriptors () =
                 (Agentic_backend.native_json_schema_output backend))
         (Backend_registry.all ()))
 
+(** Session-resume capability must agree between static descriptors and the
+    runtime modules hosts actually execute. In particular, the YAML-backed Pi
+    runtime must not silently accept a resume request that it cannot transport. *)
+let test_runtime_session_resume_capabilities_match_descriptors () =
+  with_host_runtime_backends (fun () ->
+      List.iter
+        (fun (d : Backend_registry.descriptor) ->
+          match Registry.get d.id with
+          | None ->
+              Alcotest.failf
+                "registered backend module missing for descriptor id=%s"
+                d.id
+          | Some backend ->
+              Alcotest.(check bool)
+                (Printf.sprintf
+                   "%s: runtime session_resume matches descriptor"
+                   d.id)
+                d.capabilities.session_resume
+                (Agentic_backend.supports_session_resume backend))
+        (Backend_registry.all ()))
+
 (** {1 Helpers for investigation note tests (Epic #95)} *)
 
 (** Walk up from CWD until a directory containing [dune-project] is found.
@@ -665,6 +686,10 @@ let () =
             "runtime native schema capability matches descriptor"
             `Quick
             test_runtime_native_schema_capabilities_match_descriptors;
+          Alcotest.test_case
+            "runtime session resume capability matches descriptor"
+            `Quick
+            test_runtime_session_resume_capabilities_match_descriptors;
         ] );
       ( "AC6 Epic #95 native_json_schema_output",
         [

@@ -1,3 +1,10 @@
+(******************************************************************************)
+(*                                                                            *)
+(* Copyright (c) 2026 Epure Team                                              *)
+(* All rights reserved.                                                       *)
+(*                                                                            *)
+(******************************************************************************)
+
 (* Session-name confinement for the MCP-exposed tmux runtime.
 
    tmux reads a [-t] argument as a TARGET SPEC, not as a name: it matches by

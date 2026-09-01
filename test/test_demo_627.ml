@@ -46,6 +46,8 @@
 open Cabal
 open Backend_types
 
+let () = Process_test_helper.install_launcher ()
+
 (* -------------------------------------------------------------------------
    Helpers — all process invocations use Eio.Process (no Sys.command)
    ---------------------------------------------------------------------- *)

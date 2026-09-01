@@ -13,10 +13,11 @@ CLI, and OpenCode.
 Cabal owns the host-neutral backend layer:
 
 - backend descriptors, capability metadata, and registry lookup;
+- cancellable task handles, absolute deadlines, and normalized lifecycle events;
 - backend process execution and version probing;
 - project config generation for supported backend CLIs;
 - YAML adapter loading;
-- normalized backend result/cost/session event types;
+- normalized backend result/cost/session and task-lifecycle event types;
 - local session-event logging and redaction helpers.
 
 Cabal explicitly does **not** own:
@@ -63,6 +64,43 @@ prepares backend-owned or Cabal-owned configuration, runs the CLI process, and
 normalizes results and session log events. Backend CLIs remain external tools;
 Cabal does not embed their product logic.
 
+### Process-tree termination
+
+`Backend_process` starts every backend through the installed
+`cabal-process-group-launcher` executable. On POSIX hosts (including the Linux
+and macOS CI targets), this launcher is a small supervisor: it creates a new
+session/process group, starts the backend child, and remains the group leader.
+Cabal confirms setup over a dedicated, bounded handshake FD: it receives the
+PGID immediately after `setsid` and before the backend is forked. The parent
+acknowledges that ownership before a fork is permitted; after the child `exec`
+succeeds, the launcher writes an explicit `EXEC` record before FD EOF. EOF
+alone never confirms `exec`, so a bare PGID after launcher death is not a
+successful handshake. If that PGID cannot be delivered, no backend exists. A
+launcher-side pre-exec failure is reported separately. A second
+bounded status FD reports the backend child's actual `EXIT` or `SIGNAL` result;
+the parent sends `TERM` or `RELEASE` over a separate control FD.
+
+Timeout, cancellation, and exceptional cleanup terminate the confirmed group
+with TERM, a full grace period, then KILL. The supervisor stays alive after
+TERM, preventing PGID reuse before KILL and ensuring descendants cannot outlive
+the command when the backend leader exits first. Unexpected supervisor death is
+catastrophic: Cabal immediately attempts group TERM and KILL back-to-back and
+may forfeit the remaining grace period before retiring ownership, avoiding a
+later stale negative-PGID signal after the group is no longer anchored. Normal
+completion is also two-phase: Cabal observes the backend status, drains
+stdout/stderr, then sends `RELEASE` and reaps the supervisor. If RELEASE delivery
+fails, Cabal clears the cached PGID and signals only its direct supervisor; a
+live official supervisor performs bounded group cleanup itself, avoiding a
+stale negative-PID signal.
+Captured bytes are retained through either path. If the handshake never
+establishes a group, Cabal falls back only to signalling its direct child; it
+never sends a negative-PID signal for an unconfirmed group.
+`Resource_guardian` registers these owned targets and uses
+the same group-aware termination path under memory pressure. The launcher is
+included in `@install`; installations must retain `cabal-process-group-launcher`
+on `PATH` (or set
+`CABAL_PROCESS_GROUP_LAUNCHER` to its path).
+
 ## Layout
 
 - `src/backend_types.*` — shared result, usage, cost, and streaming event types.
@@ -70,13 +108,18 @@ Cabal does not embed their product logic.
   runtime backend registry.
 - `src/backend_registry.*` — static backend descriptors and capability metadata.
 - `src/runtime_bootstrap.*` — extensible or validated hardened runtime assembly.
-- `src/runtime_dispatch.*` — call-time backend resolution and central preflight.
+- `src/runtime_dispatch.*` and `src/task_runtime.*` — call-time backend
+  resolution, central preflight, cancellable task handles, and whole-task
+  deadlines.
+- `src/task_event.*` — sequenced backend-neutral lifecycle and public-output
+  events.
 - `src/task_preflight.*` — attachment integrity/workspace checks and requested
   capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
   validator-safe backend routing.
-- `src/backend_process.*` and `src/backend_version.*` — process execution and
-  version probing.
+- `src/backend_process.*`, `src/process_group.*`, and `src/backend_version.*`
+  — process execution, process-tree ownership, and version probing.
+- `bin/process_group_launcher.ml` — installed pre-exec session/group launcher.
 - `src/backend_config_gen.*` and `src/backend_config_writer.*` — project config
   ownership, generation, and write safety.
 - `src/adapter_loader.*`, `src/yaml_adapter.*`, and `src/adapters/*.yaml` —
@@ -133,6 +176,90 @@ let () =
         (List.length result.files_changed)
 ```
 
+### Cancellable tasks, deadlines, and events
+
+`Runtime_dispatch.run_task` remains the synchronous compatibility API, but it
+now starts and awaits the same handle state machine exposed as `Task_runtime`:
+
+```ocaml
+let handle =
+  Task_runtime.start_task
+    ~sw ~env ~limits ~backend_id:"claude-code"
+    ~on_event:(fun event ->
+      Printf.printf "seq=%d attempt=%d t=%.3f\n%!"
+        event.Task_event.seq event.attempt event.timestamp)
+    spec
+in
+(* Safe and idempotent, including from another fiber. *)
+Task_runtime.cancel handle;
+let result = Task_runtime.await handle in
+(* Optional: wait until the terminal callback and all earlier callbacks return. *)
+Task_runtime.await_event_delivery handle
+```
+
+`await` is repeatable, supports concurrent waiters, and never waits for event
+callbacks. It is therefore safe to call `await` from the same handle's
+`Process_started` or terminal callback. Use `await_event_delivery` after `await`
+when deterministic observation of the terminal event is required; do not call
+the delivery waiter from inside that handle's callback. Each handle owns a
+private cancellation scope, so cancelling one task does not cancel siblings;
+cancelling the caller's parent switch still propagates to its tasks. Cleanup and
+process-group reaping complete before `await` returns a normalized `Cancelled`
+or `Timeout` result.
+
+`task_spec.timeout` is one absolute monotonic budget covering registry
+resolution, preflight, version and availability checks, every schema-enforcement
+attempt, backend setup, process execution, parsing, and finalization. Retries do
+not reset it. Negative and NaN values are rejected before backend calls;
+`max_float`, the legacy default, remains effectively unbounded.
+
+`Task_event` assigns task-local increasing sequence numbers, attempt numbers,
+and start-relative monotonic timestamps. Each invoked backend attempt has one
+`Attempt_started` and one `Attempt_finished`, including retries. Exactly one
+terminal event is accepted. One asynchronous task-local drain invokes callbacks
+serially in sequence order, never under the event-state mutex; a slow callback
+cannot delay backend execution or handle outcome resolution. Pending delivery is
+hard-bounded to 256 events: at most 192 public text/usage/session/tool
+observations and 64 control slots. Of the control reserve, 62 admit ordinary
+lifecycle events, one is dedicated to a truncation marker, and one to the
+terminal. Pending assistant text is additionally capped at 64 KiB total and
+16 KiB per delta. The terminal is therefore always enqueueable after all
+retained earlier events and no post-terminal events are accepted.
+Normalized streams include lifecycle, retry, process ownership, session, public
+assistant text/tool identity, and token-usage events. Raw backend lines remain
+available only through `on_raw_line`; raw reasoning, tool arguments, paths,
+prompts, malformed structured records, and callback exception text are not
+promoted into normalized events. Event callback exceptions are isolated and
+reported through a sanitized `Diagnostics` warning. Fatal runtime exceptions
+still propagate unchanged through `await`, after best-effort enqueue of one
+generic redacted failed terminal.
+
+When a callback falls behind, only observations are normally dropped or
+prefix-truncated. `Event_delivery_truncated` reports saturating counts by safe
+category plus omitted public-text bytes; it contains no raw data. Cabal's hard
+two-attempt lifecycle fits within the separate control reserve. If a custom
+backend abuses runtime-owned control payloads beyond that reserve, the excess is
+also counted by the marker rather than growing memory. Delivered sequence
+numbers stay increasing; fully omitted events leave gaps, while byte-only prefix
+truncation need not. One pending marker is assigned immediately after the first
+affected event or gap and accumulates later omissions until drained. The
+callback must eventually return for `await_event_delivery` to complete, but a
+permanently stuck callback cannot cause unbounded queue growth.
+
+This release changes `Agentic_backend.S` for downstream backend implementers.
+Every custom module must add the optional lifecycle argument to its method:
+
+```ocaml
+let run_task ~sw ~env ?context:_ ?on_raw_line spec =
+  (* existing implementation *)
+```
+
+This module-signature migration is source-breaking even when the backend ignores
+the context. Existing call sites using the first-class
+`Agentic_backend.run_task ~sw ~env backend spec` wrapper remain source-compatible
+and need no new argument. `test/test_custom_backend_compile.ml` is the canonical
+minimal compile fixture.
+
 ### Media and web preflight
 
 `Backend_types.task_spec` can carry workspace-relative PNG/JPEG attachment
@@ -155,13 +282,14 @@ fail before any version process or availability side effect. After preflight,
 dispatch runs one bounded version command, rejects parseable versions below the
 descriptor baseline, and checks runtime availability before execution. Missing
 or unparseable version output keeps the compatibility skip policy; availability
-must still pass. Eio cancellation propagates rather than becoming an ordinary
-dispatch error.
+must still pass. Eio cancellation is normalized to `Cancelled` only after
+task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
 All built-in descriptors currently declare no media support and `Web_disabled`
-pending backend-specific transport evidence. Direct calls to
+pending backend-specific transport evidence. Existing call sites invoking
 `Agentic_backend.run_task` and `Json_schema_enforcer.run_task` remain compatible
-low-level paths but intentionally bypass these central guarantees.
+low-level paths but intentionally bypass these central guarantees; modules that
+implement `Agentic_backend.S` must perform the migration described above.
 
 ### Redaction contract for hosts logging backend output
 
@@ -193,6 +321,14 @@ file-reading claims. The entry explicitly uses `No_version_gate`, so arbitrary
 or prerelease YAML CLI version formats remain compatible while availability is
 still checked. Project overrides replace backend, effective descriptor, YAML
 origin, and policy together.
+
+Output parsing remains fail-closed for structured built-in ids even in the
+extensible profile. YAML adapters named `claude-code`, `codex`, `gemini-cli`,
+`opencode`, or `pi` use that protocol's strict public-response parser. Error,
+reasoning, user, unknown, and malformed records remain available to
+`on_raw_line` but never fall back into normalized `Agent_text_delta` or final
+`task_result.agent_text`. Arbitrary custom ids retain their generic compatibility
+behavior and do not inherit a built-in parser accidentally.
 
 Built-in and explicit host descriptors remain immutable catalog entries; YAML
 does not replace or inherit them. Central dispatch uses only the effective

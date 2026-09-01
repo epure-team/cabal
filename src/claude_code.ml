@@ -295,14 +295,6 @@ let get_git_diff = Backend_process.get_git_diff
 (* Get full diff content *)
 let get_git_diff_content = Backend_process.get_git_diff_content
 
-(* Parse cost from stdout string *)
-let parse_cost_from_stdout stdout =
-  try
-    let json = Yojson.Safe.from_string stdout in
-    let _, cost = parse_json_output json in
-    cost
-  with _ -> None
-
 (* Build the claude command with all required arguments.
    Returns (command, prompt) where prompt should be passed via stdin.
    This avoids "Argument list too long" errors for large prompts.
@@ -511,6 +503,83 @@ let parse_stream_event line =
     | _ -> None
   with _ -> None
 
+let normalized_events_of_stream_line line =
+  try
+    let json = Yojson.Safe.from_string line in
+    let open Yojson.Safe.Util in
+    match json |> member "type" |> to_string_option with
+    | Some "assistant"
+      when json |> member "message" |> member "role" |> to_string_option
+           = Some "assistant" ->
+        json |> member "message" |> member "content" |> to_list
+        |> List.filter_map (fun block ->
+            match block |> member "type" |> to_string_option with
+            | Some "text" ->
+                Option.map
+                  (fun text -> Task_event.Agent_text_delta text)
+                  (block |> member "text" |> to_string_option)
+            | Some "tool_use" ->
+                Option.map
+                  (fun name ->
+                    let id = block |> member "id" |> to_string_option in
+                    Task_event.Tool_started {id; name})
+                  (block |> member "name" |> to_string_option)
+            | _ -> None)
+    | Some "system"
+      when json |> member "subtype" |> to_string_option = Some "init" ->
+        Option.to_list
+          (Option.map
+             (fun id -> Task_event.Session_id id)
+             (json |> member "session_id" |> to_string_option))
+    | Some "result"
+      when json |> member "is_error" |> to_bool_option = Some false ->
+        let text =
+          let public_text =
+            let structured = json |> member "structured_output" in
+            if structured <> `Null then
+              Some (Yojson.Safe.to_string ~std:true structured)
+            else json |> member "result" |> to_string_option
+          in
+          Option.to_list
+            (Option.map
+               (fun text -> Task_event.Agent_text_delta text)
+               public_text)
+        in
+        let session =
+          Option.to_list
+            (Option.map
+               (fun id -> Task_event.Session_id id)
+               (json |> member "session_id" |> to_string_option))
+        in
+        let usage =
+          let _, cost = parse_json_output json in
+          Option.to_list (Option.map (fun cost -> Task_event.Token_usage cost) cost)
+        in
+        text @ session @ usage
+    | _ -> []
+  with _ -> []
+
+let normalized_events_of_stdout stdout =
+  String.split_on_char '\n' stdout
+  |> List.concat_map normalized_events_of_stream_line
+
+let parse_public_stdout_text stdout =
+  let texts =
+    normalized_events_of_stdout stdout
+    |> List.filter_map (function
+         | Task_event.Agent_text_delta text -> Some text
+         | _ -> None)
+  in
+  String.concat "" texts
+
+let parse_public_session_id stdout =
+  normalized_events_of_stdout stdout
+  |> List.find_map (function Task_event.Session_id id -> Some id | _ -> None)
+
+let parse_public_cost stdout =
+  normalized_events_of_stdout stdout
+  |> List.find_map (function Task_event.Token_usage cost -> Some cost | _ -> None)
+
 (* Extract response text from Claude Code JSON stdout *)
 let parse_stdout_text stdout =
   try
@@ -519,7 +588,7 @@ let parse_stdout_text stdout =
     text
   with _ -> stdout
 
-let run_task ~sw ~env ?on_raw_line:_ spec =
+let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None ->
@@ -541,17 +610,33 @@ let run_task ~sw ~env ?on_raw_line:_ spec =
       let build_cmd ~mcp_config_path s =
         build_command ~project_config_path ~mcp_config_path s
       in
-      Backend_process.run_task_with
-        ~sw
-        ~env
-        ~spec
-        ~build_command:build_cmd
-        ~parse_cost:parse_cost_from_stdout
-        ~parse_stdout:parse_stdout_text
-        ~parse_session_id:parse_session_id_from_stdout
-        ()
+      let on_stdout line =
+        Option.iter (fun callback -> callback line) on_raw_line ;
+        Option.iter
+          (fun context ->
+            List.iter
+              (Task_execution_context.emit context)
+              (normalized_events_of_stream_line line))
+          context
+      in
+      Option.iter Task_execution_context.claim_structured_text context ;
+      let result =
+        Backend_process.run_task_with
+          ~sw
+          ~env
+          ~spec
+          ~build_command:build_cmd
+          ?context
+          ~parse_cost:parse_public_cost
+          ~parse_stdout:parse_public_stdout_text
+          ~parse_session_id:parse_public_session_id
+          ~on_stdout
+          ()
+      in
+      Option.iter Task_execution_context.mark_final_public_text context ;
+      result
 
-let run_task_streaming ~sw ~env ~on_stdout ?on_raw_line spec =
+let run_task_streaming ~sw ~env ~on_stdout ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None ->
@@ -573,20 +658,32 @@ let run_task_streaming ~sw ~env ~on_stdout ?on_raw_line spec =
          callers can capture the full backend-native event stream (Story #466). *)
       let on_stdout_parsed line =
         Option.iter (fun cb -> cb line) on_raw_line ;
+        Option.iter
+          (fun context ->
+            List.iter
+              (Task_execution_context.emit context)
+              (normalized_events_of_stream_line line))
+          context ;
         match parse_stream_event line with
         | Some text -> on_stdout text
         | None -> ()
       in
+      Option.iter Task_execution_context.claim_structured_text context ;
       let build_cmd ~mcp_config_path s =
         build_command ~streaming:true ~project_config_path ~mcp_config_path s
       in
-      Backend_process.run_task_with
-        ~sw
-        ~env
-        ~spec
-        ~build_command:build_cmd
-        ~parse_cost:parse_cost_from_stdout
-        ~parse_stdout:parse_stdout_text
-        ~parse_session_id:parse_session_id_from_stdout
-        ~on_stdout:on_stdout_parsed
-        ()
+      let result =
+        Backend_process.run_task_with
+          ~sw
+          ~env
+          ~spec
+          ~build_command:build_cmd
+          ?context
+          ~parse_cost:parse_public_cost
+          ~parse_stdout:parse_public_stdout_text
+          ~parse_session_id:parse_public_session_id
+          ~on_stdout:on_stdout_parsed
+          ()
+      in
+      Option.iter Task_execution_context.mark_final_public_text context ;
+      result

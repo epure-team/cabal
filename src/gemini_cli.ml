@@ -325,14 +325,77 @@ let parse_gemini_stream_json stdout =
   in
   (text, !last_cost, !last_session_id)
 
-let parse_cost_from_stdout stdout =
-  let _, cost, _ = parse_gemini_stream_json stdout in
-  cost
+let normalized_events_of_line line =
+  try
+    let json = Yojson.Safe.from_string line in
+    let open Yojson.Safe.Util in
+    let events = ref [] in
+    let add event = events := event :: !events in
+    let event_type = json |> member "type" |> to_string_option in
+    let successful_result =
+      event_type = Some "result"
+      && json |> member "status" |> to_string_option = Some "success"
+    in
+    (match event_type with
+    | Some "init" ->
+        Option.iter
+          (fun id -> add (Task_event.Session_id id))
+          (json |> member "session_id" |> to_string_option)
+    | Some "message"
+      when json |> member "role" |> to_string_option = Some "assistant" ->
+        Option.iter
+          (fun text -> add (Task_event.Agent_text_delta text))
+          (json |> member "content" |> to_string_option)
+    | Some "result" when successful_result ->
+        Option.iter
+          (fun text -> add (Task_event.Agent_text_delta text))
+          (json |> member "response" |> to_string_option)
+    | Some _ | None -> ()) ;
+    let usage =
+      let metadata = json |> member "usageMetadata" in
+      if metadata <> `Null then metadata
+      else
+        let usage = json |> member "usage" in
+        if usage <> `Null then usage else json |> member "stats"
+    in
+    if successful_result && usage <> `Null then begin
+      let first_int first second =
+        match usage |> member first |> to_int_option with
+        | Some value -> Some value
+        | None -> usage |> member second |> to_int_option
+      in
+      add
+        (Task_event.Token_usage
+           {
+             Backend_types.tokens_input =
+               first_int "promptTokenCount" "input_tokens";
+             tokens_output =
+               first_int "candidatesTokenCount" "output_tokens";
+             cost_usd = None;
+             cache_creation_input_tokens = None;
+             cache_read_input_tokens = None;
+           })
+    end ;
+    List.rev !events
+  with _ -> []
 
-(* Extract session_id from Gemini stream-json NDJSON stdout *)
-let parse_session_id_from_stdout stdout =
-  let _, _, session_id = parse_gemini_stream_json stdout in
-  session_id
+let normalized_events_of_stdout stdout =
+  String.split_on_char '\n' stdout |> List.concat_map normalized_events_of_line
+
+let parse_public_stdout_text stdout =
+  normalized_events_of_stdout stdout
+  |> List.filter_map (function
+       | Task_event.Agent_text_delta text -> Some text
+       | _ -> None)
+  |> String.concat ""
+
+let parse_public_session_id stdout =
+  normalized_events_of_stdout stdout
+  |> List.find_map (function Task_event.Session_id id -> Some id | _ -> None)
+
+let parse_public_cost stdout =
+  normalized_events_of_stdout stdout
+  |> List.find_map (function Task_event.Token_usage cost -> Some cost | _ -> None)
 
 (* Build the gemini command for non-interactive stream-json execution *)
 let build_command ~mcp_config_path:_ (spec : task_spec) =
@@ -423,7 +486,7 @@ let mcp_settings_error_if_needed setup mcp_servers =
                path
                (setup_outcome_reason outcome)))
 
-let run_task ~sw ~env ?on_raw_line spec =
+let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
@@ -453,13 +516,28 @@ let run_task ~sw ~env ?on_raw_line spec =
       | Some msg -> make_task_result ~status:(Failed msg) ()
       | None ->
           let runtime_spec = {spec with mcp_servers = []} in
-          Backend_process.run_task_with
-            ~sw
-            ~env
-            ~spec:runtime_spec
-            ~build_command
-            ~parse_cost:parse_cost_from_stdout
-            ~parse_stdout:parse_stdout_text
-            ~parse_session_id:parse_session_id_from_stdout
-            ?on_stdout:on_raw_line
-            ())
+          let on_stdout line =
+            Option.iter (fun callback -> callback line) on_raw_line ;
+            Option.iter
+              (fun context ->
+                List.iter
+                  (Task_execution_context.emit context)
+                  (normalized_events_of_line line))
+              context
+          in
+          Option.iter Task_execution_context.claim_structured_text context ;
+          let result =
+            Backend_process.run_task_with
+              ~sw
+              ~env
+              ~spec:runtime_spec
+              ~build_command
+              ?context
+              ~parse_cost:parse_public_cost
+              ~parse_stdout:parse_public_stdout_text
+              ~parse_session_id:parse_public_session_id
+              ~on_stdout
+              ()
+          in
+          Option.iter Task_execution_context.mark_final_public_text context ;
+          result)
