@@ -243,26 +243,51 @@ let test_precedence_confidence_values () =
   check "gemini-cli" Low ;
   check "copilot-cli" Low
 
-let test_media_and_web_capabilities_disabled_by_default () =
+let test_media_and_web_capability_evidence_invariants () =
   List.iter
     (fun (d : Backend_registry.descriptor) ->
-      Alcotest.(check int)
-        (d.id ^ " has no supported media types")
-        0
-        (List.length d.capabilities.media_support.media_types) ;
+      let media = d.capabilities.media_support in
+      let web = d.capabilities.web_support in
       Alcotest.(check bool)
-        (d.id ^ " has no media evidence")
+        (d.id ^ " media claim/evidence agree")
         true
-        (d.capabilities.media_support.evidence = None) ;
+        ((media.media_types = []) = (media.evidence = None)) ;
       Alcotest.(check bool)
-        (d.id ^ " has web access disabled")
+        (d.id ^ " web claim/evidence agree")
         true
-        (d.capabilities.web_support.maximum = Backend_types.Web_disabled) ;
+        ((web.maximum = Backend_types.Web_disabled) = (web.evidence = None)) ;
       Alcotest.(check bool)
-        (d.id ^ " has no web evidence")
+        (d.id ^ " descriptor evidence validates")
         true
-        (d.capabilities.web_support.evidence = None))
+        (Task_preflight.validate_descriptor d = Ok ()))
     (Backend_registry.all ())
+
+let test_codex_media_and_web_capabilities_remain_unadvertised () =
+  let d = find_desc "codex" in
+  let media = d.capabilities.media_support in
+  Alcotest.(check (list bool))
+    "codex remains fail-closed until the independent runtime trust snapshot is updated"
+    [true; true; true; true]
+    [
+      media.media_types = [];
+      media.evidence = None;
+      d.capabilities.web_support.maximum = Backend_types.Web_disabled;
+      d.capabilities.web_support.evidence = None;
+    ]
+
+let test_non_codex_media_and_web_remain_disabled () =
+  Backend_registry.all ()
+  |> List.filter (fun (d : Backend_registry.descriptor) -> d.id <> "codex")
+  |> List.iter (fun (d : Backend_registry.descriptor) ->
+         Alcotest.(check (list bool))
+           (d.id ^ " remains media/web-disabled")
+           [true; true; true; true]
+           [
+             d.capabilities.media_support.media_types = [];
+             d.capabilities.media_support.evidence = None;
+             d.capabilities.web_support.maximum = Backend_types.Web_disabled;
+             d.capabilities.web_support.evidence = None;
+           ])
 
 (** {1 AC4 — backend_supports_file_reading routed through registry} *)
 
@@ -657,9 +682,17 @@ let () =
             `Quick
             test_precedence_confidence_values;
           Alcotest.test_case
-            "media and web support disabled for all built-ins"
+            "media and web capability evidence invariants"
             `Quick
-            test_media_and_web_capabilities_disabled_by_default;
+            test_media_and_web_capability_evidence_invariants;
+          Alcotest.test_case
+            "codex media and web support remains unadvertised"
+            `Quick
+            test_codex_media_and_web_capabilities_remain_unadvertised;
+          Alcotest.test_case
+            "non-codex media and web support remains disabled"
+            `Quick
+            test_non_codex_media_and_web_remain_disabled;
         ] );
       ( "AC4 registry routing",
         [

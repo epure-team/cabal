@@ -282,76 +282,16 @@ let check_project_config ~sw:_ ~env ~project_dir ~setup_result =
               ("Codex generated TOML shape check failed: "
               ^ String.concat "; " (List.rev findings)))
 
-(* Parse Codex JSONL output.
-   Each line is a JSON event. Codex uses these event types:
-   - {type: "item.completed", item: {type: "agent_message", text: "..."}}
-     for assistant responses
-   - {type: "turn.completed", usage: {input_tokens: N, output_tokens: N}}
-     for token usage *)
-let parse_jsonl_output stdout =
-  let lines =
-    stdout |> String.split_on_char '\n'
-    |> List.filter (fun s -> String.length (String.trim s) > 0)
+let safe_protocol_identifier value =
+  let safe_character = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' | '.' -> true
+    | _ -> false
   in
-  let last_text = ref "" in
-  let total_input = ref 0 in
-  let total_output = ref 0 in
-  let has_usage = ref false in
-  List.iter
-    (fun line ->
-      try
-        let json = Yojson.Safe.from_string line in
-        let open Yojson.Safe.Util in
-        let event_type = json |> member "type" |> to_string_option in
-        (* Codex item.completed events with agent_message carry the response *)
-        (try
-           let item = json |> member "item" in
-           if item <> `Null then
-             let item_type =
-               try item |> member "type" |> to_string with _ -> ""
-             in
-             if item_type = "agent_message" then
-               let text =
-                 try item |> member "text" |> to_string with _ -> ""
-               in
-               if String.length text > 0 then last_text := text
-         with _ -> ()) ;
-        (* Codex turn.completed events carry usage at top level *)
-         try
-           let usage = json |> member "usage" in
-           if event_type = Some "turn.completed" && usage <> `Null then (
-            has_usage := true ;
-            (try
-               total_input :=
-                 !total_input + (usage |> member "input_tokens" |> to_int)
-             with _ -> ()) ;
-            try
-              total_output :=
-                !total_output + (usage |> member "output_tokens" |> to_int)
-            with _ -> ())
-        with _ -> ()
-      with _ -> ())
-    lines ;
-  (* If no structured message found, use the raw stdout *)
-  let text = if String.length !last_text > 0 then !last_text else stdout in
-  let cost =
-    if !has_usage then
-      Some
-        {
-          tokens_input = (if !total_input > 0 then Some !total_input else None);
-          tokens_output =
-            (if !total_output > 0 then Some !total_output else None);
-          cost_usd = None;
-          cache_creation_input_tokens = None;
-          cache_read_input_tokens = None;
-        }
-    else None
-  in
-  (text, cost)
-
-let parse_cost_from_stdout stdout =
-  let _, cost = parse_jsonl_output stdout in
-  cost
+  if
+    value <> "" && String.length value <= 128
+    && String.for_all safe_character value
+  then Some value
+  else None
 
 let normalized_events_of_line line =
   try
@@ -361,7 +301,11 @@ let normalized_events_of_line line =
     let add event = events := event :: !events in
     let event_type = json |> member "type" |> to_string_option in
     let item = json |> member "item" in
-    let item_type = item |> member "type" |> to_string_option in
+    let item_type =
+      match item with
+      | `Assoc _ -> item |> member "type" |> to_string_option
+      | _ -> None
+    in
     (match event_type, item_type with
     | Some "thread.started", _ ->
         let session_id =
@@ -369,7 +313,8 @@ let normalized_events_of_line line =
           | Some id -> Some id
           | None -> json |> member "session_id" |> to_string_option
         in
-        Option.iter (fun id -> add (Task_event.Session_id id)) session_id
+        Option.bind session_id safe_protocol_identifier
+        |> Option.iter (fun id -> add (Task_event.Session_id id))
     | Some "item.completed", Some "agent_message" ->
         Option.iter
           (fun text -> add (Task_event.Agent_text_delta text))
@@ -378,7 +323,11 @@ let normalized_events_of_line line =
       Some
         (( "command_execution" | "file_change" | "mcp_tool_call" | "web_search" )
         as item_kind) ->
-        let id = item |> member "id" |> to_string_option in
+        let id =
+          Option.bind
+            (item |> member "id" |> to_string_option)
+            safe_protocol_identifier
+        in
         let name = item_kind in
         if event_type = Some "item.started" then
           add (Task_event.Tool_started {id; name})
@@ -391,14 +340,64 @@ let normalized_events_of_line line =
            {
              Backend_types.tokens_input =
                usage |> member "input_tokens" |> to_int_option;
-             tokens_output = usage |> member "output_tokens" |> to_int_option;
-             cost_usd = None;
-             cache_creation_input_tokens = None;
-             cache_read_input_tokens = None;
+              tokens_output = usage |> member "output_tokens" |> to_int_option;
+              cost_usd = None;
+              cache_creation_input_tokens = None;
+              cache_read_input_tokens =
+                usage |> member "cached_input_tokens" |> to_int_option;
            })
     end ;
     List.rev !events
   with _ -> []
+
+(* Parse only public, versioned Codex JSONL protocol records. Malformed lines,
+   reasoning/error records, and raw stdout are never promoted to agent text. *)
+let parse_jsonl_output stdout =
+  let last_text = ref "" in
+  let total_input = ref 0 in
+  let total_output = ref 0 in
+  let total_cache_read_input = ref 0 in
+  let has_usage = ref false in
+  String.split_on_char '\n' stdout
+  |> List.iter (fun line ->
+         normalized_events_of_line line
+         |> List.iter (function
+              | Task_event.Agent_text_delta text when text <> "" ->
+                  last_text := text
+              | Token_usage usage ->
+                  has_usage := true ;
+                  Option.iter
+                    (fun value -> total_input := !total_input + value)
+                    usage.tokens_input ;
+                  Option.iter
+                    (fun value -> total_output := !total_output + value)
+                    usage.tokens_output ;
+                  Option.iter
+                    (fun value ->
+                      total_cache_read_input := !total_cache_read_input + value)
+                    usage.cache_read_input_tokens
+              | _ -> ())) ;
+  let cost =
+    if !has_usage then
+      Some
+        {
+          tokens_input = (if !total_input > 0 then Some !total_input else None);
+          tokens_output =
+            (if !total_output > 0 then Some !total_output else None);
+          cost_usd = None;
+          cache_creation_input_tokens = None;
+          cache_read_input_tokens =
+            (if !total_cache_read_input > 0 then
+               Some !total_cache_read_input
+             else None);
+        }
+    else None
+  in
+  (!last_text, cost)
+
+let parse_cost_from_stdout stdout =
+  let _, cost = parse_jsonl_output stdout in
+  cost
 
 let remove_file_noerr path = try Sys.remove path with _ -> ()
 
@@ -418,32 +417,117 @@ let with_output_schema_file schema f =
   let path = create_output_schema_file schema in
   Fun.protect ~finally:(fun () -> remove_file_noerr path) (fun () -> f path)
 
-(* Build the codex exec command *)
-let build_command_with_schema_path ?schema_path ~mcp_config_path:_
+type backend_invocation = {
+  argv : string list;
+  stdin : string option;
+  redacted_argv : string list;
+}
+
+let ( let* ) result f = match result with Ok value -> f value | Error _ as e -> e
+
+let invocation_error message = Error ("Codex invocation rejected: " ^ message)
+
+let safe_workspace_relative_path path =
+  let unsafe_segment separator =
+    String.split_on_char separator path
+    |> List.exists (fun segment -> segment = "..")
+  in
+  path <> "" && Filename.is_relative path
+  && not (unsafe_segment '/') && not (unsafe_segment '\\')
+
+let validate_attachment_paths attachments =
+  if
+    List.for_all
+      (fun attachment ->
+        safe_workspace_relative_path attachment.Backend_types.path)
+      attachments
+  then Ok ()
+  else invocation_error "an attachment path is not workspace-relative"
+
+let validate_capabilities spec =
+  match Backend_registry.find id with
+  | None -> invocation_error "the built-in capability descriptor is unavailable"
+  | Some descriptor -> (
+      match Task_preflight.validate_capabilities ~descriptor spec with
+      | Ok () -> Ok ()
+      | Error error -> invocation_error (Task_preflight.render_error error))
+
+let validate_attachment_delivery attachment_delivery spec =
+  match attachment_delivery, spec.resume_session_id with
+  | Reuse_session_attachments, None ->
+      invocation_error "session attachment reuse requires a resumed session"
+  | (Upload_attachments | Reuse_session_attachments), (None | Some _) -> Ok ()
+
+let validate_transport_request ~attachment_delivery spec =
+  let* () = validate_attachment_paths spec.attachments in
+  validate_attachment_delivery attachment_delivery spec
+
+let web_search_mode = function
+  | Web_disabled -> "disabled"
+  | Web_search -> "cached"
+  | Web_search_and_fetch -> "live"
+
+let image_args attachments =
+  List.concat_map
+    (fun attachment -> ["-i"; attachment.Backend_types.path])
+    attachments
+
+let redacted_image_args attachments =
+  List.mapi
+    (fun index _ -> ["-i"; Printf.sprintf "<attachment-%d>" (index + 1)])
+    attachments
+  |> List.concat
+
+let build_invocation ?schema_path
+    ?(attachment_delivery = Upload_attachments) ~mcp_config_path:_
     (spec : task_spec) =
-  (* Codex reads prompt from stdin with - argument *)
-  let model_flags = match spec.model with Some m -> ["-m"; m] | None -> [] in
-  (* Read-only agents (validators) get --sandbox read-only so they cannot
-     execute shell commands or write files.  Builders keep --full-auto
-     (workspace-write sandbox). *)
-  let sandbox_flags =
-    if spec.read_only then ["-s"; "read-only"] else ["--full-auto"]
+  let* () = validate_transport_request ~attachment_delivery spec in
+  let* () =
+    match spec.json_schema, schema_path with
+    | None, None | Some _, Some _ -> Ok ()
+    | Some _, None -> invocation_error "a schema file path is required"
+    | None, Some _ ->
+        invocation_error "an unexpected schema file path was supplied"
   in
-  (* Native JSON Schema constraint — passed via a task-scoped temp file.
-     Codex reads the schema path as a PathBuf (codex-rs/exec/src/cli.rs).
-     Feature ships since codex @openai/codex@0.41.0 / rust-v0.41.0 (PR #4079). *)
-  let schema_args =
-    match schema_path with Some path -> ["--output-schema"; path] | None -> []
+  let model_args, redacted_model_args =
+    match spec.model with
+    | Some model -> (["-m"; model], ["-m"; "<model>"])
+    | None -> ([], [])
   in
-  let base =
+  let sandbox_args =
+    if spec.read_only then ["-s"; "read-only"]
+    else ["--full-auto"]
+  in
+  let schema_args, redacted_schema_args =
+    match schema_path with
+    | Some path -> (["--output-schema"; path], ["--output-schema"; "<schema>"])
+    | None -> ([], [])
+  in
+  let common =
+    [
+      "codex";
+      "exec";
+      "--json";
+      "--skip-git-repo-check";
+      "--ignore-user-config";
+      "-c";
+      Printf.sprintf "web_search=\"%s\"" (web_search_mode spec.web_access);
+    ]
+    @ sandbox_args
+  in
+  let attachments =
+    match attachment_delivery with
+    | Upload_attachments -> spec.attachments
+    | Reuse_session_attachments -> []
+  in
+  let images = image_args attachments in
+  let redacted_images = redacted_image_args attachments in
+  let command, redacted_command =
     match spec.resume_session_id with
-    | Some sid ->
-        (["codex"; "exec"; "resume"; sid; "--json"; "--skip-git-repo-check"]
-        @ sandbox_flags)
-        @ model_flags @ schema_args @ ["-"]
-    | None ->
-        (["codex"; "exec"; "--json"; "--skip-git-repo-check"] @ sandbox_flags)
-        @ model_flags @ schema_args @ ["-"]
+    | None -> (images @ ["-"], redacted_images @ ["-"])
+    | Some session_id ->
+        ( ["resume"; session_id] @ images @ ["-"],
+          ["resume"; "<session-id>"] @ redacted_images @ ["-"] )
   in
   let full_prompt =
     if String.length spec.instructions > 0 then
@@ -453,20 +537,44 @@ let build_command_with_schema_path ?schema_path ~mcp_config_path:_
         spec.instructions
     else spec.prompt
   in
-  (* Return command and stdin content separately to avoid arg list too long *)
-  (base, full_prompt)
+  Ok
+    {
+      argv = common @ model_args @ schema_args @ command;
+      stdin = Some full_prompt;
+      redacted_argv =
+        common @ redacted_model_args @ redacted_schema_args @ redacted_command;
+    }
+
+let build_command_with_schema_path ?schema_path ?attachment_delivery
+    ~mcp_config_path spec =
+  match
+    build_invocation
+      ?schema_path
+      ?attachment_delivery
+      ~mcp_config_path
+      spec
+  with
+  | Ok invocation ->
+      ( invocation.argv,
+        match invocation.stdin with Some stdin -> stdin | None -> "" )
+  | Error message -> invalid_arg message
 
 let build_command ~mcp_config_path (spec : task_spec) =
-  match spec.json_schema with
-  | None -> build_command_with_schema_path ~mcp_config_path spec
-  | Some schema ->
-      let schema_path = create_output_schema_file schema in
-      build_command_with_schema_path ~schema_path ~mcp_config_path spec
+  match
+    validate_transport_request ~attachment_delivery:Upload_attachments spec
+  with
+  | Error message -> invalid_arg message
+  | Ok () -> (
+      match spec.json_schema with
+      | None -> build_command_with_schema_path ~mcp_config_path spec
+      | Some schema ->
+          let schema_path = create_output_schema_file schema in
+          build_command_with_schema_path ~schema_path ~mcp_config_path spec)
 
 (* Extract response text from Codex JSONL stdout *)
 let parse_stdout_text stdout =
   let text, _ = parse_jsonl_output stdout in
-  text
+  if text = "" then stdout else text
 
 let normalized_events_of_stdout stdout =
   String.split_on_char '\n' stdout |> List.concat_map normalized_events_of_line
@@ -483,63 +591,124 @@ let parse_public_session_id stdout =
   normalized_events_of_stdout stdout
   |> List.find_map (function Task_event.Session_id id -> Some id | _ -> None)
 
+let failed_result message =
+  make_task_result ~status:(Failed message) ~stderr:message ~exit_code:1 ()
+
+let requested_attachment_delivery ?context spec =
+  match context with
+  | None -> Ok Upload_attachments
+  | Some context -> (
+      match Task_execution_context.requested_delivery context with
+      | None -> Ok Upload_attachments
+      | Some delivery
+        when delivery.attachment_references = spec.attachments
+             && delivery.web_access_policy = spec.web_access ->
+          Ok delivery.attachment_delivery
+      | Some _ ->
+          invocation_error "the execution delivery context does not match the task")
+
+let run_invocation ~sw ~env ~spec ?context ?on_raw_line invocation =
+  Diagnostics.debug
+    "backend command: %s"
+    (String.concat " " invocation.redacted_argv) ;
+  let on_stdout line =
+    Option.iter (fun callback -> callback line) on_raw_line ;
+    Option.iter
+      (fun context ->
+        List.iter
+          (Task_execution_context.emit context)
+          (normalized_events_of_line line))
+      context
+  in
+  Option.iter Task_execution_context.claim_structured_text context ;
+  let result =
+    Backend_process.run_process
+      ~sw
+      ~env
+      ~cmd:invocation.argv
+      ~stdin_content:invocation.stdin
+      ~working_dir:spec.working_dir
+      ~timeout_seconds:(duration_to_seconds spec.timeout)
+      ?context
+      ~parse_cost:parse_cost_from_stdout
+      ~on_stdout
+      ()
+  in
+  let task_result =
+    {
+      status = result.status;
+      files_changed =
+        Backend_process.get_git_diff ~sw ~env ~working_dir:spec.working_dir;
+      report = None;
+      elapsed = result.elapsed;
+      cost = result.cost;
+      stdout = result.stdout;
+      agent_text = parse_public_stdout_text result.stdout;
+      stderr = result.stderr;
+      exit_code = result.exit_code;
+      session_id = parse_public_session_id result.stdout;
+    }
+  in
+  Option.iter Task_execution_context.mark_final_public_text context ;
+  task_result
+
 let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
-      (* Write project config to .codex/config.toml if absent or managed.
-         Codex discovers this fixed path automatically (Config_fixed_path). *)
-      let setup =
-        Backend_config_writer.setup_artifacts
-          ~project_dir:spec.working_dir
-          ~force:false
-          (project_config_artifacts
-             ~managed_namespace:spec.managed_namespace
-             ~mcp_servers:spec.mcp_servers
-             ~lsp_servers:spec.lsp_servers)
-      in
-      (* AC2/AC4 story #479: Codex has Medium precedence confidence.  Emit
-         non-fatal warning conditioned on whether the config was applied. *)
-      (match
-         Backend_config_writer.precedence_warning_for
-           ~backend_id:id
-           ~write_outcome:setup.Backend_config_writer.write_outcome
-       with
-      | None -> ()
-      | Some msg -> Diagnostics.user_warning "%s" msg) ;
-      match mcp_config_error_if_needed setup spec.mcp_servers with
-      | Some msg -> make_task_result ~status:(Failed msg) ()
-      | None ->
-          let runtime_spec = {spec with mcp_servers = []} in
-          let on_stdout line =
-            Option.iter (fun callback -> callback line) on_raw_line ;
-            Option.iter
-              (fun context ->
-                List.iter
-                  (Task_execution_context.emit context)
-                  (normalized_events_of_line line))
-              context
-          in
-          Option.iter Task_execution_context.claim_structured_text context ;
-          let run build_command =
-            let result =
-              Backend_process.run_task_with
-                ~sw
-                ~env
-                ~spec:runtime_spec
-                ~build_command
-                ?context
-                ~parse_cost:parse_cost_from_stdout
-                ~parse_stdout:parse_public_stdout_text
-                ~parse_session_id:parse_public_session_id
-                ~on_stdout
-                ()
-            in
-            Option.iter Task_execution_context.mark_final_public_text context ;
-            result
-          in
-          match runtime_spec.json_schema with
-          | None -> run build_command
-          | Some schema ->
-              with_output_schema_file schema (fun schema_path ->
-                  run (build_command_with_schema_path ~schema_path)))
+      match requested_attachment_delivery ?context spec with
+      | Error message -> failed_result message
+      | Ok attachment_delivery -> (
+          match validate_capabilities spec with
+          | Error message -> failed_result message
+          | Ok () -> (
+              match validate_transport_request ~attachment_delivery spec with
+              | Error message -> failed_result message
+              | Ok () ->
+                  (* Write project config to .codex/config.toml if absent or
+                     managed. Codex discovers this fixed path automatically. *)
+                  let setup =
+                    Backend_config_writer.setup_artifacts
+                      ~project_dir:spec.working_dir
+                      ~force:false
+                      (project_config_artifacts
+                         ~managed_namespace:spec.managed_namespace
+                         ~mcp_servers:spec.mcp_servers
+                         ~lsp_servers:spec.lsp_servers)
+                  in
+                  (* AC2/AC4 story #479: Codex has Medium precedence confidence.
+                     Warn according to whether the config was applied. *)
+                  (match
+                     Backend_config_writer.precedence_warning_for
+                       ~backend_id:id
+                       ~write_outcome:setup.Backend_config_writer.write_outcome
+                   with
+                  | None -> ()
+                  | Some msg -> Diagnostics.user_warning "%s" msg) ;
+                  match mcp_config_error_if_needed setup spec.mcp_servers with
+                  | Some msg -> make_task_result ~status:(Failed msg) ()
+                  | None ->
+                      let runtime_spec = {spec with mcp_servers = []} in
+                      let run ?schema_path () =
+                        match
+                          build_invocation
+                            ?schema_path
+                            ~attachment_delivery
+                            ~mcp_config_path:None
+                            runtime_spec
+                        with
+                        | Error message -> failed_result message
+                        | Ok invocation ->
+                            run_invocation
+                              ~sw
+                              ~env
+                              ~spec:runtime_spec
+                              ?context
+                              ?on_raw_line
+                              invocation
+                      in
+                      match runtime_spec.json_schema with
+                      | None -> run ()
+                      | Some schema ->
+                          with_output_schema_file schema (fun schema_path ->
+                              run ~schema_path ()))))

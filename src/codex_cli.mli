@@ -14,7 +14,12 @@
     {b Configuration:}
     Codex CLI is expected to be installed and accessible in the PATH.
     The backend uses [codex exec --json --full-auto] for non-interactive
-    sandboxed execution.
+    sandboxed execution (or [-s read-only] for validators).
+
+    Media/web argv construction is implemented and version-probed, but
+    {!run_task} still applies the effective descriptor gate before config I/O or
+    spawn. The built-in descriptor remains media/web-disabled until the
+    independent hardened runtime capability snapshot can be updated atomically.
 
     {b MCP Integration:}
     Codex 0.122.0 supports MCP via [.codex/config.toml].  Épure generates
@@ -32,6 +37,29 @@ include Agentic_backend.S
     session/tool identity, and token counts are retained; raw tool arguments
     and outputs are omitted. *)
 val normalized_events_of_line : string -> Task_event.payload list
+
+(** Prepared Codex process invocation. [argv] is passed directly to the process
+    launcher without a shell. [stdin] carries the prompt/instructions, while
+    [redacted_argv] preserves useful flag names and attachment counts without
+    paths, session/model values, schema paths, workspace paths, or prompt data. *)
+type backend_invocation = {
+  argv : string list;
+  stdin : string option;
+  redacted_argv : string list;
+}
+
+(** [build_invocation ?schema_path ~attachment_delivery spec] validates the
+    Codex-specific transport request and constructs its actual and redacted
+    argv. [Upload_attachments] adds one [-i] pair per workspace-relative image;
+    [Reuse_session_attachments] is accepted only for resume and adds none.
+    Web policy is forced with an invocation-scoped config override, independently
+    of user config. A schema-bearing [spec] requires [schema_path]. *)
+val build_invocation :
+  ?schema_path:string ->
+  ?attachment_delivery:Backend_types.attachment_delivery ->
+  mcp_config_path:string option ->
+  Backend_types.task_spec ->
+  (backend_invocation, string) result
 
 (** [with_output_schema_file schema f] writes [schema] to a private temporary
     file for Codex, calls [f path], and unlinks the file on every exit path. *)
@@ -62,8 +90,10 @@ val project_config_artifacts :
   lsp_servers:Backend_types.lsp_server_config list ->
   Backend_config_writer.artifact list
 
-(** [parse_jsonl_output stdout] parses Codex's JSONL output and extracts
-    the last message text and optional cost information.
+(** [parse_jsonl_output stdout] parses Codex's JSONL output and extracts only
+    the last protocol-proven completed agent message and completed-turn usage.
+    Malformed, reasoning, error, and unknown records are ignored; raw stdout is
+    never used as fallback text.
 
     {pre}
     (none)
@@ -79,19 +109,20 @@ val project_config_artifacts :
 *)
 val parse_jsonl_output : string -> string * Backend_types.cost option
 
-(** [parse_stdout_text stdout] extracts the final [agent_message] text from
+(** [parse_stdout_text stdout] is the compatibility extractor for the final
+    [agent_message] text from
     Codex's JSONL stdout.  Codex emits one JSON event per line; the final
     assistant reply is the latest [{"type":"item.completed","item":{"type":
-    "agent_message","text":"..."}}] event.  Returns the raw [stdout] when no
-    agent message could be extracted (e.g., malformed output or non-JSON
-    payloads).
+    "agent_message","text":"..."}}] event. It retains the historical raw
+    [stdout] fallback; normal runtime execution uses the strict
+    {!parse_public_stdout_text} parser instead.
 
     {pre}
     (none)
 
     {post}
-    Returns the [text] field of the last [agent_message] item, or the raw
-    [stdout] if no such item is found.
+    Returns the [text] field of the last [agent_message] item, or raw [stdout]
+    if no such item is found.
 
     {violators}
     (none)
@@ -108,7 +139,9 @@ val parse_public_session_id : string -> string option
 
 (** [build_command ~mcp_config_path spec] constructs the Codex CLI command and
     stdin content for a task invocation.  When [spec.read_only] is [true],
-    passes [-s read-only] (OS-level sandbox); otherwise [--full-auto].
+    passes [-s read-only] (OS-level sandbox); otherwise
+    [--full-auto]. Attachment delivery defaults to a fresh upload; use
+    {!build_invocation} to test explicit resume-reuse behavior.
     Exported for testing.
 
     {pre}
