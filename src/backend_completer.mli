@@ -24,6 +24,82 @@ type completion_result = {
       (** CLI session ID for subsequent resumption. *)
 }
 
+(** Stable host request DTO, re-exported from {!Backend_types}. Field semantics
+    and defaults are shared with the corresponding [task_spec] fields. *)
+type completion_request = Backend_types.completion_request = {
+  system_prompt : string;
+  prompt : string;
+  json_schema : Yojson.Safe.t option;
+  resume_session_id : string option;
+  attachments : Backend_types.media_attachment list;
+  web_access : Backend_types.web_access;
+  timeout : Backend_types.duration;
+  max_turns : int option;
+}
+
+(** Bounded normalized lifecycle trace returned after callback delivery.
+
+    [events] is in strictly increasing task-local sequence order and contains at
+    most {!max_captured_events} entries. Existing
+    {!Task_event.Event_delivery_truncated} markers are retained as ordinary
+    lifecycle controls. [omitted_events] counts additional events omitted by the
+    completion-response collector after delivery; it saturates at [max_int]. A
+    positive count therefore normally appears as a sequence gap before the
+    retained terminal. Queue truncation and sequence gaps are observability
+    states, not execution failures. *)
+type event_trace = {events : Task_event.t list; omitted_events : int}
+
+(** Successful central rich completion. [execution] is the complete CBL-05
+    detailed execution. [text] is only the adapter-normalized final assistant
+    text; unlike the legacy completer it never falls back to raw stdout. Raw
+    stream lines are never collected here. *)
+type rich_completion_response = {
+  text : string;
+  execution : Backend_types.task_execution;
+  event_trace : event_trace;
+}
+
+(** Structured central rich-completion failure with its delivered normalized
+    lifecycle trace. Complete CBL-05 attempts remain in an
+    {!Runtime_dispatch.Execution_failure}; use
+    {!render_rich_completion_error} for a sanitized compatibility diagnostic. *)
+type rich_completion_error = {
+  cause : Runtime_dispatch.detailed_error;
+  event_trace : event_trace;
+}
+
+(** Host-facing rich completion callback. *)
+type rich_completer =
+  completion_request ->
+  (rich_completion_response, rich_completion_error) result
+
+(** Construct a request with the defaults documented by
+    {!Backend_types.make_completion_request}. *)
+val make_completion_request :
+  system_prompt:string ->
+  prompt:string ->
+  ?json_schema:Yojson.Safe.t ->
+  ?resume_session_id:string ->
+  ?attachments:Backend_types.media_attachment list ->
+  ?web_access:Backend_types.web_access ->
+  ?timeout:Backend_types.duration ->
+  ?max_turns:int ->
+  unit ->
+  completion_request
+
+(** Maximum number of normalized events retained in one rich response/error.
+    The value follows {!Task_event.max_pending_events}; lifecycle capacity is
+    reserved separately from observations so a terminal remains retainable. *)
+val max_captured_events : int
+
+(** Maximum aggregate assistant-text bytes retained by one rich event trace.
+    The value follows {!Task_event.max_pending_agent_text_bytes}. *)
+val max_captured_agent_text_bytes : int
+
+(** Render a rich error without serializing task-result stdout/stderr, raw
+    lines, prompts, attachments, or private output. *)
+val render_rich_completion_error : rich_completion_error -> string
+
 (** A text completion callback. Takes a system prompt, user prompt,
     an optional inline JSON Schema for structured-output enforcement, and
     optional session ID to resume. *)
@@ -79,6 +155,41 @@ val make :
   ?mcp_servers:Backend_types.mcp_server_config list ->
   unit ->
   completer
+
+(** [make_rich ~sw ~env ~limits ~backend_name ~working_dir ()] constructs a
+    rich completer backed exclusively by the central detailed task runtime.
+    Construction validates only routing-id syntax and performs no registry or
+    process side effect. Every invocation converts the request exactly once via
+    {!Backend_types.make_task_spec}, then uses call-time validated registry
+    resolution, effective-descriptor input/capability preflight, bound version
+    policy, availability checking, one absolute deadline/cancellation owner, and
+    {!Json_schema_enforcer.run_task_detailed}. The one prepared immutable backend
+    snapshot is retained for every schema attempt.
+
+    [limits] is mandatory caller policy; Cabal supplies no media limits.
+    [read_only=true] is checked against the resolved effective descriptor during
+    central preflight before availability or backend execution. [model] and
+    [mcp_servers] are constructor-level backend configuration rather than
+    per-turn workflow state.
+
+    The completer installs only a normalized event collector; it never installs
+    or exposes [on_raw_line]. It awaits detailed outcome first and event delivery
+    second, preserving the existing handle rule that outcome await is callback
+    independent. The collector is bounded by {!max_captured_events},
+    {!max_captured_agent_text_bytes}, and the CBL-04 observation/control split.
+    The terminal and legitimate lifecycle controls remain retainable under
+    observation floods. *)
+val make_rich :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_name:string ->
+  working_dir:string ->
+  ?model:string ->
+  ?mcp_servers:Backend_types.mcp_server_config list ->
+  ?read_only:bool ->
+  unit ->
+  (rich_completer, string) result
 
 (** [run_gate_for_output ~backend_name ~version_output] checks whether the
     version string [version_output] (raw stdout from the backend binary)

@@ -17,6 +17,13 @@ type error =
   | Backend_execution_failed
   | Schema_enforcement_failed of string
 
+type detailed_error =
+  | Dispatch_failure of error
+  | Execution_failure of Backend_types.task_execution_error
+
+type detailed_outcome =
+  (Backend_types.task_execution, detailed_error) result
+
 let render_error = function
   | Invalid_timeout -> "task timeout must be non-negative and not NaN"
   | Backend_not_registered -> "requested backend is not registered at runtime"
@@ -32,6 +39,36 @@ let render_error = function
   | Schema_enforcement_failed message ->
       "backend schema enforcement failed: "
       ^ Backend_event_redaction.redact_error_message message
+
+let render_detailed_error = function
+  | Dispatch_failure error -> render_error error
+  | Execution_failure error ->
+      render_error
+        (Schema_enforcement_failed (Json_schema_enforcer.render_error error))
+
+let project_detailed_outcome_with_context ~has_context = function
+  | Ok execution -> Ok execution.Backend_types.final_result
+  | Error (Dispatch_failure error) -> Error error
+  | Error
+      (Execution_failure
+        (Backend_types.Schema_retry_failed
+          {
+            execution;
+            attempt_2_failure =
+              ( Backend_types.Transport_failure
+                  (Backend_types.Timeout | Backend_types.Cancelled)
+              | Backend_types.Resume_failure
+                  (Backend_types.Timeout | Backend_types.Cancelled) );
+            _;
+          }))
+    when has_context ->
+      Ok execution.Backend_types.final_result
+  | Error (Execution_failure error) ->
+      Error
+        (Schema_enforcement_failed (Json_schema_enforcer.render_error error))
+
+let project_detailed_outcome outcome =
+  project_detailed_outcome_with_context ~has_context:true outcome
 
 let ( let* ) result continuation = Result.bind result continuation
 
@@ -126,28 +163,31 @@ let prepare ~sw ~env ~limits ~backend_id ?context spec =
   Eio.Fiber.yield () ;
   Ok {backend; spec}
 
-let execute_prepared ~sw ~env ?context ?on_raw_line prepared =
-  let* execution =
+let execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared =
+  match
     protect Backend_execution_failed (fun () ->
-        Json_schema_enforcer.run_task
+        Json_schema_enforcer.run_task_detailed
           ~sw
           ~env
           ?context
           ?on_raw_line
           ~backend:prepared.backend
           prepared.spec)
-  in
-  match execution with
-  | Ok result -> Ok result
-  | Error message -> Error (Schema_enforcement_failed message)
+  with
+  | Error error -> Error (Dispatch_failure error)
+  | Ok (Ok execution) -> Ok execution
+  | Ok (Error error) -> Error (Execution_failure error)
+
+let execute_prepared ~sw ~env ?context ?on_raw_line prepared =
+  execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared
+  |> project_detailed_outcome_with_context
+       ~has_context:(Option.is_some context)
 
 exception Task_cancelled
 
-type outcome = (Backend_types.task_result, error) result
-
 type task_handle = {
   cancellation : Eio.Cancel.t;
-  outcome : outcome Eio.Promise.or_exn;
+  detailed_outcome : detailed_outcome Eio.Promise.or_exn;
   delivery_complete : unit Eio.Promise.t;
   completed : bool Atomic.t;
 }
@@ -155,6 +195,15 @@ type task_handle = {
 let seconds_of_span span = Mtime.Span.to_float_ns span /. 1_000_000_000.0
 
 let make_result status = Backend_types.make_task_result ~status ()
+
+let make_terminal_execution ~total_elapsed status =
+  {
+    Backend_types.final_result = make_result status;
+    attempts = [];
+    total_elapsed;
+    total_cost = None;
+    final_session_id = None;
+  }
 
 let emit_result_metadata context result =
   (match result.Backend_types.session_id with
@@ -199,15 +248,25 @@ let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline =
   match
     Task_deadline.run deadline (fun () ->
         match prepare ~sw ~env ~limits ~backend_id ~context spec with
-        | Error error -> Error error
+        | Error error -> Error (Dispatch_failure error)
         | Ok prepared ->
-            execute_prepared ~sw ~env ~context ?on_raw_line prepared)
+            execute_prepared_detailed
+              ~sw
+              ~env
+              ~context
+              ?on_raw_line
+              prepared)
   with
   | `Completed result -> (result, context)
-  | `Timeout -> (Ok (make_result Backend_types.Timeout), context)
+  | `Timeout ->
+      ( Ok
+          (make_terminal_execution
+             ~total_elapsed:(Task_deadline.elapsed deadline)
+             Backend_types.Timeout),
+        context )
 
 let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
-  let outcome, resolve_outcome = Eio.Promise.create () in
+  let detailed_outcome, resolve_detailed_outcome = Eio.Promise.create () in
   let ready, resolve_ready = Eio.Promise.create () in
   let completed = Atomic.make false in
   Eio.Fiber.fork ~sw (fun () ->
@@ -236,7 +295,7 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                       ~remaining_time:(fun () -> Some 0.0)
                       sink
                   in
-                  (Error Invalid_timeout, context)
+                  (Error (Dispatch_failure Invalid_timeout), context)
               | Ok deadline -> (
                   try
                     execute
@@ -256,7 +315,11 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                             Task_deadline.remaining deadline)
                           sink
                       in
-                      (Ok (make_result Backend_types.Cancelled), context)
+                      ( Ok
+                          (make_terminal_execution
+                             ~total_elapsed:(Task_deadline.elapsed deadline)
+                             Backend_types.Cancelled),
+                        context )
                   | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
                       raise fatal
                   | _ ->
@@ -266,12 +329,13 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                             Task_deadline.remaining deadline)
                           sink
                       in
-                      (Error Backend_execution_failed, context))
+                      ( Error (Dispatch_failure Backend_execution_failed),
+                        context ))
             in
             Eio.Cancel.protect (fun () ->
-                emit_terminal sink context result ;
+                emit_terminal sink context (project_detailed_outcome result) ;
                 Atomic.set completed true ;
-                Eio.Promise.resolve_ok resolve_outcome result)
+                Eio.Promise.resolve_ok resolve_detailed_outcome result)
           with
           | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
               Eio.Cancel.protect (fun () ->
@@ -281,16 +345,18 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                        (Task_event.Failed "backend execution failed")
                    with _ -> ()) ;
                   Atomic.set completed true ;
-                  Eio.Promise.resolve_error resolve_outcome fatal))) ;
+                  Eio.Promise.resolve_error resolve_detailed_outcome fatal))) ;
   let cancellation, delivery_complete = Eio.Promise.await ready in
-  {cancellation; outcome; delivery_complete; completed}
+  {cancellation; detailed_outcome; delivery_complete; completed}
 
 let cancel handle =
   if not (Atomic.get handle.completed) then
     try Eio.Cancel.cancel handle.cancellation Task_cancelled
     with Invalid_argument _ -> ()
 
-let await handle = Eio.Promise.await_exn handle.outcome
+let await_detailed handle = Eio.Promise.await_exn handle.detailed_outcome
+
+let await handle = await_detailed handle |> project_detailed_outcome
 
 let await_event_delivery handle = Eio.Promise.await handle.delivery_complete
 
@@ -302,6 +368,8 @@ module Private = struct
   let cancel = cancel
 
   let await = await
+
+  let await_detailed = await_detailed
 
   let await_event_delivery = await_event_delivery
 end
@@ -316,3 +384,14 @@ let run_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
     ?on_raw_line
     spec
   |> await
+
+let run_task_detailed ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
+  start_task
+    ~sw
+    ~env
+    ~limits
+    ~backend_id
+    ?on_event
+    ?on_raw_line
+    spec
+  |> await_detailed

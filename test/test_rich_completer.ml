@@ -333,6 +333,8 @@ let test_all_request_fields_map_through_task_spec () =
 
 let test_central_preflight_rejects_before_backend_side_effects () =
   with_registry @@ fun () ->
+  with_workspace @@ fun workspace ->
+  let attachment = make_attachment workspace in
   let backend, observation =
     make_backend ~id:"rich-preflight" (fun ~env:_ ~context:_ ~call:_ _ -> success ())
   in
@@ -343,36 +345,98 @@ let test_central_preflight_rejects_before_backend_side_effects () =
     get_rich
       ~sw
       ~env
-      ~limits:no_attachment_limits
+      ~limits
       ~backend_name:"rich-preflight"
+      ~working_dir:workspace
+      ()
+  in
+  let check request expected =
+    match complete request with
+    | Error
+        {
+          cause =
+            Runtime_dispatch.Dispatch_failure
+              (Runtime_dispatch.Preflight_failed
+                (Task_preflight.Capability actual));
+          _;
+        }
+      when expected actual ->
+        ()
+    | Error error ->
+        Alcotest.failf
+          "unexpected preflight error: %s"
+          (Backend_completer.render_rich_completion_error error)
+    | Ok _ -> Alcotest.fail "unsupported request passed central preflight"
+  in
+  check
+    (Backend_completer.make_completion_request
+       ~system_prompt:"system"
+       ~prompt:"prompt"
+       ~web_access:Backend_types.Web_search
+       ())
+    (function Task_preflight.Unsupported_web_access _ -> true | _ -> false) ;
+  check
+    (Backend_completer.make_completion_request
+       ~system_prompt:"system"
+       ~prompt:"prompt"
+       ~resume_session_id:"unsupported-session"
+       ())
+    (function Task_preflight.Session_resume_unsupported -> true | _ -> false) ;
+  check
+    (Backend_completer.make_completion_request
+       ~system_prompt:"system"
+       ~prompt:"prompt"
+       ~attachments:[attachment]
+       ())
+    (function Task_preflight.Unsupported_media_type Png -> true | _ -> false) ;
+  Alcotest.(check int) "availability not called" 0 !(observation.availability_calls) ;
+  Alcotest.(check int) "backend not called" 0 !(observation.calls)
+
+let test_rich_text_and_events_never_promote_raw_output () =
+  with_registry @@ fun () ->
+  let backend, _ =
+    make_backend ~id:"rich-private-output"
+      (fun ~env:_ ~context:_ ~call:_ _ ->
+        Backend_types.make_task_result
+          ~status:Backend_types.Success
+          ~stdout:"private-raw-line"
+          ~agent_text:""
+          ())
+  in
+  register "rich-private-output" backend ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let complete =
+    get_rich
+      ~sw
+      ~env
+      ~limits:no_attachment_limits
+      ~backend_name:"rich-private-output"
       ~working_dir:"/tmp"
       ()
   in
-  let request =
-    Backend_completer.make_completion_request
-      ~system_prompt:"system"
-      ~prompt:"prompt"
-      ~web_access:Backend_types.Web_search
-      ()
+  let response =
+    match
+      complete
+        (Backend_completer.make_completion_request
+           ~system_prompt:"system"
+           ~prompt:"prompt"
+           ())
+    with
+    | Ok response -> response
+    | Error error ->
+        Alcotest.fail (Backend_completer.render_rich_completion_error error)
   in
-  (match complete request with
-  | Error
-      {
-        cause =
-          Runtime_dispatch.Dispatch_failure
-            (Runtime_dispatch.Preflight_failed
-              (Task_preflight.Capability
-                (Task_preflight.Unsupported_web_access _)));
-        _;
-      } ->
-      ()
-  | Error error ->
-      Alcotest.failf
-        "unexpected preflight error: %s"
-        (Backend_completer.render_rich_completion_error error)
-  | Ok _ -> Alcotest.fail "unsupported web request passed central preflight") ;
-  Alcotest.(check int) "availability not called" 0 !(observation.availability_calls) ;
-  Alcotest.(check int) "backend not called" 0 !(observation.calls)
+  Alcotest.(check string) "rich text is normalized only" "" response.text ;
+  let promoted =
+    List.exists
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Agent_text_delta text -> text = "private-raw-line"
+        | _ -> false)
+      response.event_trace.events
+  in
+  Alcotest.(check bool) "raw stdout absent from events" false promoted
 
 let test_prepared_snapshot_and_two_attempt_detail () =
   with_registry @@ fun () ->
@@ -658,5 +722,9 @@ let () =
             "bounded event capture"
             `Quick
             test_event_capture_is_bounded_and_reports_omission;
+          Alcotest.test_case
+            "raw output remains private"
+            `Quick
+            test_rich_text_and_events_never_promote_raw_output;
         ] );
     ]

@@ -130,6 +130,17 @@ type media_attachment = {
 type web_access = Web_disabled | Web_search | Web_search_and_fetch
 [@@deriving show, eq, yojson]
 
+type completion_request = {
+  system_prompt : string;
+  prompt : string;
+  json_schema : Yojson.Safe.t option;
+  resume_session_id : string option;
+  attachments : media_attachment list;
+  web_access : web_access;
+  timeout : duration;
+  max_turns : int option;
+}
+
 type output_spec = Files_changed | Structured_report
 [@@deriving show, eq, yojson]
 
@@ -260,6 +271,20 @@ type 'ctxt task_request = {spec : task_spec; ctxt : 'ctxt}
 type 'ctxt task_response = {result : task_result; ctxt : 'ctxt}
 
 (* Constructors *)
+
+let make_completion_request ~system_prompt ~prompt ?json_schema
+    ?resume_session_id ?(attachments = []) ?(web_access = Web_disabled)
+    ?(timeout = max_float) ?max_turns () =
+  {
+    system_prompt;
+    prompt;
+    json_schema;
+    resume_session_id;
+    attachments;
+    web_access;
+    timeout;
+    max_turns;
+  }
 
 let make_task_spec ~prompt ?(instructions = "") ?(mcp_servers = [])
     ?(lsp_servers = []) ~working_dir ?(timeout = max_float)
