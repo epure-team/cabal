@@ -1,136 +1,200 @@
-# Native JSON Schema Investigation: codex
+# Codex native schema, media, and web investigation
 
 ## Metadata
 
 | Field | Value |
 |---|---|
 | Backend | `codex` |
-| Baseline version | `0.122.0` |
-| Investigation date | 2026-05-25 |
-| Story | #630 (AC2(a) — confirmed support, wired via `--output-schema <FILE>`) |
+| Cabal baseline | `0.122.0` |
+| Installed/tested version | `codex-cli 0.131.0` |
+| Probe date | 2026-09-02 |
+| Sources accessed | 2026-09-02 |
+| Stories | #630 native schema; #24 / CBL-07A media and web |
 
-## Version range consulted
+## Upstream contracts inspected
 
-`0.122.0` (baseline) through `0.131.0` (installed version as of 2026-05-25).
+- Codex `0.122.0` `exec` CLI source (commit `230dcade`):
+  <https://github.com/openai/codex/blob/230dcadee609fa99d6162fe1107457030e5270a7/codex-rs/exec/src/cli.rs>
+- Codex `0.131.0` `exec` CLI source:
+  <https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/exec/src/cli.rs>
+- Shared initial-image CLI options at `0.131.0`:
+  <https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs>
+- Versioned config schema (`web_search = "disabled" | "cached" | "live"`):
+  <https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/config.schema.json>
+- Upstream web-mode request tests, including explicit-mode precedence over
+  legacy feature flags:
+  <https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/tests/suite/web_search.rs>
 
-## Sources consulted
+The baseline source contains all relevant surfaces: initial `-i/--image`,
+resume `-i/--image`, `--output-schema <FILE>`, `--json`, and the three
+`web_search` modes. The installed help and tagged `0.131.0` source confirm the
+same contracts.
 
-1. Codex CLI `--help` output — inspected at version `0.131.0` (accessed 2026-05-25)
-2. OpenAI Codex CLI GitHub repository — source inspection at PR #4079:
-   <https://github.com/openai/codex/pull/4079>
-   (accessed 2026-05-25)
-3. OpenAI Codex CLI `codex-rs/exec/src/cli.rs` — `--output-schema` flag definition:
-   <https://github.com/openai/codex/blob/main/codex-rs/exec/src/cli.rs>
-   (accessed 2026-05-25)
-4. OpenAI Structured Outputs API documentation:
-   <https://platform.openai.com/docs/guides/structured-outputs>
-   (accessed 2026-05-25)
-5. OpenAI Codex CLI README and configuration reference:
-   <https://github.com/openai/codex/blob/main/README.md>
-   (accessed 2026-05-25)
-6. OpenAI developer documentation for the Codex CLI:
-   <https://platform.openai.com/docs/guides/codex-cli>
-   (accessed 2026-05-25)
+Two ordering details are significant on resume:
 
-## CLI surface at baseline\_version 0.122.0
+1. `--output-schema` and `-s/--sandbox` are root `exec` options and must occur
+   before the `resume` subcommand.
+2. Resume images are subcommand options and occur after the session id.
 
-The `codex` CLI at version `0.122.0` is an **agentic coding assistant** that
-wraps OpenAI models (defaulting to `codex-1` / `o4-mini`) for interactive and
-non-interactive (headless) software-engineering tasks.
+The first attempted resume probe placed `-s read-only` after `resume` and was
+rejected by argument parsing with exit 2. The corrected ordering below exited
+successfully; Cabal pins that ordering in exact-argv tests.
 
-**Flags relevant to this investigation at 0.122.0:**
+## Preserved native schema conclusion (Story #630)
 
-| Flag / option | Purpose | Schema-forwarding? |
-|---|---|---|
-| `--model <model>` | Select the underlying OpenAI model | No |
-| `--approval-policy <policy>` | Control tool-use approval mode | No |
-| `--output-format <fmt>` | Output format: `text`, `json`, `stream-json` | No (event log only) |
-| `--config <path>` | Config file path | No schema keys |
-| `--quiet` / `--full-stdout` | Verbosity control | No |
+Codex forwards a task-scoped schema file through `--output-schema <FILE>`; the
+flag originally shipped in `0.41.0` ([PR #4079](https://github.com/openai/codex/pull/4079)).
+The authenticated `0.131.0` probe accepted a draft 2020-12 schema and returned a
+conforming response. The descriptor therefore remains independently pinned to:
 
-No `--response-format`, `--json-schema`, `--output-schema`, or equivalent flag
-exists at `0.122.0`.  The `--output-format json` / `stream-json` flags produce
-a structured event log of the session (how the CLI structures its own output),
-not caller-schema enforcement.
-
-## Feature introduction: `--output-schema <FILE>` (post-baseline)
-
-PR #4079 (merge commit `fdb8dadcae9f8eec91bc3eb5a17b3f9b19e28505`) added the
-`--output-schema <FILE>` flag to `codex exec` in the Rust rewrite.  This flag
-was released in:
-
-- `rust-v0.41.0` / npm `@openai/codex@0.41.0` (tagged 2025-09-24)
-
-The installed version tested during this audit is `0.131.0`, which is after
-`0.41.0`.
-
-**Flag contract (from `codex-rs/exec/src/cli.rs`):**
-
-```
---output-schema <FILE>
-    Path to a JSON Schema file that the model response must conform to
+```text
+native_json_schema_output = true
+tested_at_version = "0.131.0"
+json_schema_draft = "2020-12"
+test_method = E2e_test
 ```
 
-The flag accepts a filesystem path (`PathBuf`).  Codex reads the file,
-parses the content as `serde_json::Value`, and forwards it to the OpenAI
-Responses API as `response_format: { type: "json_schema", json_schema: ... }`.
-No internal draft validation is performed by the CLI — the schema is passed
-opaquely to the OpenAI API.
+CBL-07A does not weaken or couple that evidence to the media/web claims.
 
-**JSON Schema draft:** The OpenAI Responses API accepts JSON Schema draft
-`"2020-12"` for `response_format: json_schema` strict mode.  No `$schema`
-field is required in the schema document.
+## Reproducible authenticated probes
 
-## Cabal adapter wiring
+The probes used public OS images and prompts containing no secrets. Raw JSONL
+and stderr were captured in memory and filtered; only public agent/session/tool/
+usage records were reported. Reasoning, error payloads, raw tool arguments, and
+credentials were neither displayed nor stored.
 
-The Cabal codex adapter (`codex_cli.ml`) wires `spec.json_schema` to
-`--output-schema` by:
+### Initial workspace-relative image plus native schema
 
-1. Writing the schema JSON to a temp file via `Filename.temp_file`.
-2. Registering an `at_exit` cleanup to remove the temp file.
-3. Appending `["--output-schema"; path]` before `["-"]` in both
-   `codex exec` branches (normal and `resume`).
+Sanitized exact argv (the process current directory contained the image):
 
-## Version constraint
-
-The feature is **not present** at the baseline version `0.122.0`.
-Callers using a `codex` binary older than `0.41.0` will receive an
-"unrecognized argument" error from the CLI, which the enforcer surfaces as a
-native rejection.  The descriptor `baseline_version` is **not bumped** — it
-reflects the minimum version Cabal can use codex for any task.  The capability
-evidence records the version at which native schema forwarding was tested.
-
-## Outcome: AC2(a) — confirmed support
-
-**Decision**: Wire native JSON schema enforcement for `codex` via
-`--output-schema <FILE>`.
-
-At installed version `0.131.0`, the `codex exec` CLI exposes `--output-schema
-<FILE>` for forwarding a caller-supplied schema to the underlying OpenAI API.
-The schema is passed opaquely; JSON Schema draft `2020-12` is accepted.
-E2E test confirmed with `OPENAI_API_KEY` during development.
-
-### Three-artifact AC2(a) closure
-
-1. **Investigation note** (this file) — at
-   `libs/cabal/docs/native-json-schema-investigation/codex.md`.
-2. **Pinning test** — `libs/cabal/test/test_demo_630.ml` (AC2(a) suite,
-   `#630 codex native_json_schema_output = true`) asserts
-   `native_json_schema_output = true` for codex with `Some` evidence; the test
-   fails the moment a contributor reverts the flag without updating this note
-   (NFR-R1).
-3. **Completion notes** — Story #630 completion references this investigation
-   and the AC1 sources above as the basis for the AC2(a) decision.
-
-### Descriptor state
-
+```text
+codex exec --json --skip-git-repo-check --ignore-user-config \
+  -s read-only -c 'web_search="disabled"' \
+  -i 'image with spaces.png' \
+  --output-schema '<task-schema-file>' -
 ```
-id = "codex"
-baseline_version = "0.122.0"
-capabilities.native_json_schema_output = true    (* flipped by #630 *)
-capability_evidence = Some {
-  tested_at_version = "0.131.0";
-  json_schema_draft = "2020-12";
-  test_method = E2e_test;
-}
+
+Outcome at `0.131.0`: exit 0; `thread.started`, `turn.started`,
+`item.completed(agent_message)`, and `turn.completed(usage)` were emitted. The
+schema-conforming public result was `{"media_seen":true}`. This proves that a
+workspace-relative PNG path containing spaces composes with native schema and
+strict JSONL.
+
+### Multiple PNG/JPEG images plus native schema
+
+Sanitized exact argv:
+
+```text
+codex exec --json --skip-git-repo-check --ignore-user-config \
+  -s read-only -c 'web_search="disabled"' \
+  -i '<workspace-image-1.png>' -i '<workspace-image-2.jpg>' \
+  --output-schema '<task-schema-file>' -
 ```
+
+Outcome: exit 0 with the same public protocol record classes and the
+schema-conforming result `{"image_count":2}`. PNG, JPEG, repeated flags, and
+image/schema composition were all exercised in one invocation.
+
+### Resume image upload plus native schema
+
+After a probe-owned initial session, the corrected sanitized argv was:
+
+```text
+codex exec --output-schema '<task-schema-file>' -s read-only \
+  resume '<session-id>' --json --skip-git-repo-check \
+  --ignore-user-config -c 'web_search="disabled"' \
+  -i '<workspace-image-1>' -
+```
+
+Outcome: exit 0; a public session id, agent message, and usage were emitted; the
+schema-conforming result was `{"media_seen":true}`. Cabal therefore has a
+proven resume-upload syntax. For `Reuse_session_attachments`, Cabal deliberately
+emits no `-i` flags, so a schema retry does not upload the already-fed media a
+second time.
+
+### Live web search and page fetch
+
+Sanitized exact argv:
+
+```text
+codex exec --json --skip-git-repo-check --ignore-user-config \
+  -s read-only -c 'web_search="live"' -
+```
+
+The public prompt required live search and opening an official OpenAI Codex
+documentation page. Outcome: exit 0; paired
+`item.started(web_search)` / `item.completed(web_search)` records were emitted,
+followed by the public page-title answer and `turn.completed(usage)`. This
+proves the `live` search-and-fetch setting. The tagged schema/source separately
+pins `cached` as search without external live access and `disabled` as no web
+tool; CLI `-c` overrides are the highest-precedence ordinary config layer, and
+the upstream test pins explicit `web_search` precedence over legacy web flags.
+
+## Adapter design and privacy
+
+- Actual argv is a string list passed directly to the process launcher; no
+  shell interpolation or host-provided config fragment is accepted.
+- Attachments remain validated workspace-relative paths. Codex receives paths,
+  not bytes or base64; the adapter does not reread media.
+- `Upload_attachments` emits one `-i` pair per attachment.
+  `Reuse_session_attachments` requires resume and emits none.
+- Web policy maps to fixed values only:
+  `Web_disabled -> disabled`, `Web_search -> cached`, and
+  `Web_search_and_fetch -> live`.
+- At `0.131.0`, `--ignore-user-config` suppresses only
+  `$CODEX_HOME/config.toml` (authentication still uses `CODEX_HOME`); it does
+  not suppress Cabal's managed project `.codex/config.toml`. The fixed task
+  `-c web_search=...` override therefore isolates user defaults without
+  disabling project-scoped MCP configuration.
+- Native schema remains a task-scoped file passed through `--output-schema`.
+- Diagnostic argv replaces attachment, schema, session, and model values with
+  placeholders. Prompt/instructions remain on stdin and never enter argv.
+- Normalized output accepts only protocol-proven public records:
+  completed agent messages, thread ids, fixed-name tool lifecycle records, and
+  completed-turn usage (including `cached_input_tokens`). There is no
+  malformed/raw/reasoning/error fallback.
+
+## Capability outcome and shared gate
+
+| Capability | Transport proof | Advertised by the Codex descriptor in this branch |
+|---|---:|---:|
+| Native JSON schema | yes | yes (unchanged, independent evidence) |
+| PNG path media | yes | no |
+| JPEG path media | yes | no |
+| Resume media upload | yes | no |
+| Session media reuse (no duplicate `-i`) | deterministic adapter test | no |
+| Web disabled override | source + deterministic argv | yes as the existing default |
+| Cached search | source + deterministic argv | no |
+| Live search/fetch | yes | no |
+
+The media/web transport code intentionally remains fail-closed at runtime.
+`Runtime_bootstrap.approved_runtime_capabilities` is an independent trusted
+snapshot introduced by CBL-03 and still pins Codex to `no_media` / `no_web`.
+Changing only `Backend_registry` makes hardened bootstrap reject Codex with
+`effective descriptor capabilities differ from the trusted runtime snapshot`.
+`src/runtime_bootstrap.ml` is outside CBL-07A's exclusive write scope, so this
+branch does not bypass or weaken that gate.
+
+Enabling the proven claims requires one coordinated shared-file change: update
+the Codex entry in `Runtime_bootstrap.approved_runtime_capabilities` and the
+Codex descriptor together with identical versioned `feature_evidence`, then run
+the runtime/bootstrap/preflight suites. Until that integration is assigned,
+unsupported media/web requests fail before config I/O or process spawn.
+
+## Deterministic tests
+
+`test/test_codex_cli.ml` pins:
+
+- zero/one/multiple image argv, including spaces;
+- initial and resume upload versus session reuse;
+- image plus schema ordering;
+- disabled/cached/live web settings;
+- redacted argv;
+- fail-before-spawn behavior while the capability gate remains closed;
+- positive public JSONL agent/session/tool/usage records; and
+- negative privacy fixtures for reasoning, errors, malformed input, raw
+  fallback, tool arguments/results, and unsafe identifiers.
+
+`test/test_backend_registry.ml` iterates the full registry for media/web
+claim/evidence agreement and descriptor evidence validity; it also pins Codex
+as unadvertised until the independent runtime trust snapshot is updated.
