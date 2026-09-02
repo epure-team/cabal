@@ -652,23 +652,19 @@ let requested_transport_inputs ?context spec =
     match context with
     | None ->
         invocation_error "central prepared transport authorization is required"
-    | Some context ->
-        let* attachment_delivery = requested_attachment_delivery context spec in
-        let* authorized_paths =
-          match
-            Task_execution_context.authorized_attachment_paths context
-              ~backend_id:id ~attachment_references:spec.attachments
-              ~web_access_policy:spec.web_access
-          with
-          | Ok paths -> Ok paths
-          | Error message -> invocation_error message
-        in
-        let attachment_paths =
-          match attachment_delivery with
-          | Upload_attachments -> authorized_paths
-          | Reuse_session_attachments -> []
-        in
-        Ok { attachment_delivery; attachment_paths }
+    | Some context -> (
+        match
+          Task_execution_context.sealed_attachment_delivery context ~backend_id:id
+            ~attachment_references:spec.attachments
+            ~web_access_policy:spec.web_access
+        with
+        | Error message -> invocation_error message
+        | Ok sealed ->
+            Ok
+              {
+                attachment_delivery = sealed.attachment_delivery;
+                attachment_paths = sealed.attachment_paths;
+              })
 
 let run_invocation ~sw ~env ~spec ?context ?on_raw_line invocation =
   Diagnostics.debug "backend command: %s"

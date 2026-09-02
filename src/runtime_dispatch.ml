@@ -14,6 +14,7 @@ type error =
   | Version_check_failed
   | Backend_unavailable
   | Availability_check_failed
+  | Prepared_already_consumed
   | Backend_execution_failed
   | Schema_enforcement_failed of string
 
@@ -38,6 +39,8 @@ let render_error = function
   | Version_check_failed -> "backend version check failed"
   | Backend_unavailable -> "requested backend is not available"
   | Availability_check_failed -> "backend availability check failed"
+  | Prepared_already_consumed ->
+      "prepared task has already been claimed or released"
   | Backend_execution_failed -> "backend execution failed"
   | Schema_enforcement_failed message ->
       "backend schema enforcement failed: "
@@ -120,6 +123,8 @@ let check_availability ~sw ~env ~backend ~origin ~version_probe =
       in
       if available then Ok () else Error Backend_unavailable
 
+type prepared_state = Pending | Executing | Released
+
 type prepared = {
   backend : Agentic_backend.t;
   backend_id : string;
@@ -127,7 +132,65 @@ type prepared = {
   inputs : Task_preflight.prepared_inputs;
   fallback_context : Task_execution_context.t;
   release_hook : Eio.Switch.hook;
+  state : prepared_state Atomic.t;
+  cleanup_status : Backend_types.cleanup_status Atomic.t;
 }
+
+let cleanup_retry_limit = 3
+
+let cleanup_warning =
+  "sealed attachment cleanup failed after bounded retries"
+
+let warn_cleanup_failure () =
+  try Diagnostics.warn "%s" cleanup_warning with _ -> ()
+
+let release_inputs_bounded inputs cleanup_status =
+  Eio.Cancel.protect (fun () ->
+      let cleanup_required =
+        Option.is_some (Task_preflight.Private.staging_directory inputs)
+      in
+      let rec loop remaining =
+        let result =
+          try Task_preflight.release_inputs inputs
+          with _ ->
+            Error
+              (Task_preflight.Input Task_preflight.Attachment_cleanup_failed)
+        in
+        match result with
+        | Ok () ->
+            if cleanup_required then Backend_types.Cleanup_succeeded
+            else Backend_types.Cleanup_not_required
+        | Error _ when remaining > 1 ->
+            Eio.Fiber.yield ();
+            loop (remaining - 1)
+        | Error _ ->
+            warn_cleanup_failure ();
+            Backend_types.Cleanup_failed
+      in
+      let status = loop cleanup_retry_limit in
+      Atomic.set cleanup_status status;
+      status)
+
+let release_pending ~state ~release_hook ~inputs ~cleanup_status =
+  if Atomic.compare_and_set state Pending Released then begin
+    ignore (Eio.Switch.try_remove_hook release_hook);
+    Some (release_inputs_bounded inputs cleanup_status)
+  end
+  else None
+
+let claim_execution prepared =
+  if Atomic.compare_and_set prepared.state Pending Executing then begin
+    ignore (Eio.Switch.try_remove_hook prepared.release_hook);
+    Ok ()
+  end
+  else Error Prepared_already_consumed
+
+let release_execution prepared =
+  let status =
+    release_inputs_bounded prepared.inputs prepared.cleanup_status
+  in
+  Atomic.set prepared.state Released;
+  status
 
 let seconds_of_span span = Mtime.Span.to_float_ns span /. 1_000_000_000.0
 
@@ -149,7 +212,8 @@ let final_session_id attempts =
       | None -> selected)
     None attempts
 
-let make_terminal_execution ~attempts ~total_elapsed status =
+let make_terminal_execution ?(cleanup_status = Backend_types.Cleanup_not_required)
+    ~attempts ~total_elapsed status =
   {
     Backend_types.final_result = make_result status;
     attempts;
@@ -160,6 +224,7 @@ let make_terminal_execution ~attempts ~total_elapsed status =
            (fun (attempt : Backend_types.task_attempt) -> attempt.result.cost)
            attempts);
     final_session_id = final_session_id attempts;
+    cleanup_status;
   }
 
 let dispatch_failure_with_progress ~progress ~total_elapsed failure =
@@ -175,13 +240,6 @@ let dispatch_failure_with_progress ~progress ~total_elapsed failure =
 let emit context payload =
   Option.iter (fun value -> Task_execution_context.emit value payload) context
 
-let release_prepared prepared =
-  match Task_preflight.release_inputs prepared.inputs with
-  | Ok () ->
-      ignore (Eio.Switch.try_remove_hook prepared.release_hook);
-      Ok ()
-  | Error _ as error -> error
-
 let authorize_context prepared context =
   Task_execution_context.Private.authorize_transport context
     ~backend_id:prepared.backend_id
@@ -192,7 +250,68 @@ let make_fallback_context ~sw =
   let sink = Task_event.create_sink ~sw ~now:(fun () -> 0.0) () in
   Task_execution_context.create ~remaining_time:(fun () -> None) sink
 
-let prepare ~sw ~env ~limits ~backend_id ?context spec =
+let with_cleanup_status cleanup_status execution =
+  { execution with Backend_types.cleanup_status = cleanup_status }
+
+let map_execution_error_cleanup cleanup_status = function
+  | Backend_types.Native_backend_failure_with_schema { execution; message } ->
+      Backend_types.Native_backend_failure_with_schema
+        { execution = with_cleanup_status cleanup_status execution; message }
+  | Backend_types.Schema_retry_failed
+      { execution; attempt_1_validation_error; attempt_2_failure } ->
+      Backend_types.Schema_retry_failed
+        {
+          execution = with_cleanup_status cleanup_status execution;
+          attempt_1_validation_error;
+          attempt_2_failure;
+        }
+
+let map_outcome_cleanup cleanup_status = function
+  | Ok execution -> Ok (with_cleanup_status cleanup_status execution)
+  | Error (Dispatch_failure failure) -> Error (Dispatch_failure failure)
+  | Error (Dispatch_failure_with_execution { failure; execution }) ->
+      Error
+        (Dispatch_failure_with_execution
+           {
+             failure;
+             execution = with_cleanup_status cleanup_status execution;
+           })
+  | Error (Execution_failure error) ->
+      Error (Execution_failure (map_execution_error_cleanup cleanup_status error))
+
+let cleanup_failure_outcome outcome =
+  let cleanup_error =
+    Preflight_failed
+      (Task_preflight.Input Task_preflight.Attachment_cleanup_failed)
+  in
+  match outcome with
+  | Ok execution
+    when execution.Backend_types.final_result.status <> Backend_types.Success ->
+      Ok (with_cleanup_status Backend_types.Cleanup_failed execution)
+  | Ok execution ->
+      Error
+        (Dispatch_failure_with_execution
+           {
+             failure = cleanup_error;
+             execution =
+               with_cleanup_status Backend_types.Cleanup_failed execution;
+           })
+  | Error (Dispatch_failure _) -> Error (Dispatch_failure cleanup_error)
+  | Error (Dispatch_failure_with_execution { failure; execution }) ->
+      Error
+        (Dispatch_failure_with_execution
+           {
+             failure;
+             execution =
+               with_cleanup_status Backend_types.Cleanup_failed execution;
+           })
+  | Error (Execution_failure error) ->
+      Error
+        (Execution_failure
+           (map_execution_error_cleanup Backend_types.Cleanup_failed error))
+
+let prepare_with ~prepare_inputs ~cleanup_status ~sw ~env ~limits ~backend_id
+    ?context spec =
   (* Give cancellation requested immediately after [start_task] a deterministic
      checkpoint before registry resolution or any preflight side effect. *)
   Eio.Fiber.yield ();
@@ -207,31 +326,47 @@ let prepare ~sw ~env ~limits ~backend_id ?context spec =
   emit context (Task_event.Backend_selected { backend_id });
   Eio.Fiber.yield ();
   emit context Task_event.Preflight_started;
+  let* () =
+    match Task_preflight.validate_capabilities ~descriptor spec with
+    | Ok () -> Ok ()
+    | Error error -> Error (Preflight_failed error)
+  in
   let* inputs =
-    match Task_preflight.prepare_inputs ~limits spec with
+    match prepare_inputs ~limits spec with
     | Ok inputs -> Ok inputs
     | Error error -> Error (Preflight_failed error)
   in
+  let state = Atomic.make Pending in
   let release_hook =
     Eio.Switch.on_release_cancellable sw (fun () ->
-        ignore (Task_preflight.release_inputs inputs))
-  in
-  let fallback_context =
-    match context with
-    | Some context -> context
-    | None -> make_fallback_context ~sw
+        if Atomic.compare_and_set state Pending Released then
+          ignore (release_inputs_bounded inputs cleanup_status))
   in
   let prepared =
-    { backend; backend_id; spec; inputs; fallback_context; release_hook }
+    try
+      let fallback_context =
+        match context with
+        | Some context -> context
+        | None -> make_fallback_context ~sw
+      in
+      {
+        backend;
+        backend_id;
+        spec;
+        inputs;
+        fallback_context;
+        release_hook;
+        state;
+        cleanup_status;
+      }
+    with error ->
+      ignore
+        (release_pending ~state ~release_hook ~inputs ~cleanup_status);
+      raise error
   in
   let continue () =
     let* () =
-      match Task_preflight.validate_capabilities ~descriptor spec with
-      | Ok () -> Ok ()
-      | Error error -> Error (Preflight_failed error)
-    in
-    let* () =
-      match authorize_context prepared fallback_context with
+      match authorize_context prepared prepared.fallback_context with
       | Ok () -> Ok ()
       | Error _ -> Error Backend_execution_failed
     in
@@ -259,45 +394,63 @@ let prepare ~sw ~env ~limits ~backend_id ?context spec =
   match continue () with
   | Ok _ as success -> success
   | Error failure -> (
-      match release_prepared prepared with
-      | Ok () -> Error failure
-      | Error cleanup_error -> Error (Preflight_failed cleanup_error))
+      match
+        release_pending ~state ~release_hook ~inputs ~cleanup_status
+      with
+      | Some Backend_types.Cleanup_failed ->
+          Error
+            (Preflight_failed
+               (Task_preflight.Input Task_preflight.Attachment_cleanup_failed))
+      | Some
+          (Backend_types.Cleanup_succeeded | Backend_types.Cleanup_not_required)
+        | None ->
+          Error failure)
   | exception error ->
-      ignore (release_prepared prepared);
+      ignore
+        (release_pending ~state ~release_hook ~inputs ~cleanup_status);
       raise error
+
+let prepare ~sw ~env ~limits ~backend_id ?context spec =
+  let cleanup_status = Atomic.make Backend_types.Cleanup_not_required in
+  prepare_with ~prepare_inputs:Task_preflight.prepare_inputs ~cleanup_status ~sw
+    ~env ~limits ~backend_id ?context spec
 
 let execute_prepared_detailed_with_progress ~sw ~env ?context ?on_raw_line
     ~progress prepared =
-  let clock = Eio.Stdenv.mono_clock env in
-  let started_at = Eio.Time.Mono.now clock in
-  let context = Option.value ~default:prepared.fallback_context context in
-  let outcome =
-    try
-      match authorize_context prepared context with
-      | Error _ -> Error (Dispatch_failure Backend_execution_failed)
-      | Ok () -> (
-          match
-            protect Backend_execution_failed (fun () ->
-                Json_schema_enforcer.Private.run_task_detailed ~sw ~env ~context
-                  ?on_raw_line ~progress ~backend:prepared.backend prepared.spec)
-          with
-          | Error failure ->
-              dispatch_failure_with_progress ~progress
-                ~total_elapsed:(elapsed_since clock started_at)
-                failure
-          | Ok (Ok execution) -> Ok execution
-          | Ok (Error error) -> Error (Execution_failure error))
-    with error ->
-      ignore (release_prepared prepared);
-      raise error
-  in
-  match release_prepared prepared with
-  | Ok () -> outcome
-  | Error cleanup_error ->
-      dispatch_failure_with_progress ~progress
-        ~total_elapsed:(elapsed_since clock started_at)
-        (Preflight_failed cleanup_error)
-  | exception error -> raise error
+  match claim_execution prepared with
+  | Error failure -> Error (Dispatch_failure failure)
+  | Ok () ->
+      let clock = Eio.Stdenv.mono_clock env in
+      let started_at = Eio.Time.Mono.now clock in
+      let context = Option.value ~default:prepared.fallback_context context in
+      let outcome =
+        try
+          match authorize_context prepared context with
+          | Error _ -> Error (Dispatch_failure Backend_execution_failed)
+          | Ok () -> (
+              match
+                protect Backend_execution_failed (fun () ->
+                    Json_schema_enforcer.Private.run_task_detailed ~sw ~env
+                      ~context ?on_raw_line ~progress ~backend:prepared.backend
+                      prepared.spec)
+              with
+              | Error failure ->
+                  dispatch_failure_with_progress ~progress
+                    ~total_elapsed:(elapsed_since clock started_at)
+                    failure
+              | Ok (Ok execution) -> Ok execution
+              | Ok (Error error) -> Error (Execution_failure error))
+        with error ->
+          ignore (release_execution prepared);
+          raise error
+      in
+      let cleanup_status = release_execution prepared in
+      match cleanup_status with
+      | Backend_types.Cleanup_succeeded ->
+          map_outcome_cleanup cleanup_status outcome
+      | Backend_types.Cleanup_failed -> cleanup_failure_outcome outcome
+      | Backend_types.Cleanup_not_required ->
+          map_outcome_cleanup cleanup_status outcome
 
 let execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared =
   let progress = Json_schema_enforcer.Private.create_progress () in
@@ -350,8 +503,8 @@ let emit_terminal sink context = function
       in
       Task_event.emit_terminal sink terminal
 
-let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline
-    progress =
+let execute ~prepare_inputs ~cleanup_status ~sw ~env ~limits ~backend_id
+    ?on_raw_line spec sink deadline progress =
   let context =
     Task_execution_context.create
       ~remaining_time:(fun () -> Task_deadline.remaining deadline)
@@ -359,7 +512,10 @@ let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline
   in
   match
     Task_deadline.run deadline (fun () ->
-        match prepare ~sw ~env ~limits ~backend_id ~context spec with
+        match
+          prepare_with ~prepare_inputs ~cleanup_status ~sw ~env ~limits
+            ~backend_id ~context spec
+        with
         | Error error -> Error (Dispatch_failure error)
         | Ok prepared ->
             execute_prepared_detailed_with_progress ~sw ~env ~context
@@ -372,14 +528,17 @@ let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline
              ~attempts:
                (Json_schema_enforcer.Private.completed_attempts progress)
              ~total_elapsed:(Task_deadline.elapsed deadline)
+             ~cleanup_status:(Atomic.get cleanup_status)
              Backend_types.Timeout),
         context )
 
-let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
+let start_task_with_preparer ~prepare_inputs ~sw ~env ~limits ~backend_id
+    ?on_event ?on_raw_line spec =
   let detailed_outcome, resolve_detailed_outcome = Eio.Promise.create () in
   let ready, resolve_ready = Eio.Promise.create () in
   let completed = Atomic.make false in
   let progress = Json_schema_enforcer.Private.create_progress () in
+  let cleanup_status = Atomic.make Backend_types.Cleanup_not_required in
   Eio.Fiber.fork ~sw (fun () ->
       let mono_clock = Eio.Stdenv.mono_clock env in
       let started_at = Eio.Time.Mono.now mono_clock in
@@ -408,8 +567,8 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                   (Error (Dispatch_failure Invalid_timeout), context)
               | Ok deadline -> (
                   try
-                    execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink
-                      deadline progress
+                    execute ~prepare_inputs ~cleanup_status ~sw ~env ~limits
+                      ~backend_id ?on_raw_line spec sink deadline progress
                   with
                   | Eio.Cancel.Cancelled _ ->
                       let context =
@@ -424,6 +583,7 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                                (Json_schema_enforcer.Private.completed_attempts
                                   progress)
                              ~total_elapsed:(Task_deadline.elapsed deadline)
+                             ~cleanup_status:(Atomic.get cleanup_status)
                              Backend_types.Cancelled),
                         context )
                   | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
@@ -435,10 +595,11 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                             Task_deadline.remaining deadline)
                           sink
                       in
-                      ( dispatch_failure_with_progress ~progress
-                          ~total_elapsed:(Task_deadline.elapsed deadline)
-                          Backend_execution_failed,
-                        context ))
+                       ( dispatch_failure_with_progress ~progress
+                           ~total_elapsed:(Task_deadline.elapsed deadline)
+                           Backend_execution_failed
+                         |> map_outcome_cleanup (Atomic.get cleanup_status),
+                         context ))
             in
             Eio.Cancel.protect (fun () ->
                 emit_terminal sink context
@@ -456,6 +617,10 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
   let cancellation, delivery_complete = Eio.Promise.await ready in
   { cancellation; detailed_outcome; delivery_complete; completed }
 
+let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
+  start_task_with_preparer ~prepare_inputs:Task_preflight.prepare_inputs ~sw ~env
+    ~limits ~backend_id ?on_event ?on_raw_line spec
+
 let cancel handle =
   if not (Atomic.get handle.completed) then
     try Eio.Cancel.cancel handle.cancellation Task_cancelled
@@ -467,6 +632,31 @@ let await_event_delivery handle = Eio.Promise.await handle.delivery_complete
 
 module Private = struct
   type nonrec task_handle = task_handle
+
+  let cleanup_retry_limit = cleanup_retry_limit
+
+  let prepare_inputs_with_hooks ?on_staging_directory ?on_staged_file
+      ?on_cleanup_attempt ~limits spec =
+    Task_preflight.Private.prepare_inputs_with_hooks ?on_staging_directory
+      ?on_staged_file ?on_cleanup_attempt ~limits spec
+
+  let prepare_with_input_hooks ~sw ~env ~limits ~backend_id ?context
+      ?on_staging_directory ?on_staged_file ?on_cleanup_attempt spec =
+    let cleanup_status = Atomic.make Backend_types.Cleanup_not_required in
+    prepare_with
+      ~prepare_inputs:
+        (prepare_inputs_with_hooks ?on_staging_directory ?on_staged_file
+           ?on_cleanup_attempt)
+      ~cleanup_status ~sw ~env ~limits ~backend_id ?context spec
+
+  let start_task_with_input_hooks ~sw ~env ~limits ~backend_id ?on_event
+      ?on_raw_line ?on_staging_directory ?on_staged_file ?on_cleanup_attempt spec
+      =
+    start_task_with_preparer
+      ~prepare_inputs:
+        (prepare_inputs_with_hooks ?on_staging_directory ?on_staged_file
+           ?on_cleanup_attempt)
+      ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec
 
   let start_task = start_task
   let cancel = cancel

@@ -111,6 +111,18 @@ let with_registry f =
   Registry.clear ();
   Fun.protect ~finally:Registry.clear f
 
+let with_captured_diagnostics f =
+  let events = ref [] in
+  Diagnostics.set_handler (fun event -> events := event :: !events);
+  Fun.protect ~finally:Diagnostics.reset_handler (fun () -> f events)
+
+let diagnostic_messages events =
+  List.filter_map
+    (function
+      | Diagnostics.Log (_, message) | Diagnostics.User_warning message ->
+          Some message)
+    !events
+
 let register_pair ?session_resume ?native ?read_only ?binary_name
     ?baseline_version ?media_types ?web_maximum ?(origin = Runtime_entry.Custom)
     ?(version_policy = Runtime_entry.Enforce_baseline) ~id backend =
@@ -175,9 +187,9 @@ let read_file path =
 
 let spec ?(working_dir = ".") ?(read_only = false) ?resume_session_id
     ?json_schema ?(attachments = []) ?(web_access = Backend_types.Web_disabled)
-    () =
+    ?timeout () =
   Backend_types.make_task_spec ~prompt:"dispatch test" ~working_dir ~read_only
-    ?resume_session_id ?json_schema ~attachments ~web_access ()
+    ?resume_session_id ?json_schema ~attachments ~web_access ?timeout ()
 
 let run ~env ~sw ~backend_id ?(limits = limits) spec =
   Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id spec
@@ -321,7 +333,7 @@ let test_invalid_preflight_never_spawns_or_calls_backend () =
     (Printf.sprintf
        "#!/bin/sh\nprintf 'probed\\n' >> %s\nprintf '%%s\\n' '1.0.0'\n"
        (Filename.quote version_marker));
-  register_pair ~binary_name ~id
+  register_pair ~binary_name ~id ~media_types:[ Backend_types.Png ]
     (make_backend ~id ~calls
        ~availability:(fun ~sw:_ ~env:_ ->
          incr availability_calls;
@@ -426,7 +438,7 @@ let test_invalid_preflight_never_spawns_or_calls_backend () =
       {
         id = "unsupported-media";
         path = "unsupported.png";
-        media_type = Png;
+        media_type = Jpeg;
         sha256 =
           "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6";
         size_bytes = String.length png;
@@ -447,7 +459,7 @@ let test_invalid_preflight_never_spawns_or_calls_backend () =
   | Error
       (Runtime_dispatch.Preflight_failed
          (Task_preflight.Capability
-            (Task_preflight.Unsupported_media_type Backend_types.Png))) ->
+             (Task_preflight.Unsupported_media_type Backend_types.Jpeg))) ->
       ()
   | Error error ->
       Alcotest.failf "unexpected unsupported-media error: %s"
@@ -508,6 +520,94 @@ let test_staging_failure_never_checks_availability_or_calls_backend () =
       | Ok _ -> Alcotest.fail "staging failure unexpectedly reached backend");
   Alcotest.(check int) "availability not checked" 0 !availability_calls;
   Alcotest.(check int) "backend not called" 0 !backend_calls
+
+let test_capability_rejection_precedes_attachment_staging () =
+  with_registry @@ fun () ->
+  with_temp_dir "capability-before-staging" @@ fun temp_dir ->
+  let png = "\x89PNG\r\n\x1a\ncapability ordering" in
+  write_binary_file (Filename.concat temp_dir "image.png") png;
+  let attachment =
+    Backend_types.
+      {
+        id = "image";
+        path = "image.png";
+        media_type = Png;
+        sha256 = Digestif.SHA256.(to_hex (digest_string png));
+        size_bytes = String.length png;
+      }
+  in
+  let attachment_limits =
+    Task_preflight.
+      {
+        max_attachments = 1;
+        max_file_size_bytes = 128;
+        max_total_size_bytes = 128;
+      }
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let cases =
+    [
+      ( "media",
+        [],
+        Backend_types.Web_disabled,
+        false,
+        None,
+        Backend_types.Web_disabled );
+      ( "web",
+        [ Backend_types.Png ],
+        Backend_types.Web_disabled,
+        false,
+        None,
+        Backend_types.Web_search );
+      ( "read-only",
+        [ Backend_types.Png ],
+        Backend_types.Web_disabled,
+        true,
+        None,
+        Backend_types.Web_disabled );
+      ( "resume",
+        [ Backend_types.Png ],
+        Backend_types.Web_disabled,
+        false,
+        Some "session",
+        Backend_types.Web_disabled );
+    ]
+  in
+  List.iter
+    (fun (label, media_types, web_maximum, read_only, resume_session_id, web_access) ->
+      let id = "dispatch-capability-before-staging-" ^ label in
+      let availability_calls = ref 0 in
+      register_pair ~id ~media_types ~web_maximum
+        ~version_policy:Runtime_entry.No_version_gate
+        (make_backend ~id ~calls:(ref 0)
+           ~availability:(fun ~sw:_ ~env:_ ->
+             incr availability_calls;
+             true)
+           (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
+      let staging_directories = ref 0 in
+      let staged_files = ref 0 in
+      let task =
+        spec ~working_dir:temp_dir ~attachments:[ attachment ] ~read_only
+          ?resume_session_id ~web_access ()
+      in
+      (match
+         Runtime_dispatch.Private.prepare_with_input_hooks ~sw ~env
+           ~limits:attachment_limits ~backend_id:id
+           ~on_staging_directory:(fun _ -> incr staging_directories)
+           ~on_staged_file:(fun _ _ -> incr staged_files)
+           task
+       with
+      | Error (Runtime_dispatch.Preflight_failed (Task_preflight.Capability _)) ->
+          ()
+      | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+      | Ok _ -> Alcotest.failf "%s capability rejection unexpectedly passed" label);
+      Alcotest.(check int)
+        (label ^ " allocates no staging directory") 0 !staging_directories;
+      Alcotest.(check int) (label ^ " stages no bytes") 0 !staged_files;
+      Alcotest.(check int)
+        (label ^ " performs no availability side effect") 0 !availability_calls)
+    cases
 
 let test_enforcer_uses_resolved_backend_snapshot_for_retry () =
   with_registry @@ fun () ->
@@ -645,16 +745,22 @@ let test_dispatch_reuses_one_sealed_attachment_set_across_retry () =
       let calls = ref 0 in
       let observed_paths = ref [] in
       let observed_deliveries = ref [] in
+      let staged_alive_during_reuse = ref false in
       let backend =
         make_backend ~id ~calls ~session_resume
           ~on_context:(fun context ->
+            let delivery =
+              match Task_execution_context.requested_delivery context with
+              | Some delivery -> delivery
+              | None -> Alcotest.fail "missing retry delivery"
+            in
             let paths =
               match
-                Task_execution_context.authorized_attachment_paths context
+                Task_execution_context.sealed_attachment_delivery context
                   ~backend_id:id ~attachment_references:[ attachment ]
                   ~web_access_policy:Backend_types.Web_disabled
               with
-              | Ok paths -> paths
+              | Ok sealed -> sealed.attachment_paths
               | Error message -> Alcotest.fail message
             in
             List.iter
@@ -662,10 +768,12 @@ let test_dispatch_reuses_one_sealed_attachment_set_across_retry () =
                 Alcotest.(check string)
                   "backend observes sealed bytes" png (read_file path))
               paths;
+            if !calls = 2 && session_resume then
+              staged_alive_during_reuse :=
+                List.concat !observed_paths
+                |> List.for_all (fun path -> Sys.file_exists path);
             observed_paths := paths :: !observed_paths;
-            observed_deliveries :=
-              Task_execution_context.requested_delivery context
-              :: !observed_deliveries)
+            observed_deliveries := Some delivery :: !observed_deliveries)
           (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
             if !calls = 1 then
               success ~text:"not-json"
@@ -689,9 +797,16 @@ let test_dispatch_reuses_one_sealed_attachment_set_across_retry () =
       let paths = List.rev !observed_paths in
       Alcotest.(check int) (label ^ " exact calls") 2 (List.length paths);
       Alcotest.(check bool)
-        (label ^ " both attempts reuse the same staged set")
+        (label ^ " delivery-aware sealed path view")
         true
-        (match paths with [ first; second ] -> first = second | _ -> false);
+        (match (session_resume, paths) with
+        | false, [ first; second ] -> first = second
+        | true, [ [ _ ]; [] ] -> true
+        | _ -> false);
+      if session_resume then
+        Alcotest.(check bool)
+          "resume retains sealed file under the active execution owner" true
+          !staged_alive_during_reuse;
       let deliveries =
         List.rev !observed_deliveries
         |> List.map (function
@@ -713,7 +828,7 @@ let test_dispatch_reuses_one_sealed_attachment_set_across_retry () =
       ("resume", true, Backend_types.Reuse_session_attachments);
     ]
 
-let test_dispatch_sanitizes_cleanup_failure_and_retries_on_switch_release () =
+let test_dispatch_sanitizes_persistent_cleanup_failure () =
   with_registry @@ fun () ->
   with_temp_dir "cleanup-failure" @@ fun temp_dir ->
   let png = "\x89PNG\r\n\x1a\ncleanup bytes" in
@@ -759,32 +874,56 @@ let test_dispatch_sanitizes_cleanup_failure_and_retries_on_switch_release () =
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
   Eio_posix.run (fun env ->
       Eio.Switch.run (fun sw ->
-          let result =
-            run ~env ~sw ~backend_id:id ~limits:attachment_limits
-              (spec ~working_dir:temp_dir ~attachments:[ attachment ] ())
-          in
-          (match result with
-          | Error
-              (Runtime_dispatch.Preflight_failed
-                 (Task_preflight.Input Task_preflight.Attachment_cleanup_failed)
-               as error) ->
-              let rendered = Runtime_dispatch.render_error error in
-              List.iter
+           let result =
+             Runtime_dispatch.run_task_detailed ~env ~sw ~backend_id:id
+               ~limits:attachment_limits
+               (spec ~working_dir:temp_dir ~attachments:[ attachment ] ())
+           in
+           (match result with
+           | Error
+               (Runtime_dispatch.Dispatch_failure_with_execution
+                  {
+                    failure =
+                      Runtime_dispatch.Preflight_failed
+                        (Task_preflight.Input
+                           Task_preflight.Attachment_cleanup_failed);
+                    execution;
+                  }) ->
+               Alcotest.(check bool)
+                 "completed backend result is retained" true
+                 (execution.Backend_types.final_result.status
+                 = Backend_types.Success);
+               Alcotest.(check bool)
+                 "detailed execution reports persistent cleanup failure" true
+                 (execution.cleanup_status = Backend_types.Cleanup_failed);
+               let rendered = Runtime_dispatch.render_detailed_error
+                   (Runtime_dispatch.Dispatch_failure_with_execution
+                      {
+                        failure =
+                          Runtime_dispatch.Preflight_failed
+                            (Task_preflight.Input
+                               Task_preflight.Attachment_cleanup_failed);
+                        execution;
+                      })
+               in
+               List.iter
                 (fun secret ->
                   Alcotest.(check bool)
                     "cleanup diagnostic is sanitized" false
                     (contains rendered secret))
                 [ png; temp_dir ]
-          | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+          | Error error ->
+              Alcotest.fail (Runtime_dispatch.render_detailed_error error)
           | Ok _ -> Alcotest.fail "cleanup failure unexpectedly succeeded");
-          match !blocker with
-          | Some path -> Unix.rmdir path
-          | None -> Alcotest.fail "cleanup blocker was not installed"));
+           match !blocker with
+           | Some path -> Unix.rmdir path
+           | None -> Alcotest.fail "cleanup blocker was not installed"));
   match !staging_directory with
   | Some path ->
       Alcotest.(check bool)
-        "switch release retries and removes private directory" false
-        (Sys.file_exists path)
+        "persistent cleanup remains observable after bounded retries" true
+        (Sys.file_exists path);
+      remove_tree path
   | None -> Alcotest.fail "staging directory was not captured"
 
 let test_sealed_attachments_cleanup_on_cancellation_and_fatal_exception () =
@@ -965,6 +1104,7 @@ let test_abandoned_prepared_attachments_cleanup_on_switch_release () =
     ~version_policy:Runtime_entry.No_version_gate
     (make_backend ~id ~calls:(ref 0)
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
+  let cleanup_attempts = ref 0 in
   let staged_path =
     Eio_posix.run @@ fun env ->
     Eio.Switch.run @@ fun sw ->
@@ -973,18 +1113,27 @@ let test_abandoned_prepared_attachments_cleanup_on_switch_release () =
       Task_execution_context.create ~remaining_time:(fun () -> None) sink
     in
     (match
-       Runtime_dispatch.prepare ~sw ~env ~limits:attachment_limits
+       Runtime_dispatch.Private.prepare_with_input_hooks ~sw ~env
+         ~limits:attachment_limits
          ~backend_id:id ~context
+         ~on_cleanup_attempt:(fun () -> incr cleanup_attempts)
          (spec ~working_dir:temp_dir ~attachments:[ attachment ] ())
      with
     | Ok _prepared -> ()
     | Error error -> Alcotest.fail (Runtime_dispatch.render_error error));
     match
-      Task_execution_context.authorized_attachment_paths context ~backend_id:id
+      Task_execution_context.Private.set_requested_delivery context
+        Backend_types.
+          {
+            attachment_references = [ attachment ];
+            attachment_delivery = Upload_attachments;
+            web_access_policy = Web_disabled;
+          };
+      Task_execution_context.sealed_attachment_delivery context ~backend_id:id
         ~attachment_references:[ attachment ]
         ~web_access_policy:Backend_types.Web_disabled
     with
-    | Ok [ path ] ->
+    | Ok { attachment_paths = [ path ]; _ } ->
         Alcotest.(check bool)
           "sealed file exists while prepared value is live" true
           (Sys.file_exists path);
@@ -997,7 +1146,397 @@ let test_abandoned_prepared_attachments_cleanup_on_switch_release () =
     (Sys.file_exists staged_path);
   Alcotest.(check bool)
     "switch release removes abandoned private directory" false
-    (Sys.file_exists (Filename.dirname staged_path))
+    (Sys.file_exists (Filename.dirname staged_path));
+  Alcotest.(check int) "abandoned cleanup is claimed exactly once" 1
+    !cleanup_attempts
+
+exception Test_switch_cancelled
+
+let test_switch_release_does_not_cleanup_under_active_execution_owner () =
+  with_registry @@ fun () ->
+  with_temp_dir "active-owner-cleanup" @@ fun temp_dir ->
+  let png = "\x89PNG\r\n\x1a\nactive owner bytes" in
+  write_binary_file (Filename.concat temp_dir "image.png") png;
+  let attachment =
+    Backend_types.
+      {
+        id = "image";
+        path = "image.png";
+        media_type = Png;
+        sha256 = Digestif.SHA256.(to_hex (digest_string png));
+        size_bytes = String.length png;
+      }
+  in
+  let attachment_limits =
+    Task_preflight.
+      {
+        max_attachments = 1;
+        max_file_size_bytes = 128;
+        max_total_size_bytes = 128;
+      }
+  in
+  let id = "dispatch-active-owner-cleanup" in
+  let staged_path = ref None in
+  let cleanup_attempts = ref 0 in
+  let alive_during_backend_unwind = ref false in
+  let started, resolve_started = Eio.Promise.create () in
+  register_pair ~id ~media_types:[ Backend_types.Png ]
+    ~version_policy:Runtime_entry.No_version_gate
+    (make_backend ~id ~calls:(ref 0)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+         Eio.Promise.resolve resolve_started ();
+         Fun.protect
+           ~finally:(fun () ->
+             alive_during_backend_unwind :=
+               Option.fold ~none:false ~some:Sys.file_exists !staged_path)
+           (fun () -> Eio.Fiber.await_cancel ())));
+  Eio_posix.run @@ fun env ->
+  (match
+     Eio.Switch.run (fun sw ->
+         let prepared =
+           match
+             Runtime_dispatch.Private.prepare_with_input_hooks ~sw ~env
+               ~limits:attachment_limits ~backend_id:id
+               ~on_staged_file:(fun path _ -> staged_path := Some path)
+               ~on_cleanup_attempt:(fun () -> incr cleanup_attempts)
+               (spec ~working_dir:temp_dir ~attachments:[ attachment ] ())
+           with
+           | Ok prepared -> prepared
+           | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+         in
+         Eio.Fiber.fork ~sw (fun () ->
+             ignore
+               (Runtime_dispatch.execute_prepared_detailed ~sw ~env prepared));
+         Eio.Promise.await started;
+         Eio.Switch.fail sw Test_switch_cancelled)
+   with
+  | exception Test_switch_cancelled -> ()
+  | exception error -> raise error
+  | () -> Alcotest.fail "active-owner switch cancellation did not propagate");
+  Alcotest.(check bool)
+    "active backend unwind sees its sealed input" true
+    !alive_during_backend_unwind;
+  Alcotest.(check int) "execution owner performs cleanup once" 1
+    !cleanup_attempts;
+  Option.iter
+    (fun path ->
+      Alcotest.(check bool)
+        "execution owner removes sealed file after unwind" false
+        (Sys.file_exists path))
+    !staged_path
+
+let test_cleanup_retries_are_bounded_and_reported () =
+  with_registry @@ fun () ->
+  with_temp_dir "cleanup-retries" @@ fun temp_dir ->
+  let png = "\x89PNG\r\n\x1a\ncleanup retry bytes" in
+  write_binary_file (Filename.concat temp_dir "image.png") png;
+  let attachment =
+    Backend_types.
+      {
+        id = "image";
+        path = "image.png";
+        media_type = Png;
+        sha256 = Digestif.SHA256.(to_hex (digest_string png));
+        size_bytes = String.length png;
+      }
+  in
+  let attachment_limits =
+    Task_preflight.
+      {
+        max_attachments = 1;
+        max_file_size_bytes = 128;
+        max_total_size_bytes = 128;
+      }
+  in
+  let id = "dispatch-cleanup-transient" in
+  register_pair ~id ~media_types:[ Backend_types.Png ]
+    ~version_policy:Runtime_entry.No_version_gate
+    (make_backend ~id ~calls:(ref 0)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let cleanup_attempts = ref 0 in
+  let staged_path = ref None in
+  let handle =
+    Runtime_dispatch.Private.start_task_with_input_hooks ~sw ~env
+      ~limits:attachment_limits ~backend_id:id
+      ~on_staged_file:(fun path _ -> staged_path := Some path)
+      ~on_cleanup_attempt:(fun () ->
+        incr cleanup_attempts;
+        if !cleanup_attempts < Runtime_dispatch.Private.cleanup_retry_limit then
+          raise (Sys_error "injected transient cleanup failure"))
+      (spec ~working_dir:temp_dir ~attachments:[ attachment ] ())
+  in
+  (match Runtime_dispatch.Private.await_detailed handle with
+  | Ok execution ->
+      Alcotest.(check bool)
+        "transient cleanup succeeds" true
+        (execution.Backend_types.cleanup_status = Backend_types.Cleanup_succeeded)
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error));
+  Alcotest.(check int)
+    "cleanup retries stop on the bounded successful attempt"
+    Runtime_dispatch.Private.cleanup_retry_limit !cleanup_attempts;
+  Option.iter
+    (fun path ->
+      Alcotest.(check bool)
+        "transient retry removes sealed file" false (Sys.file_exists path))
+    !staged_path
+
+let test_persistent_cleanup_failure_preserves_terminal_semantics () =
+  with_registry @@ fun () ->
+  with_temp_dir "cleanup-terminal-semantics" @@ fun temp_dir ->
+  let png = "\x89PNG\r\n\x1a\npersistent cleanup bytes" in
+  write_binary_file (Filename.concat temp_dir "image.png") png;
+  let attachment =
+    Backend_types.
+      {
+        id = "image";
+        path = "image.png";
+        media_type = Png;
+        sha256 = Digestif.SHA256.(to_hex (digest_string png));
+        size_bytes = String.length png;
+      }
+  in
+  let attachment_limits =
+    Task_preflight.
+      {
+        max_attachments = 1;
+        max_file_size_bytes = 128;
+        max_total_size_bytes = 128;
+      }
+  in
+  with_captured_diagnostics @@ fun diagnostics ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let assert_cleanup_warning label staged_path =
+    let messages = diagnostic_messages diagnostics in
+    Alcotest.(check bool)
+      (label ^ " emits fixed cleanup warning") true
+      (List.mem "sealed attachment cleanup failed after bounded retries" messages);
+    List.iter
+      (fun message ->
+        Alcotest.(check bool)
+          (label ^ " warning omits staged path") false
+          (contains message staged_path);
+        Alcotest.(check bool)
+          (label ^ " warning omits injected detail") false
+          (contains message "cleanup-secret"))
+      messages;
+    diagnostics := []
+  in
+  let cleanup_hook attempts () =
+    incr attempts;
+    raise (Sys_error "cleanup-secret /private/cleanup-secret")
+  in
+  let start_with_hooks ~id ?timeout ?json_schema backend =
+    let attempts = ref 0 in
+    let staged_path = ref None in
+    register_pair ~id ~media_types:[ Backend_types.Png ]
+      ~version_policy:Runtime_entry.No_version_gate backend;
+    let handle =
+      Runtime_dispatch.Private.start_task_with_input_hooks ~sw ~env
+        ~limits:attachment_limits ~backend_id:id
+        ~on_staged_file:(fun path _ -> staged_path := Some path)
+        ~on_cleanup_attempt:(cleanup_hook attempts)
+        (spec ~working_dir:temp_dir ~attachments:[ attachment ] ?timeout
+           ?json_schema ())
+    in
+    (handle, attempts, staged_path)
+  in
+  let cleanup_leaked_path = function
+    | Some path -> remove_tree (Filename.dirname path)
+    | None -> Alcotest.fail "cleanup failure test captured no staged path"
+  in
+  let require_staged_path = function
+    | Some path -> path
+    | None -> Alcotest.fail "cleanup failure test captured no staged path"
+  in
+
+  let timeout_id = "dispatch-cleanup-timeout" in
+  let timeout_handle, timeout_attempts, timeout_path =
+    start_with_hooks ~id:timeout_id ~timeout:0.01
+      (make_backend ~id:timeout_id ~calls:(ref 0)
+         (fun ~sw:_ ~env ?on_raw_line:_ _ ->
+           Eio.Time.sleep (Eio.Stdenv.clock env) 30.0;
+           success ()))
+  in
+  (match Runtime_dispatch.Private.await_detailed timeout_handle with
+  | Ok execution ->
+      Alcotest.(check bool)
+        "deadline remains timed out" true
+        (execution.Backend_types.final_result.status = Backend_types.Timeout);
+      Alcotest.(check bool)
+        "timeout reports cleanup failure" true
+        (execution.cleanup_status = Backend_types.Cleanup_failed)
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error));
+  Alcotest.(check int) "timeout cleanup retries are bounded"
+    Runtime_dispatch.Private.cleanup_retry_limit !timeout_attempts;
+  let timeout_path = require_staged_path !timeout_path in
+  assert_cleanup_warning "timeout" timeout_path;
+  cleanup_leaked_path (Some timeout_path);
+
+  let cancellation_id = "dispatch-cleanup-cancellation" in
+  let cancellation_started, resolve_cancellation_started = Eio.Promise.create () in
+  let cancellation_handle, cancellation_attempts, cancellation_path =
+    start_with_hooks ~id:cancellation_id
+      (make_backend ~id:cancellation_id ~calls:(ref 0)
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+           Eio.Promise.resolve resolve_cancellation_started ();
+           Eio.Fiber.await_cancel ()))
+  in
+  Eio.Promise.await cancellation_started;
+  Runtime_dispatch.Private.cancel cancellation_handle;
+  (match Runtime_dispatch.Private.await_detailed cancellation_handle with
+  | Ok execution ->
+      Alcotest.(check bool)
+        "user cancellation remains cancelled" true
+        (execution.Backend_types.final_result.status = Backend_types.Cancelled);
+      Alcotest.(check bool)
+        "cancellation reports cleanup failure" true
+        (execution.cleanup_status = Backend_types.Cleanup_failed)
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error));
+  Alcotest.(check int) "cancellation cleanup retries are bounded"
+    Runtime_dispatch.Private.cleanup_retry_limit !cancellation_attempts;
+  let cancellation_path = require_staged_path !cancellation_path in
+  assert_cleanup_warning "cancellation" cancellation_path;
+  cleanup_leaked_path (Some cancellation_path);
+
+  let failed_id = "dispatch-cleanup-failed-result" in
+  let failed_handle, failed_attempts, failed_path =
+    start_with_hooks ~id:failed_id
+      (make_backend ~id:failed_id ~calls:(ref 0)
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+           Backend_types.make_task_result
+             ~status:(Backend_types.Failed "public task failure") ()))
+  in
+  (match Runtime_dispatch.Private.await_detailed failed_handle with
+  | Ok execution ->
+      Alcotest.(check bool)
+        "backend failure remains the terminal result" true
+        (execution.Backend_types.final_result.status
+        = Backend_types.Failed "public task failure");
+      Alcotest.(check bool)
+        "backend failure reports cleanup failure" true
+        (execution.cleanup_status = Backend_types.Cleanup_failed)
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error));
+  Alcotest.(check int) "failed-result cleanup retries are bounded"
+    Runtime_dispatch.Private.cleanup_retry_limit !failed_attempts;
+  let failed_path = require_staged_path !failed_path in
+  assert_cleanup_warning "failed result" failed_path;
+  cleanup_leaked_path (Some failed_path);
+
+  let schema_id = "dispatch-cleanup-schema-error" in
+  let schema =
+    `Assoc
+      [
+        ("type", `String "object");
+        ("required", `List [ `String "required_value" ]);
+      ]
+  in
+  let schema_handle, schema_attempts, schema_path =
+    start_with_hooks ~id:schema_id ~json_schema:schema
+      (make_backend ~id:schema_id ~calls:(ref 0)
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ~text:"not-json" ()))
+  in
+  (match Runtime_dispatch.Private.await_detailed schema_handle with
+  | Error
+      (Runtime_dispatch.Execution_failure
+         (Backend_types.Schema_retry_failed { execution; _ })) ->
+      Alcotest.(check int)
+        "schema failure retains both completed attempts" 2
+        (List.length execution.attempts);
+      Alcotest.(check bool)
+        "schema failure reports cleanup failure" true
+        (execution.cleanup_status = Backend_types.Cleanup_failed)
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error)
+  | Ok _ -> Alcotest.fail "schema failure unexpectedly succeeded");
+  Alcotest.(check int) "schema-error cleanup retries are bounded"
+    Runtime_dispatch.Private.cleanup_retry_limit !schema_attempts;
+  let schema_path = require_staged_path !schema_path in
+  assert_cleanup_warning "schema error" schema_path;
+  cleanup_leaked_path (Some schema_path);
+
+  let fatal_id = "dispatch-cleanup-fatal" in
+  let fatal_handle, fatal_attempts, fatal_path =
+    start_with_hooks ~id:fatal_id
+      (make_backend ~id:fatal_id ~calls:(ref 0)
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> raise Out_of_memory))
+  in
+  (match Runtime_dispatch.Private.await_detailed fatal_handle with
+  | exception Out_of_memory -> ()
+  | exception error -> Alcotest.fail (Printexc.to_string error)
+  | Ok _ -> Alcotest.fail "fatal cleanup failure changed exception to success"
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error));
+  Alcotest.(check int) "fatal cleanup retries are bounded"
+    Runtime_dispatch.Private.cleanup_retry_limit !fatal_attempts;
+  let fatal_path = require_staged_path !fatal_path in
+  assert_cleanup_warning "fatal" fatal_path;
+  cleanup_leaked_path (Some fatal_path)
+
+let test_persistent_abandoned_cleanup_is_bounded_and_sanitized () =
+  with_registry @@ fun () ->
+  with_temp_dir "cleanup-abandoned-failure" @@ fun temp_dir ->
+  let png = "\x89PNG\r\n\x1a\nabandoned cleanup failure" in
+  write_binary_file (Filename.concat temp_dir "image.png") png;
+  let attachment =
+    Backend_types.
+      {
+        id = "image";
+        path = "image.png";
+        media_type = Png;
+        sha256 = Digestif.SHA256.(to_hex (digest_string png));
+        size_bytes = String.length png;
+      }
+  in
+  let attachment_limits =
+    Task_preflight.
+      {
+        max_attachments = 1;
+        max_file_size_bytes = 128;
+        max_total_size_bytes = 128;
+      }
+  in
+  let id = "dispatch-cleanup-abandoned-failure" in
+  register_pair ~id ~media_types:[ Backend_types.Png ]
+    ~version_policy:Runtime_entry.No_version_gate
+    (make_backend ~id ~calls:(ref 0)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
+  let attempts = ref 0 in
+  let staged_path = ref None in
+  with_captured_diagnostics @@ fun diagnostics ->
+  Eio_posix.run (fun env ->
+      Eio.Switch.run (fun sw ->
+          match
+            Runtime_dispatch.Private.prepare_with_input_hooks ~sw ~env
+              ~limits:attachment_limits ~backend_id:id
+              ~on_staged_file:(fun path _ -> staged_path := Some path)
+              ~on_cleanup_attempt:(fun () ->
+                incr attempts;
+                raise (Sys_error "cleanup-secret /private/cleanup-secret"))
+              (spec ~working_dir:temp_dir ~attachments:[ attachment ] ())
+          with
+          | Ok _prepared -> ()
+          | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)));
+  Alcotest.(check int) "abandonment cleanup retries are bounded"
+    Runtime_dispatch.Private.cleanup_retry_limit !attempts;
+  let path =
+    match !staged_path with
+    | Some path -> path
+    | None -> Alcotest.fail "abandonment captured no staged path"
+  in
+  let messages = diagnostic_messages diagnostics in
+  Alcotest.(check bool)
+    "abandonment emits fixed cleanup warning" true
+    (List.mem "sealed attachment cleanup failed after bounded retries" messages);
+  List.iter
+    (fun message ->
+      Alcotest.(check bool)
+        "abandonment warning omits staged path" false (contains message path);
+      Alcotest.(check bool)
+        "abandonment warning omits injected error" false
+        (contains message "cleanup-secret"))
+    messages;
+  remove_tree (Filename.dirname path)
 
 let test_by_name_wrapper_resolves_override_at_each_call () =
   with_registry @@ fun () ->
@@ -1560,7 +2099,153 @@ let test_dispatch_normalizes_cancellation () =
       Alcotest.failf "cancellation was converted to %s"
         (Runtime_dispatch.render_error error)
 
-let test_prepared_no_context_detailed_projection_matches_legacy () =
+let test_prepared_concurrent_claim_invokes_backend_once () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let id = "dispatch-prepared-concurrent-claim" in
+  let calls = ref 0 in
+  let availability_calls = ref 0 in
+  let started, resolve_started = Eio.Promise.create () in
+  let finish, resolve_finish = Eio.Promise.create () in
+  register_pair ~id ~version_policy:Runtime_entry.No_version_gate
+    (make_backend ~id ~calls
+       ~availability:(fun ~sw:_ ~env:_ ->
+         incr availability_calls;
+         true)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+         Eio.Promise.resolve resolve_started ();
+         Eio.Promise.await finish;
+         success ()));
+  let prepared =
+    match Runtime_dispatch.prepare ~sw ~env ~limits ~backend_id:id (spec ()) with
+    | Ok prepared -> prepared
+    | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+  in
+  let first_result, resolve_first_result = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+      Eio.Promise.resolve resolve_first_result
+        (Runtime_dispatch.execute_prepared_detailed ~sw ~env prepared));
+  Eio.Promise.await started;
+  (match Runtime_dispatch.execute_prepared ~sw ~env prepared with
+  | Error Runtime_dispatch.Prepared_already_consumed -> ()
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "concurrent secondary execution unexpectedly ran");
+  Alcotest.(check int)
+    "secondary claim performs no availability check" 1 !availability_calls;
+  Alcotest.(check int) "one backend call while first owner is active" 1 !calls;
+  Eio.Promise.resolve resolve_finish ();
+  (match Eio.Promise.await first_result with
+  | Ok execution ->
+      Alcotest.(check bool)
+        "first owner succeeds" true
+        (execution.Backend_types.final_result.status = Backend_types.Success);
+      Alcotest.(check bool)
+        "attachment-free execution requires no cleanup" true
+        (execution.cleanup_status = Backend_types.Cleanup_not_required)
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error));
+  Alcotest.(check int) "exactly one backend call" 1 !calls
+
+let test_prepared_sequential_cross_calls_are_rejected () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let id = "dispatch-prepared-sequential-claim" in
+  let calls = ref 0 in
+  let availability_calls = ref 0 in
+  register_pair ~id ~version_policy:Runtime_entry.No_version_gate
+    (make_backend ~id ~calls
+       ~availability:(fun ~sw:_ ~env:_ ->
+         incr availability_calls;
+         true)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
+  let prepare () =
+    match Runtime_dispatch.prepare ~sw ~env ~limits ~backend_id:id (spec ()) with
+    | Ok prepared -> prepared
+    | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+  in
+  let detailed_first = prepare () in
+  (match Runtime_dispatch.execute_prepared_detailed ~sw ~env detailed_first with
+  | Ok _ -> ()
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error));
+  (match Runtime_dispatch.execute_prepared ~sw ~env detailed_first with
+  | Error Runtime_dispatch.Prepared_already_consumed -> ()
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "legacy call reran detailed-owned prepared value");
+  let legacy_first = prepare () in
+  (match Runtime_dispatch.execute_prepared ~sw ~env legacy_first with
+  | Ok _ -> ()
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_error error));
+  (match Runtime_dispatch.execute_prepared_detailed ~sw ~env legacy_first with
+  | Error (Runtime_dispatch.Dispatch_failure Prepared_already_consumed) -> ()
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_detailed_error error)
+  | Ok _ -> Alcotest.fail "detailed call reran legacy-owned prepared value");
+  Alcotest.(check int) "two prepared owners make two calls" 2 !calls;
+  Alcotest.(check int)
+    "rejected cross-calls perform no extra availability checks" 2
+    !availability_calls
+
+let test_prepared_cross_api_claim_stress () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let id = "dispatch-prepared-cross-api-stress" in
+  let calls = ref 0 in
+  let availability_calls = ref 0 in
+  register_pair ~id ~version_policy:Runtime_entry.No_version_gate
+    (make_backend ~id ~calls
+       ~availability:(fun ~sw:_ ~env:_ ->
+         incr availability_calls;
+         true)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
+  let iterations = 64 in
+  for iteration = 1 to iterations do
+    let prepared =
+      match Runtime_dispatch.prepare ~sw ~env ~limits ~backend_id:id (spec ()) with
+      | Ok prepared -> prepared
+      | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+    in
+    let gate, open_gate = Eio.Promise.create () in
+    let legacy_result, resolve_legacy_result = Eio.Promise.create () in
+    let detailed_result, resolve_detailed_result = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.await gate;
+        let won =
+          match Runtime_dispatch.execute_prepared ~sw ~env prepared with
+          | Ok _ -> true
+          | Error Runtime_dispatch.Prepared_already_consumed -> false
+          | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+        in
+        Eio.Promise.resolve resolve_legacy_result won);
+    Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.await gate;
+        let won =
+          match
+            Runtime_dispatch.execute_prepared_detailed ~sw ~env prepared
+          with
+          | Ok _ -> true
+          | Error
+              (Runtime_dispatch.Dispatch_failure
+                 Runtime_dispatch.Prepared_already_consumed) ->
+              false
+          | Error error ->
+              Alcotest.fail (Runtime_dispatch.render_detailed_error error)
+        in
+        Eio.Promise.resolve resolve_detailed_result won);
+    Eio.Fiber.yield ();
+    Eio.Promise.resolve open_gate ();
+    let legacy_won = Eio.Promise.await legacy_result in
+    let detailed_won = Eio.Promise.await detailed_result in
+    if legacy_won = detailed_won then
+      Alcotest.failf "iteration %d did not select exactly one owner" iteration
+  done;
+  Alcotest.(check int) "stress invokes backend once per prepared value" iterations
+    !calls;
+  Alcotest.(check int)
+    "stress performs no availability checks from rejected claims" iterations
+    !availability_calls
+
+let test_prepared_no_context_projects_single_detailed_outcome () =
   with_registry @@ fun () ->
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -1582,8 +2267,7 @@ let test_prepared_no_context_detailed_projection_matches_legacy () =
   let projected =
     Runtime_dispatch.Private.project_prepared_detailed_outcome detailed
   in
-  let legacy = Runtime_dispatch.execute_prepared ~sw ~env prepared in
-  Alcotest.(check int) "both executions make two calls" 4 !calls;
+  Alcotest.(check int) "single detailed execution makes two calls" 2 !calls;
   Alcotest.(check bool)
     "detailed result records completed timeout retry" true
     (match detailed with
@@ -1602,9 +2286,9 @@ let test_prepared_no_context_detailed_projection_matches_legacy () =
         false);
   Alcotest.(check bool)
     "no-context projection remains an error" true
-    (Result.is_error projected);
-  Alcotest.(check bool)
-    "prepared detailed projection matches legacy" true (projected = legacy)
+    (match projected with
+    | Error (Runtime_dispatch.Schema_enforcement_failed _) -> true
+    | Error _ | Ok _ -> false)
 
 let test_validator_wrapper_dispatches_read_only_task () =
   with_registry @@ fun () ->
@@ -1661,6 +2345,9 @@ let () =
           Alcotest.test_case
             "staging failure never checks availability or calls" `Quick
             test_staging_failure_never_checks_availability_or_calls_backend;
+          Alcotest.test_case
+            "capability rejection precedes attachment staging" `Quick
+            test_capability_rejection_precedes_attachment_staging;
           Alcotest.test_case "hardened Codex uses proven media/web transport"
             `Quick test_hardened_codex_dispatch_uses_proven_media_web_transport;
         ] );
@@ -1674,8 +2361,8 @@ let () =
             "dispatch reuses one sealed attachment set across retry" `Quick
             test_dispatch_reuses_one_sealed_attachment_set_across_retry;
           Alcotest.test_case
-            "dispatch sanitizes cleanup failure and retries on release" `Quick
-            test_dispatch_sanitizes_cleanup_failure_and_retries_on_switch_release;
+            "dispatch sanitizes persistent cleanup failure" `Quick
+            test_dispatch_sanitizes_persistent_cleanup_failure;
           Alcotest.test_case
              "sealed attachments clean up on cancellation and fatal exception"
              `Quick
@@ -1686,6 +2373,17 @@ let () =
           Alcotest.test_case
             "abandoned prepared attachments clean up on switch release" `Quick
             test_abandoned_prepared_attachments_cleanup_on_switch_release;
+          Alcotest.test_case
+            "switch release does not clean under active execution owner" `Quick
+            test_switch_release_does_not_cleanup_under_active_execution_owner;
+          Alcotest.test_case "cleanup retries are bounded and reported" `Quick
+            test_cleanup_retries_are_bounded_and_reported;
+          Alcotest.test_case
+            "persistent cleanup failure preserves terminal semantics" `Quick
+            test_persistent_cleanup_failure_preserves_terminal_semantics;
+          Alcotest.test_case
+            "persistent abandoned cleanup is bounded and sanitized" `Quick
+            test_persistent_abandoned_cleanup_is_bounded_and_sanitized;
           Alcotest.test_case "by-name wrapper resolves call-time override"
             `Quick test_by_name_wrapper_resolves_override_at_each_call;
           Alcotest.test_case "by-name wrapper rejects malformed static id"
@@ -1703,8 +2401,14 @@ let () =
             test_dispatch_reraises_fatal_exceptions;
           Alcotest.test_case "cancellation is normalized" `Quick
             test_dispatch_normalizes_cancellation;
-          Alcotest.test_case "prepared no-context projection" `Quick
-            test_prepared_no_context_detailed_projection_matches_legacy;
+          Alcotest.test_case "prepared concurrent claim invokes backend once"
+            `Quick test_prepared_concurrent_claim_invokes_backend_once;
+          Alcotest.test_case "prepared cross-api atomic claim stress" `Quick
+            test_prepared_cross_api_claim_stress;
+          Alcotest.test_case "prepared sequential cross-calls are rejected"
+            `Quick test_prepared_sequential_cross_calls_are_rejected;
+          Alcotest.test_case "prepared no-context single projection" `Quick
+            test_prepared_no_context_projects_single_detailed_outcome;
           Alcotest.test_case "validator wrapper dispatches read-only" `Quick
             test_validator_wrapper_dispatches_read_only_task;
         ] );

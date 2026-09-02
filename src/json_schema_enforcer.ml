@@ -249,6 +249,7 @@ let make_execution ~clock ~started_at ~attempts ~final_result =
            (fun (attempt : Backend_types.task_attempt) -> attempt.result.cost)
            attempts);
     final_session_id = final_session_id attempts;
+    cleanup_status = Backend_types.Cleanup_not_required;
   }
 
 let timeout_before_retry ~clock ~started_at attempts =

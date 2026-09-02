@@ -79,6 +79,24 @@ val authorized_attachment_paths :
   web_access_policy:Backend_types.web_access ->
   (string list, string) result
 
+(** Delivery-aware sealed transport input selected for one backend attempt. *)
+type sealed_delivery = {
+  attachment_delivery : Backend_types.attachment_delivery;
+  attachment_paths : string list;
+}
+
+(** [sealed_attachment_delivery context ...] validates the current requested
+    delivery against the immutable central authorization. Upload attempts return
+    the exact sealed list; session-reuse attempts return [[]]. Adapters should
+    prefer this accessor over independently combining {!requested_delivery} and
+    {!authorized_attachment_paths}. *)
+val sealed_attachment_delivery :
+  t ->
+  backend_id:string ->
+  attachment_references:Backend_types.media_attachment list ->
+  web_access_policy:Backend_types.web_access ->
+  (sealed_delivery, string) result
+
 module Private : sig
   (** Enforcer-owned setter. Backend transports should use {!requested_delivery}
       and must not rewrite the selected policy. *)

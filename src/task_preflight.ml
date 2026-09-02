@@ -219,15 +219,21 @@ type prepared_inputs = {
   staging_directory : string option;
   staged_attachments : prepared_attachment list;
   released : bool Atomic.t;
+  on_cleanup_attempt : unit -> unit;
 }
 
 type staging_hooks = {
   on_staging_directory : string -> unit;
   on_staged_file : string -> Unix.file_descr -> unit;
+  on_cleanup_attempt : unit -> unit;
 }
 
 let no_staging_hooks =
-  { on_staging_directory = (fun _ -> ()); on_staged_file = (fun _ _ -> ()) }
+  {
+    on_staging_directory = (fun _ -> ());
+    on_staged_file = (fun _ _ -> ());
+    on_cleanup_attempt = (fun () -> ());
+  }
 
 let deleted_path_suffix = " (deleted)"
 
@@ -633,16 +639,22 @@ let cleanup_staging_directory staging_directory =
 let release_inputs prepared =
   if Atomic.exchange prepared.released true then Ok ()
   else
-    match prepared.staging_directory with
-    | None -> Ok ()
-    | Some staging_directory -> (
-        match
-          cleanup_staged_paths staging_directory prepared.staged_attachments
-        with
-        | Ok () -> Ok ()
-        | Error _ as error ->
-            Atomic.set prepared.released false;
-            error)
+    let result =
+      try
+        prepared.on_cleanup_attempt ();
+        match prepared.staging_directory with
+        | None -> Ok ()
+        | Some staging_directory ->
+            cleanup_staged_paths staging_directory prepared.staged_attachments
+      with
+      | (Out_of_memory | Stack_overflow | Sys.Break) as fatal -> raise fatal
+      | _ -> Error (Input Attachment_cleanup_failed)
+    in
+    match result with
+    | Ok () -> Ok ()
+    | Error _ as error ->
+        Atomic.set prepared.released false;
+        error
 
 let create_staging_directory ~workspace ~hooks =
   let created = ref None in
@@ -692,6 +704,7 @@ let prepare_inputs_with_hooks ~hooks ~limits spec =
             staging_directory = None;
             staged_attachments = [];
             released = Atomic.make false;
+            on_cleanup_attempt = hooks.on_cleanup_attempt;
           })
   else
     with_workspace_descriptor spec.working_dir (fun workspace ->
@@ -711,6 +724,7 @@ let prepare_inputs_with_hooks ~hooks ~limits spec =
                 staging_directory = Some staging_directory;
                 staged_attachments;
                 released = Atomic.make false;
+                on_cleanup_attempt = hooks.on_cleanup_attempt;
               }
         | Error _ as error -> (
             match cleanup_staging_directory staging_directory with
@@ -846,8 +860,9 @@ module Private = struct
   let active prepared = not (Atomic.get prepared.released)
 
   let prepare_inputs_with_hooks ?(on_staging_directory = fun _ -> ())
-      ?(on_staged_file = fun _ _ -> ()) ~limits spec =
+      ?(on_staged_file = fun _ _ -> ()) ?(on_cleanup_attempt = fun () -> ())
+      ~limits spec =
     prepare_inputs_with_hooks
-      ~hooks:{ on_staging_directory; on_staged_file }
+      ~hooks:{ on_staging_directory; on_staged_file; on_cleanup_attempt }
       ~limits spec
 end

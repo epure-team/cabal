@@ -96,6 +96,36 @@ let authorized_attachment_paths context ~backend_id ~attachment_references
       else Error authorization_mismatch
   | Some _ -> Error authorization_mismatch
 
+type sealed_delivery = {
+  attachment_delivery : Backend_types.attachment_delivery;
+  attachment_paths : string list;
+}
+
+let sealed_attachment_delivery context ~backend_id ~attachment_references
+    ~web_access_policy =
+  match
+    authorized_attachment_paths context ~backend_id ~attachment_references
+      ~web_access_policy
+  with
+  | Error _ as error -> error
+  | Ok authorized_paths -> (
+      match requested_delivery context with
+      | None -> Error "central attempt delivery policy is required"
+      | Some delivery
+        when delivery.Backend_types.attachment_references = attachment_references
+             && delivery.web_access_policy = web_access_policy ->
+          let attachment_paths =
+            match delivery.attachment_delivery with
+            | Backend_types.Upload_attachments -> authorized_paths
+            | Backend_types.Reuse_session_attachments -> []
+          in
+          Ok
+            {
+              attachment_delivery = delivery.attachment_delivery;
+              attachment_paths;
+            }
+      | Some _ -> Error authorization_mismatch)
+
 module Private = struct
   let set_requested_delivery context delivery =
     Atomic.set context.requested_delivery (Some delivery)

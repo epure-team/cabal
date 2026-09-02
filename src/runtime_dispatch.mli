@@ -10,9 +10,10 @@
     Every call resolves one bound {!Registry.Validated} entry snapshot. Raw
     runtime-only registrations are rejected and no independent descriptor lookup
     can lend static claims to an override. Dispatch applies the caller's
-    explicit {!Task_preflight.limits}, checks the entry's effective
-    capabilities, applies its installed-version policy, checks availability, and
-    only then invokes {!Json_schema_enforcer.run_task}. Whole-entry replacements
+    explicit {!Task_preflight.limits}, checks the entry's effective capabilities
+    before allocating or reading sealed inputs, applies its installed-version
+    policy, checks availability, and only then invokes
+    {!Json_schema_enforcer.run_task}. Whole-entry replacements
     installed after a dispatcher/completer is constructed are visible on the
     next invocation. The resolved entry and one sealed attachment set are
     retained across the complete schema-enforcement attempt, including retry,
@@ -28,6 +29,7 @@ type error =
   | Version_check_failed
   | Backend_unavailable
   | Availability_check_failed
+  | Prepared_already_consumed
   | Backend_execution_failed
   | Schema_enforcement_failed of string
       (** Untrusted low-level error. Use {!render_error}, which redacts it,
@@ -67,15 +69,17 @@ val render_error : error -> string
     serialized into this string. *)
 val render_detailed_error : detailed_error -> string
 
-(** Immutable dispatch snapshot validated against one resolved registry entry.
-    It owns any sealed attachment artifacts until execution or switch release.
-*)
+(** Immutable, one-shot dispatch snapshot validated against one resolved
+    registry entry. It owns any sealed attachment artifacts until its sole
+    execution or switch release. *)
 type prepared
 
-(** Resolve, preflight, seal attachment bytes, version-check, and
-    availability-check a task exactly once, returning the entry snapshot used by
-    execution and retries. Abandoned prepared values are cleaned when [sw]
-    releases. *)
+(** Resolve, validate capabilities, preflight and seal attachment bytes,
+    version-check, and availability-check a task exactly once, returning the
+    entry snapshot used by execution and retries. Capability rejection occurs
+    before staging allocation or attachment reads. Abandoned pending values are
+    cleaned when [sw] releases; an executing owner retains sole cleanup
+    responsibility. *)
 val prepare :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
@@ -86,8 +90,11 @@ val prepare :
   (prepared, error) result
 
 (** Execute a prepared task without consulting mutable registry state again.
-    Sealed artifacts are removed after every attempt and process cleanup path.
-*)
+    This and {!execute_prepared_detailed} share one atomic claim: exactly one
+    call may consume a [prepared], including when it has no attachments. Every
+    later or concurrent call returns [Prepared_already_consumed] before backend
+    or process side effects. Sealed cleanup uses a fixed bounded retry policy and
+    completes before the outcome is returned. *)
 val execute_prepared :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
@@ -98,7 +105,10 @@ val execute_prepared :
 
 (** Execute one prepared immutable backend snapshot through
     {!Json_schema_enforcer.run_task_detailed}. Registry state is not consulted
-    between attempts. *)
+    between attempts. The returned execution reports sanitized central cleanup
+    status. Persistent cleanup failure does not replace a non-success terminal
+    result, a structured schema-execution failure, or a fatal exception being
+    propagated. Shares the one-shot claim documented on {!execute_prepared}. *)
 val execute_prepared_detailed :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
@@ -113,6 +123,34 @@ val execute_prepared_detailed :
 *)
 module Private : sig
   type task_handle
+
+  val cleanup_retry_limit : int
+
+  (** Deterministic sealed-input lifecycle seam for tests. *)
+  val prepare_with_input_hooks :
+    sw:Eio.Switch.t ->
+    env:Eio_unix.Stdenv.base ->
+    limits:Task_preflight.limits ->
+    backend_id:string ->
+    ?context:Task_execution_context.t ->
+    ?on_staging_directory:(string -> unit) ->
+    ?on_staged_file:(string -> Unix.file_descr -> unit) ->
+    ?on_cleanup_attempt:(unit -> unit) ->
+    Backend_types.task_spec ->
+    (prepared, error) result
+
+  val start_task_with_input_hooks :
+    sw:Eio.Switch.t ->
+    env:Eio_unix.Stdenv.base ->
+    limits:Task_preflight.limits ->
+    backend_id:string ->
+    ?on_event:(Task_event.t -> unit) ->
+    ?on_raw_line:(string -> unit) ->
+    ?on_staging_directory:(string -> unit) ->
+    ?on_staged_file:(string -> Unix.file_descr -> unit) ->
+    ?on_cleanup_attempt:(unit -> unit) ->
+    Backend_types.task_spec ->
+    task_handle
 
   val start_task :
     sw:Eio.Switch.t ->

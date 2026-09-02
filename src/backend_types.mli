@@ -470,6 +470,16 @@ type task_attempt = {
       (** Requested media/web intent exposed to the backend before this call. *)
 }
 
+(** Sanitized central sealed-input cleanup telemetry. [Cleanup_not_required]
+    means no sealed artifact needed removal (for example, direct use of
+    {!Json_schema_enforcer} or an attachment-free central invocation).
+    [Cleanup_succeeded] and [Cleanup_failed] report the bounded central cleanup
+    outcome without paths or exception details. *)
+type cleanup_status =
+  | Cleanup_not_required
+  | Cleanup_succeeded
+  | Cleanup_failed
+
 (** Detailed result of one schema-enforcer invocation.
 
     [attempts] contains every completed backend call in order. [total_elapsed]
@@ -486,6 +496,8 @@ type task_execution = {
   total_cost : cost option;  (** Field-wise aggregate over attempt costs. *)
   final_session_id : string option;
       (** Last non-empty session id across [attempts]. *)
+  cleanup_status : cleanup_status;
+      (** Final sanitized cleanup status for central prepared inputs. *)
 }
 
 (** Classified failure of the invoked corrective attempt.

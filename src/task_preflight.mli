@@ -188,6 +188,7 @@ module Private : sig
   val prepare_inputs_with_hooks :
     ?on_staging_directory:(string -> unit) ->
     ?on_staged_file:(string -> Unix.file_descr -> unit) ->
+    ?on_cleanup_attempt:(unit -> unit) ->
     limits:limits ->
     Backend_types.task_spec ->
     (prepared_inputs, error) result

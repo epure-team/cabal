@@ -242,12 +242,18 @@ type task_attempt = {
   delivery : attempt_delivery;
 }
 
+type cleanup_status =
+  | Cleanup_not_required
+  | Cleanup_succeeded
+  | Cleanup_failed
+
 type task_execution = {
   final_result : task_result;
   attempts : task_attempt list;
   total_elapsed : duration;
   total_cost : cost option;
   final_session_id : string option;
+  cleanup_status : cleanup_status;
 }
 
 type retry_failure =
