@@ -88,13 +88,27 @@ standalone OCaml library and as the backend abstraction layer vendored under
   process with `digestif`; do not replace this with a subprocess or add base64.
 - Prepared inputs use an unpredictable private `0o700` task directory outside
   the workspace and atomically created `0o600` files with the declared PNG/JPEG
-  extension. Never validate and then reopen/copy the caller path.
+  extension. Never validate and then reopen/copy the caller path. Fail closed on
+  platforms/workspace layouts where descriptor-backed staging authorization
+  cannot be established.
+- Validate descriptor evidence and requested media/web/read-only/resume/schema
+  capability consistency before allocating staging or reading attachments.
 - `Runtime_dispatch` owns prepared inputs through the complete retry/process
   lifetime and carries their immutable backend/media/web authorization in
   `Task_execution_context.t`. Fresh retries reuse one staged set; resume reuse
-  retains references but emits no image paths. Cleanup must cover success,
-  failure, timeout, cancellation, fatal exceptions, abandoned prepared values,
-  and staging/cleanup failures.
+  retains references but emits no image paths. A prepared value is one-shot
+  across both execute APIs, including attachment-free tasks: only the atomic
+  execution owner may call the backend or clean active inputs; switch
+  abandonment cleanup may claim only a pending value.
+- Cleanup must cover success, failure, timeout, cancellation, fatal exceptions,
+  abandoned prepared values, and staging/cleanup failures. Retry cleanup only
+  with the fixed central bound, expose sanitized cleanup status on detailed
+  executions, and emit fixed diagnostics without paths or exception payloads.
+  Cleanup failure must not replace a non-success backend result, structured
+  schema failure, or a propagating fatal exception's identity.
+- Sealed staging protects against caller workspace path replacement and, through
+  permissions, accidental/cross-user reads. It does not defend against hostile
+  same-UID processes, privileged/system-level access, or a compromised OS.
 - Rendered preflight errors must never include raw attachment paths, digests, or
   bytes. Callers provide count/per-file/total limits; Cabal owns no product
   defaults.
@@ -110,7 +124,13 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Codex uploads only centrally sealed absolute paths and never original
   workspace paths. Sensitive low-level Codex calls without matching central
   authorization fail before config I/O/spawn; no-attachment `Web_disabled`
-  compatibility may remain. The adapter must not re-read `Backend_registry`.
+  compatibility may remain. The adapter must consume the generic central sealed
+  delivery accessor and must not re-read `Backend_registry` or reconstruct retry
+  delivery policy.
+- The Codex media/web probe must remain content-dependent: exact color assertions
+  for initial/new/resumed images, no `-i` on reuse, and exact official-page facts
+  plus public web lifecycle evidence. Keep subprocesses bounded and all
+  diagnostics fixed/sanitized; `--self-test` must exercise every mode validator.
 
 ## Json_schema_validator — Story #623
 

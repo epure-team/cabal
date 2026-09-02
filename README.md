@@ -427,16 +427,34 @@ Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec
 
 Preflight is host-neutral and does not choose limits. Render dispatch failures
 with `Runtime_dispatch.render_error`; its diagnostics exclude attachment paths,
-digests, bytes, and exception payloads. Invalid limits, inputs, or capabilities
-fail before any version process or availability side effect. For attachments,
-one opened descriptor/read establishes containment, regular-file status, size,
+digests, bytes, and exception payloads. Descriptor proof plus requested media,
+web, read-only, resume, and native-schema/runtime consistency gates run before
+staging allocation or attachment reads. Invalid limits and inputs also fail
+before any version process or availability side effect. For attachments, one
+opened descriptor/read establishes containment, regular-file status, size,
 SHA-256, media magic, and the exact staged bytes. Those bytes are written to
 unpredictably named `0o600` PNG/JPEG files in a private `0o700` task directory
-outside the workspace. The central execution context carries that opaque sealed
-set and immutable media/web authorization across all attempts; fresh retries
-reuse it, while resumed-session reuse emits no duplicate image flags. Cleanup
-precedes outcome delivery on success, failure, timeout, cancellation, and fatal
-exception paths. After preflight,
+outside the workspace. Unsupported staging platforms or workspace descriptor
+layouts fail closed rather than falling back to reopening caller paths.
+
+The staging threat model protects the backend transport from workspace path
+replacement after validation and limits accidental or cross-user reads through
+private permissions. It does not claim protection from a hostile process running
+as the same OS user, a privileged user, or a compromised operating system.
+
+The central execution context carries the opaque sealed set and immutable
+media/web authorization across all attempts; fresh retries reuse it, while
+resumed-session reuse emits no duplicate image flags. A
+`Runtime_dispatch.prepared` value is one-shot even with no attachments:
+`execute_prepared` and `execute_prepared_detailed` share one atomic claim, and
+secondary concurrent or sequential calls fail before backend/process effects.
+Pending abandonment and active execution have distinct cleanup ownership, so a
+switch release cannot remove an executing backend's inputs. Cleanup retries at
+most three times, emits only a fixed sanitized warning on persistent failure,
+and precedes outcome delivery or fatal propagation. Detailed results expose
+`cleanup_status`; cleanup failure does not replace a non-success backend result,
+structured schema failure, or the identity of a propagating fatal exception.
+After preflight,
 dispatch runs one bounded version command, rejects parseable versions below the
 descriptor baseline, and checks runtime availability before execution. Missing
 or unparseable version output keeps the compatibility skip policy; availability
@@ -453,13 +471,18 @@ I/O or spawn unless central dispatch installed the matching sealed authorization
 The adapter never consults mutable global registry state for that decision.
 
 For authenticated manual verification, install and authenticate exactly
-`codex-cli 0.131.0`, then run
-`./tools/probe_codex_media_web.py media-initial resume-reuse` (or omit modes for
-all five checks). The probe creates private `0o700` input storage outside its
-working directory, passes absolute `0o600` fixture paths, suppresses raw JSONL
-and stderr, and reports only sanitized `PASS <mode>` / `FAIL` lines. It requires
-no Cabal-specific credential environment variable and never prints fixture,
-workspace, or authentication paths.
+`codex-cli 0.131.0`, then run `./tools/probe_codex_media_web.py` (or list selected
+modes). The five modes assert blue-PNG/red-JPEG recognition, a newly uploaded
+green image, session-only recall with no `-i`, cached search, and live
+search/fetch of the exact primary H1 on the official Codex CLI page. Schemas
+constrain structure without embedding the expected color or page text. The
+probe has bounded subprocess deadlines, creates private `0o700` input storage
+outside its working directory, passes absolute `0o600` fixture paths, suppresses
+raw JSONL and stderr, and reports only sanitized `PASS <mode>` / `FAIL` lines.
+`--self-test` runs all mode validators without Codex or credentials;
+`--debug-public` prints only fixed search/fetch/official-page booleans. The probe
+never prints fixture, workspace, authentication, session, tool-argument, or raw
+backend data.
 
 ### Redaction contract for hosts logging backend output
 

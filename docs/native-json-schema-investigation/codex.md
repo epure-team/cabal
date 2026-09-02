@@ -59,26 +59,30 @@ CBL-07A does not weaken or couple that evidence to the media/web claims.
 
 ## Reproducible authenticated probes
 
-The probes used public OS images and prompts containing no secrets. Raw JSONL
-and stderr were captured in memory and filtered; only public agent/session/tool/
-usage records were reported. Reasoning, error payloads, raw tool arguments, and
-credentials were neither displayed nor stored.
+The probes use deterministic solid-color images and prompts containing no
+secrets. Raw JSONL and stderr are captured in memory and never displayed or
+stored. The parser consumes only public thread, agent-message, and web lifecycle
+records; reasoning, error payloads, raw tool arguments, credentials, and raw
+backend output are never reported.
 
 `tools/probe_codex_media_web.py` is the checked-in executable reproduction
 artifact. It requires exactly `codex-cli 0.131.0`, creates and removes its own
-deterministic PNG, JPEG, and draft-2020-12 schema fixtures, passes every prompt
-on stdin, and prints only `PASS <mode>` or a sanitized failure. It never prints
-raw Codex JSONL or stderr. Run all evidence modes with:
+deterministic 64×64 PNG/JPEG and draft-2020-12 schema fixtures, passes every
+prompt on stdin, bounds version/task subprocesses, and prints only
+`PASS <mode>` or a fixed sanitized failure. Its schemas constrain object shape
+and color vocabulary but do not embed the expected image color or official-page
+text. Run all evidence modes with:
 
 ```text
 ./tools/probe_codex_media_web.py
 ```
 
 Individual evidence paths are named `media-initial`, `resume-upload`,
-`resume-reuse`, `web-cached`, and `web-live`. An authenticated rerun on
-2026-09-02 passed all five modes against `codex-cli 0.131.0`. After moving the
-fixtures to private absolute paths outside the process workspace, targeted
-authenticated reruns of `media-initial` and `resume-reuse` also passed.
+`resume-reuse`, `web-cached`, and `web-live`. The final authenticated rerun on
+2026-09-02 passed all five content-dependent modes against exactly
+`codex-cli 0.131.0`. `--self-test` executes every mode-specific validator and
+negative assertion offline. Optional `--debug-public` reports only fixed
+search/fetch/official-page booleans.
 
 ### Initial sealed absolute image plus native schema
 
@@ -88,14 +92,15 @@ Sanitized runtime argv:
 codex exec --json --skip-git-repo-check --ignore-user-config \
   -c 'web_search="disabled"' -s read-only \
   --output-schema '<task-schema-file>' \
-  -i '<sealed-task-input.png>' -
+  -i '<sealed-image-a.png>' -i '<sealed-image-b.jpg>' -
 ```
 
-Outcome at `0.131.0`: exit 0; `thread.started`, `turn.started`,
-`item.completed(agent_message)`, and `turn.completed(usage)` were emitted. The
-schema-conforming public result was `{"media_seen":true}`. The checked-in probe
-now supplies private absolute PNG/JPEG fixture paths outside the process working
-directory, matching Cabal's sealed runtime invocation shape.
+Outcome at `0.131.0`: exit 0 with a canonical public thread UUID and strict
+agent-message JSON. The exact public result was
+`{"png_dominant_color":"blue","jpeg_dominant_color":"red"}`. A constant
+`{"ok":true}` answer, a missing attachment, or a wrong color now fails. The
+private absolute fixture paths remain outside the process working directory,
+matching Cabal's sealed runtime invocation shape.
 
 ### Multiple PNG/JPEG images plus native schema
 
@@ -109,9 +114,9 @@ codex exec --json --skip-git-repo-check --ignore-user-config \
   -
 ```
 
-Outcome: exit 0 with the same public protocol record classes and the
-schema-conforming result `{"image_count":2}`. PNG, JPEG, repeated flags, and
-image/schema composition were all exercised in one invocation.
+This transport shape is now covered by the initial content assertion above:
+PNG, JPEG, repeated flags, schema composition, and both independently known
+colors are exercised in one invocation.
 
 ### Resume PNG/JPEG upload plus native schema
 
@@ -122,13 +127,13 @@ public `thread.started.thread_id`, the corrected sanitized argv was:
 codex exec --output-schema '<task-schema-file>' -s read-only \
   resume "$THREAD_ID" --json --skip-git-repo-check \
   --ignore-user-config -c 'web_search="disabled"' \
-  -i '<sealed-image-1.png>' -i '<sealed-image-2.jpg>' -
+  -i '<new-sealed-image-c.png>' -
 ```
 
-Outcome: exit 0; a public session id, agent message, and usage were emitted; the
-schema-conforming result was `{"media_seen":true}`. The schema and sandbox are
-root `exec` options before `resume`; JSON/config and repeated image options are
-resume options after the UUID.
+The newly uploaded fixture is distinct from the initial two. Outcome: exit 0;
+the exact public result was `{"new_image_dominant_color":"green"}`. The schema
+and sandbox are root `exec` options before `resume`; JSON/config and the new
+image option are resume options after the UUID.
 
 ### Resume media reuse plus native schema
 
@@ -141,8 +146,12 @@ codex exec --output-schema '<task-schema-file>' -s read-only \
   --ignore-user-config -c 'web_search="disabled"' -
 ```
 
-This proves that a schema-bearing retry can resume the already-fed session
-without duplicating `-i` uploads.
+The prompt forbids file/tool use and asks for the dominant color of the most
+recently inspected image. The exact answer is green after `resume-upload` (blue
+when `resume-reuse` establishes its own initial session), and argv is
+independently checked to contain no `-i`. This proves that a schema-bearing retry
+can recall an image-derived fact from the already-fed session without duplicate
+uploads.
 
 ### Live web search and page fetch
 
@@ -154,16 +163,16 @@ codex exec --json --skip-git-repo-check --ignore-user-config \
   --output-schema '<task-schema-file>' -
 ```
 
-The public prompt required live search and opening an official OpenAI Codex
-documentation page. Outcome: exit 0; paired
-`item.started(web_search)` / `item.completed(web_search)` records were emitted,
-followed by the public page-title answer and `turn.completed(usage)`. This
-proves the `live` search-and-fetch setting. The tagged schema/source separately
-pins `cached` as search without external live access and `disabled` as no web
-tool; CLI `-c` overrides are the highest-precedence ordinary config layer, and
-the upstream test pins explicit `web_search` precedence over legacy web flags.
-The `web-cached` evidence mode runs the corresponding generated argv with
-`-c 'web_search="cached"'` and requires the same public `web_search` lifecycle.
+The prompt requires search, opening
+`https://developers.openai.com/codex/cli/`, and returning its visible primary
+H1. Outcome: exit 0; paired public web lifecycles establish both search and the
+official-page fetch, and the exact public answer is
+`{"page_h1":"Inspect, edit, and run code from your terminal"}`. The tagged
+schema/source separately pins `cached` as search without external live access
+and `disabled` as no web tool; CLI `-c` overrides remain the highest-precedence
+ordinary config layer. `web-cached` requires a complete cached-search lifecycle
+and the same exact official-page fact; `web-live` additionally requires the
+public search/fetch lifecycle and exact official URL.
 
 ## Adapter design and privacy
 
@@ -208,12 +217,25 @@ availability work. Codex fails closed for sensitive low-level calls without that
 authorization and no longer reads `Backend_registry` during execution.
 
 Fresh schema retries reuse the same staged paths. Resume reuse retains the public
-attachment references/digests but emits no `-i`. Cleanup runs after all attempts
-and backend process cleanup, including timeout, cancellation, fatal exception,
-staging failure, cleanup retry, and abandoned-prepared-value paths. Deterministic
-tests replace/symlink and delete caller paths after `Preflight_completed`; the
-fake Codex process still observes only the originally validated staged bytes,
-and the staged paths are gone when dispatch returns.
+attachment references/digests but emits no `-i`. Prepared dispatch values are
+one-shot across both execute APIs, including attachment-free tasks. An atomic
+pending/executing/released owner separates switch abandonment from active
+execution cleanup. Cleanup runs after all attempts and backend process cleanup,
+including timeout, cancellation, fatal exception, staging failure, cleanup
+retry, and abandoned-prepared-value paths. Cleanup retries are bounded to three;
+detailed execution exposes only `Cleanup_not_required`, `Cleanup_succeeded`, or
+`Cleanup_failed`, and persistent failure emits a fixed warning without paths or
+exception data. Non-success results, structured schema failures, and propagating
+fatal identity remain authoritative.
+
+The staging boundary defends against caller workspace path replacement and uses
+private permissions to prevent accidental/cross-user reads. It does not defend
+against a hostile same-UID process, privileged/system-level access, or a
+compromised OS. Unsupported descriptor-backed staging platforms/workspace
+layouts fail closed. Deterministic tests replace/symlink and delete caller paths
+after `Preflight_completed`; the fake Codex process still observes only the
+originally validated staged bytes, and successful cleanup removes the staged
+paths before dispatch returns.
 
 ## Capability outcome and shared gate
 
@@ -264,5 +286,9 @@ Codex claims. `test/test_runtime_bootstrap.ml` verifies that the independent
 snapshot matches and that drift fails closed. `test/test_task_preflight.ml` and
 `test/test_runtime_dispatch.ml` cover positive PNG/JPEG/web acceptance, exact
 adapter delivery intent, post-preflight namespace replacement/deletion, staged
-byte identity, retry reuse, lifecycle cleanup, the `0.131.0` version gate, and
-rejected-input no-side-effect behavior.
+byte identity, retry reuse, one-shot concurrent/sequential claims, abandonment
+versus active cleanup ownership, bounded transient/persistent cleanup, sanitized
+cleanup telemetry, timeout/cancellation/fatal preservation, capability-before-
+staging ordering, the `0.131.0` version gate, and rejected-input no-side-effect
+behavior. The probe's offline self-test executes strict validators for every
+media, resume, cached-search, and live search/fetch mode.

@@ -16,10 +16,16 @@ by the date a change merged to `main`.
   Codex receives only those sealed absolute paths. One sealed set survives fresh
   schema retries, resume reuse sends no duplicate image argv, and cleanup covers
   success, backend failure/timeout, cancellation, fatal exceptions, abandoned
-  prepared calls, staging failure, and retryable cleanup failure. Sensitive
-  low-level Codex calls without matching immutable central authorization fail
-  before config I/O or process spawn. The public-only authenticated probe covers
-  initial media and resumed session reuse with fixtures outside its workspace.
+  prepared calls, staging failure, and retryable cleanup failure. Prepared values
+  are atomically one-shot across both execute APIs; capability gates precede
+  staging, active execution cannot race switch abandonment, and bounded cleanup
+  exposes sanitized detailed status without replacing non-success, structured
+  schema-failure, or fatal semantics. Sensitive low-level Codex calls without
+  matching immutable central authorization fail before config I/O or process
+  spawn. The bounded,
+  public-only authenticated probe now validates exact PNG/JPEG colors, a new
+  resumed upload, no-upload session recall, cached search, and live official-page
+  search/fetch content in all five modes, with offline validator self-tests.
 - **Stable rich completer and central detailed dispatch (CBL-06).**
   `Backend_types.completion_request` and its constructor expose system/user
   prompts, schema, resume session, attachments, web policy, timeout, and maximum
