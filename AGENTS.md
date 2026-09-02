@@ -204,6 +204,9 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `Web_disabled`, and timeout to the existing `max_float`. Keep its shared field
   types/semantics aligned with `task_spec`; completers alone compose the
   system/user prompt and call `make_task_spec`.
+- Adding fields to `completion_request` is source-breaking for exhaustive record
+  literals/patterns. Treat `make_completion_request` as the canonical
+  forward-compatible host construction path and document future evolution there.
 - `Backend_completer.make_rich` must use the central `Task_runtime` detailed
   handle. It must not invoke `Agentic_backend` or `Json_schema_enforcer`
   directly. `Runtime_dispatch.prepare` resolves one validated effective entry,
@@ -214,6 +217,11 @@ standalone OCaml library and as the backend abstraction layer vendored under
   ownership, and events. Legacy await/run behavior is a projection of the same
   memoized detailed outcome; preserve its timeout/cancellation and exact error
   rendering semantics.
+- Every returned backend result must be committed to detailed progress in the
+  same narrow cancellation-protected section as its `Attempt_finished` event.
+  Outer timeout/cancellation and sanitized ordinary exceptions retain all such
+  attempts, aggregate cost, last nonblank session, and elapsed; never add an
+  in-flight attempt. Fatal exception identity and cleanup ordering stay intact.
 - Rich completion awaits outcome before event delivery. This ordering keeps
   outcome await safe from the handle's own callback; never await delivery from
   that callback. The returned event collector is bounded to
@@ -222,6 +230,10 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `Task_event.max_pending_agent_text_bytes`, while reserving controls plus the
   terminal. `event_trace.omitted_events`, delivery-truncation markers, and
   sequence gaps are normal observability.
+- Use `Task_event.Private`'s exhaustive payload classifier and bounded collector
+  for rich traces. The exact partition is 192 observations, 62 ordinary
+  non-terminal controls, one truncation marker, one terminal, and 64 KiB of
+  assistant text; do not duplicate a wildcard-based classifier in completers.
 - Rich response text is `agent_text` only. Raw lines are never collected; raw
   stdout/stderr remain only inside the non-serializing CBL-05 in-process detail.
   Keep rich response/error/event types free of generated serialization. The

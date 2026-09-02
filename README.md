@@ -187,6 +187,9 @@ instead of constructing `task_spec` or parsing a backend CLI stream. The stable
 and resume session, attachments, web policy, timeout, and maximum turns. Its
 constructor preserves the existing defaults: no schema/session/max-turn limit,
 no attachments, `Web_disabled`, and the legacy `max_float` timeout.
+Because adding an OCaml record field is source-breaking for exhaustive literals
+and patterns, hosts should use `make_completion_request` as the canonical
+forward-compatible construction path rather than writing record literals.
 
 ```ocaml
 let complete =
@@ -231,7 +234,9 @@ remain in force across CBL-05 schema retries.
 On success, `execution` retains final status, every completed attempt and its
 delivery intent, validation errors, monotonic timings, costs/tokens, and final
 session. A rich error distinguishes central `Dispatch_failure` from structured
-`Execution_failure`, whose CBL-05 execution retains both attempted results.
+`Execution_failure`, whose CBL-05 execution retains both attempted results, and
+from a sanitized `Dispatch_failure_with_execution` retaining progress completed
+before an ordinary runtime exception.
 These in-process types deliberately have no generated serialization. Rich
 `text` uses only adapter-normalized `agent_text`; raw stdout/stderr remain in the
 underlying detailed execution/error value and raw stream lines are never
@@ -242,7 +247,8 @@ Rich completion waits for normalized event delivery after awaiting the task
 outcome. `event_trace.events` is monotonic and preserves attempt numbers,
 lifecycle controls, any `Event_delivery_truncated` marker, and the terminal. The
 collector uses the CBL-04 bounds: at most 256 events, at most 192 observations,
-at most 64 KiB of assistant deltas, plus a 63-control/terminal reserve. Its
+at most 64 KiB of assistant deltas, 62 ordinary non-terminal controls, one
+truncation marker, and one terminal. Its
 `omitted_events` is a saturating count of delivered events omitted by this second
 bounded collector. Positive counts and sequence gaps are normal observability,
 not execution failures. See
@@ -293,6 +299,12 @@ cancelling the caller's parent switch still propagates to its tasks. Cleanup and
 process-group reaping complete before `await` returns a normalized `Cancelled`
 or `Timeout` result.
 
+If the outer absolute deadline or cancellation interrupts a schema retry,
+`await_detailed` retains every backend result that fully returned before the
+interruption, including aggregate cost and the last nonblank session. The result
+of an in-flight attempt is never fabricated. Attempt completion events and this
+progress snapshot are committed in one narrow cancellation-protected section.
+
 `task_spec.timeout` is one absolute monotonic budget covering registry
 resolution, preflight, version and availability checks, every schema-enforcement
 attempt, backend setup, process execution, parsing, and finalization. Retries do
@@ -336,16 +348,21 @@ permanently stuck callback cannot cause unbounded queue growth.
 
 `Json_schema_enforcer.run_task_detailed` exposes every completed backend call as
 an ordered, 1-based `Backend_types.task_attempt`. Attempt kinds are shared with
-`Task_event.attempt_kind`, so the detailed list agrees with
-`Attempt_started`/`Attempt_finished` numbering. Each attempt retains its complete
-`task_result`, monotonic `attempt_elapsed`, applicable validator error, and the
-requested attachment/web delivery intent. `task_execution` additionally reports
+`Task_event.attempt_kind`; every detailed attempt has a matching numbered
+`Attempt_started`/`Attempt_finished` pair. An interrupted backend call retains
+its started/timeout-or-cancelled lifecycle events but correctly has no completed
+result in the detailed list. Each attempt retains its complete `task_result`,
+monotonic `attempt_elapsed`, applicable validator error, and the requested
+attachment/web delivery intent. `task_execution` additionally reports
 wall-clock elapsed measured once around the complete enforcer (including resume
 failure classification), field-wise aggregate cost/token usage, and the last
 nonblank trimmed session id. A field whose values are all unknown remains
 `None`; unknown values in another field do not discard known values. Integer
 overflow saturates at `max_int`, finite float overflow at `max_float`, and a
 negative or non-finite input invalidates only its own aggregate field.
+Central dispatch supplies an opaque progress accumulator so an outer deadline,
+cancellation, or sanitized ordinary exception can retain already-completed
+attempts even when the enforcer itself does not return normally.
 
 Native backend failure with a schema in force and retry exhaustion are structured
 `Backend_types.task_execution_error` values. Double validation failure keeps the

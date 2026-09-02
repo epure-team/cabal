@@ -270,7 +270,13 @@ type web_access =
     owns prompt composition, working-directory/backend configuration, expected
     outputs, and read-only policy, so a host need not construct a [task_spec].
     Attachment values remain workspace-relative references and are validated by
-    central preflight before execution. *)
+    central preflight before execution.
+
+    Adding a field to an OCaml record is source-breaking for callers that build
+    exhaustive record literals or patterns. Hosts should therefore treat
+    {!make_completion_request} as the canonical forward-compatible construction
+    path and reserve direct literals for code intentionally pinned to this exact
+    record version. *)
 type completion_request = {
   system_prompt : string;
       (** System instructions. Omitted from the composed backend prompt when
@@ -540,7 +546,10 @@ type 'ctxt task_response = {
     to [None], [attachments] to [[]], [web_access] to [Web_disabled], and
     [timeout] to [max_float], preserving the existing completer/task defaults.
     The constructor performs no I/O or capability checks; those belong to
-    central dispatch when the request is submitted. *)
+    central dispatch when the request is submitted. This constructor is the
+    canonical host construction path: future optional request fields can be
+    added as optional labelled arguments without forcing exhaustive record
+    literals to change. *)
 val make_completion_request :
   system_prompt:string ->
   prompt:string ->

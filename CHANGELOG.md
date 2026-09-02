@@ -26,7 +26,14 @@ by the date a change merged to `main`.
   preflight remains authoritative for media, web, session, and read-only policy;
   one prepared backend snapshot owns all attempts. A host/CWR-shaped compile
   fixture consumes the full DTO and structured outcome without adding host
-  dependencies.
+  dependencies. Outer retry deadline/cancellation now retains every atomically
+  committed backend result, aggregate cost, last nonblank session, and elapsed;
+  sanitized ordinary execution exceptions retain the same partial execution,
+  while fatal exceptions still propagate after cleanup. Rich trace collection
+  reuses `Task_event`'s exhaustive classifier and shared post-delivery bound of
+  192 observations, 62 ordinary controls, one merged truncation marker, one
+  terminal, and 64 KiB of text. The canonical request constructor avoids the
+  source break exhaustive record literals incur when the DTO gains fields.
 - **Detailed schema-attempt execution telemetry.**
   `Json_schema_enforcer.run_task_detailed` returns ordered initial/fresh/resumed
   attempts with complete results, uniquely named monotonic call timing,
