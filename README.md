@@ -18,6 +18,7 @@ Cabal owns the host-neutral backend layer:
 - project config generation for supported backend CLIs;
 - YAML adapter loading;
 - normalized backend result/cost/session and task-lifecycle event types;
+- stable rich-completion requests and structured detailed outcomes for hosts;
 - local session-event logging and redaction helpers.
 
 Cabal explicitly does **not** own:
@@ -109,8 +110,8 @@ on `PATH` (or set
 - `src/backend_registry.*` — static backend descriptors and capability metadata.
 - `src/runtime_bootstrap.*` — extensible or validated hardened runtime assembly.
 - `src/runtime_dispatch.*` and `src/task_runtime.*` — call-time backend
-  resolution, central preflight, cancellable task handles, and whole-task
-  deadlines.
+  resolution, central preflight, legacy/detailed cancellable task handles, and
+  whole-task deadlines.
 - `src/task_event.*` — sequenced backend-neutral lifecycle and public-output
   events.
 - `src/task_preflight.*` — attachment integrity/workspace checks and requested
@@ -168,13 +169,94 @@ let () =
   let limits : Task_preflight.limits =
     {max_attachments = 0; max_file_size_bytes = 0; max_total_size_bytes = 0}
   in
-  match Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec with
+  match
+    Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec
+  with
   | Error error -> prerr_endline (Runtime_dispatch.render_error error)
   | Ok result ->
       Printf.printf "status=%s files_changed=%d\n"
         (Backend_types.show_result_status result.status)
         (List.length result.files_changed)
 ```
+
+### Rich completion API
+
+Hosts that want completion semantics should use `Backend_completer.make_rich`
+instead of constructing `task_spec` or parsing a backend CLI stream. The stable
+`completion_request` DTO carries `system_prompt`, `prompt`, optional JSON Schema
+and resume session, attachments, web policy, timeout, and maximum turns. Its
+constructor preserves the existing defaults: no schema/session/max-turn limit,
+no attachments, `Web_disabled`, and the legacy `max_float` timeout.
+
+```ocaml
+let complete =
+  match
+    Backend_completer.make_rich
+      ~sw ~env ~limits ~backend_name:"claude-code"
+      ~working_dir:(Sys.getcwd ()) ()
+  with
+  | Ok complete -> complete
+  | Error message -> failwith message
+in
+let request =
+  Backend_completer.make_completion_request
+    ~system_prompt:"Return a concise implementation report."
+    ~prompt:"Implement the assigned change."
+    ~json_schema:report_schema
+    ~attachments:approved_attachments
+    ~web_access:Backend_types.Web_disabled
+    ~timeout:90.0
+    ~max_turns:4
+    ()
+in
+match complete request with
+| Ok response ->
+    let execution = response.Backend_completer.execution in
+    Printf.printf "status=%s attempts=%d text=%s\n"
+      (Backend_types.show_result_status execution.final_result.status)
+      (List.length execution.attempts)
+      response.text
+| Error error ->
+    prerr_endline (Backend_completer.render_rich_completion_error error)
+```
+
+Each call resolves and preflights one validated runtime entry through the same
+central path as `Runtime_dispatch`/`Task_runtime`. The effective descriptor—not
+an independent static lookup—governs attachment, web, session, and optional
+read-only execution; validated runtime capability data also selects native or
+fallback schema enforcement. Version policy, availability, absolute deadline,
+cancellation/process ownership, and the prepared immutable backend snapshot all
+remain in force across CBL-05 schema retries.
+
+On success, `execution` retains final status, every completed attempt and its
+delivery intent, validation errors, monotonic timings, costs/tokens, and final
+session. A rich error distinguishes central `Dispatch_failure` from structured
+`Execution_failure`, whose CBL-05 execution retains both attempted results.
+These in-process types deliberately have no generated serialization. Rich
+`text` uses only adapter-normalized `agent_text`; raw stdout/stderr remain in the
+underlying detailed execution/error value and raw stream lines are never
+captured or promoted into the completion response. Render errors with
+`render_rich_completion_error` rather than serializing complete results.
+
+Rich completion waits for normalized event delivery after awaiting the task
+outcome. `event_trace.events` is monotonic and preserves attempt numbers,
+lifecycle controls, any `Event_delivery_truncated` marker, and the terminal. The
+collector uses the CBL-04 bounds: at most 256 events, at most 192 observations,
+at most 64 KiB of assistant deltas, plus a 63-control/terminal reserve. Its
+`omitted_events` is a saturating count of delivered events omitted by this second
+bounded collector. Positive counts and sequence gaps are normal observability,
+not execution failures. See
+[`test/test_rich_completer_cwr_compile.ml`](test/test_rich_completer_cwr_compile.ml)
+for a CWR-shaped host fixture that submits the full DTO and consumes structured
+execution without a Cabal dependency on CWR or another host library.
+
+The legacy `completer`, `make`, `make_by_name`, and `make_validator_by_name`
+signatures are unchanged. Their exact success/error projection is retained,
+including the legacy successful-response stdout fallback. Validator construction
+keeps the historical static fail-fast diagnostic for known unsafe built-ins;
+every invocation additionally sets `read_only=true` and passes the resolved
+effective descriptor through central capability preflight before availability or
+backend execution.
 
 ### Cancellable tasks, deadlines, and events
 
@@ -193,15 +275,19 @@ in
 (* Safe and idempotent, including from another fiber. *)
 Task_runtime.cancel handle;
 let result = Task_runtime.await handle in
+(* Or retain the CBL-05 structured execution/error. This await is equally safe
+   from the handle's own callback. *)
+let detailed = Task_runtime.await_detailed handle in
 (* Optional: wait until the terminal callback and all earlier callbacks return. *)
 Task_runtime.await_event_delivery handle
 ```
 
-`await` is repeatable, supports concurrent waiters, and never waits for event
-callbacks. It is therefore safe to call `await` from the same handle's
-`Process_started` or terminal callback. Use `await_event_delivery` after `await`
-when deterministic observation of the terminal event is required; do not call
-the delivery waiter from inside that handle's callback. Each handle owns a
+`await` and `await_detailed` are repeatable, support concurrent waiters, and
+never wait for event callbacks. They are therefore safe to call from the same
+handle's `Process_started` or terminal callback. Use `await_event_delivery`
+after either outcome await when deterministic observation of the terminal event
+is required; do not call the delivery waiter from inside that handle's callback.
+Each handle owns a
 private cancellation scope, so cancelling one task does not cancel siblings;
 cancelling the caller's parent switch still propagates to its tasks. Cleanup and
 process-group reaping complete before `await` returns a normalized `Cancelled`
@@ -283,8 +369,11 @@ fallback starts a new invocation with the original spec. The retry receives the 
 time on the existing absolute deadline, never the original timeout; expiry or
 cancellation before the transition produces no retry attempt or retry event.
 
-This remains a low-level detailed enforcer API. A central runtime/dispatch
-detailed endpoint is intentionally deferred to CBL-06.
+`Runtime_dispatch.run_task_detailed`, `Task_runtime.run_task_detailed`, and
+`Task_runtime.await_detailed` now expose this result through central CBL-03/04
+resolution, preflight, version, availability, deadline, cancellation, process,
+and event ownership. The legacy runtime result is a projection of that same
+memoized detailed handle outcome.
 
 `Event_delivery_truncated` and delivered sequence gaps only describe bounded
 observer backpressure. They are normal observability states and never change the

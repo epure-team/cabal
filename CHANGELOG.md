@@ -9,6 +9,24 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Stable rich completer and central detailed dispatch (CBL-06).**
+  `Backend_types.completion_request` and its constructor expose system/user
+  prompts, schema, resume session, attachments, web policy, timeout, and maximum
+  turns without requiring hosts to construct `task_spec`. `Backend_completer`
+  re-exports the DTO and adds `rich_completer` / `make_rich`, returning
+  normalized text plus complete CBL-05 execution or a structured central versus
+  execution failure. `Runtime_dispatch` and `Task_runtime` now expose detailed
+  run/await endpoints on the same CBL-03/04 validated, cancellable, absolute-
+  deadline handle; legacy run/completer APIs project that memoized detailed
+  outcome with their exact historical strings/status behavior. Rich calls await
+  event delivery and return a monotonic normalized trace bounded to 256 entries,
+  192 observations, and 64 KiB of assistant text, with a saturating collector-
+  omission count and a dedicated terminal/control reserve. Raw lines are never
+  collected and rich text never falls back to raw stdout. Effective-descriptor
+  preflight remains authoritative for media, web, session, and read-only policy;
+  one prepared backend snapshot owns all attempts. A host/CWR-shaped compile
+  fixture consumes the full DTO and structured outcome without adding host
+  dependencies.
 - **Detailed schema-attempt execution telemetry.**
   `Json_schema_enforcer.run_task_detailed` returns ordered initial/fresh/resumed
   attempts with complete results, uniquely named monotonic call timing,
@@ -26,7 +44,7 @@ by the date a change merged to `main`.
   the remaining shared absolute deadline. Ordinary resume-classifier exceptions
   are contained as transport failures with sanitized diagnostics; cancellation
   and fatal runtime exceptions propagate. Central detailed runtime/dispatch
-  wiring remains CBL-06 work.
+  wiring is now provided by the CBL-06 central detailed dispatch path.
 - **Cancellable task runtime and normalized lifecycle events.**
   `Task_runtime` now exposes isolated Eio-backed handles with idempotent
   cancellation and repeatable/concurrent await. `Runtime_dispatch.run_task`
