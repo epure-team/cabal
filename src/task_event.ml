@@ -57,6 +57,30 @@ type payload =
 
 type t = {seq : int; attempt : int; timestamp : float; payload : payload}
 
+type payload_class =
+  | Agent_text_observation of string
+  | Token_usage_observation
+  | Session_observation
+  | Tool_observation
+  | Nonterminal_control
+  | Delivery_truncation_marker
+  | Terminal_event
+
+let classify_payload = function
+  | Agent_text_delta text -> Agent_text_observation text
+  | Token_usage _ -> Token_usage_observation
+  | Session_id _ -> Session_observation
+  | Tool_started _ | Tool_finished _ -> Tool_observation
+  | Event_delivery_truncated _ -> Delivery_truncation_marker
+  | Terminal _ -> Terminal_event
+  | Task_started | Backend_selected _ | Preflight_started
+  | Preflight_completed | Version_probe_started | Version_probe_completed
+  | Availability_check_started | Availability_check_completed
+  | Attempt_started _ | Attempt_finished _ | Retry_transition _
+  | Process_started _ | Process_termination_requested
+  | Process_kill_escalated | Process_exited _ ->
+      Nonterminal_control
+
 let max_pending_events = 256
 
 let max_pending_agent_text_bytes = 64 * 1024
@@ -77,7 +101,7 @@ type queued_kind =
   | Observation of {agent_text_bytes : int}
   | Control
   | Truncation_marker
-  | Terminal_event
+  | Queued_terminal
 
 type queued_event = {mutable event : t; kind : queued_kind}
 
@@ -94,6 +118,7 @@ type sink = {
   mutable pending_control_events : int;
   mutable pending_agent_text_bytes : int;
   mutable pending_marker : queued_event option;
+  mutable pending_terminal_events : int;
   delivery_complete : unit Eio.Promise.t;
   resolve_delivery_complete : unit Eio.Promise.u;
 }
@@ -179,7 +204,7 @@ let add_pending_unlocked sink queue queued =
         <= max_pending_agent_text_bytes)
   | Control -> assert (sink.pending_control_events < max_pending_control_events)
   | Truncation_marker -> assert (Option.is_none sink.pending_marker)
-  | Terminal_event -> ()) ;
+  | Queued_terminal -> assert (sink.pending_terminal_events = 0)) ;
   Queue.add queued queue ;
   sink.pending_event_count <- sink.pending_event_count + 1 ;
   (match queued.kind with
@@ -190,7 +215,8 @@ let add_pending_unlocked sink queue queued =
         sink.pending_agent_text_bytes + agent_text_bytes
   | Control -> sink.pending_control_events <- sink.pending_control_events + 1
   | Truncation_marker -> sink.pending_marker <- Some queued
-  | Terminal_event -> ()) ;
+  | Queued_terminal ->
+      sink.pending_terminal_events <- sink.pending_terminal_events + 1) ;
   Option.iter Eio.Condition.broadcast sink.condition
 
 let take_pending_unlocked sink queue =
@@ -207,7 +233,8 @@ let take_pending_unlocked sink queue =
       (match sink.pending_marker with
       | Some pending when pending == queued -> sink.pending_marker <- None
       | Some _ | None -> ())
-  | Terminal_event -> ()) ;
+  | Queued_terminal ->
+      sink.pending_terminal_events <- sink.pending_terminal_events - 1) ;
   queued
 
 let create_sink ~sw ~now ?on_event () =
@@ -228,6 +255,7 @@ let create_sink ~sw ~now ?on_event () =
       pending_control_events = 0;
       pending_agent_text_bytes = 0;
       pending_marker = None;
+      pending_terminal_events = 0;
       delivery_complete;
       resolve_delivery_complete;
     }
@@ -246,7 +274,7 @@ let create_sink ~sw ~now ?on_event () =
                 in
                 notify callback queued.event ;
                 match queued.kind with
-                | Terminal_event ->
+                | Queued_terminal ->
                     ignore
                       (Eio.Promise.try_resolve
                          sink.resolve_delivery_complete
@@ -298,6 +326,136 @@ let empty_truncation =
     session_events = 0;
     tool_events = 0;
     control_events = 0;
+  }
+
+let merge_delivery_truncation left right =
+  {
+    agent_text_events =
+      saturating_add left.agent_text_events right.agent_text_events;
+    agent_text_bytes =
+      saturating_add left.agent_text_bytes right.agent_text_bytes;
+    token_usage_events =
+      saturating_add left.token_usage_events right.token_usage_events;
+    session_events = saturating_add left.session_events right.session_events;
+    tool_events = saturating_add left.tool_events right.tool_events;
+    control_events = saturating_add left.control_events right.control_events;
+  }
+
+type bounded_collector = {
+  mutable collected_rev : t list;
+  mutable collected_observations : int;
+  mutable collected_controls : int;
+  mutable collected_agent_text_bytes : int;
+  mutable collected_omissions : int;
+  mutable collected_marker : t option;
+  mutable collected_terminal : bool;
+}
+
+type collected_delivery = {events : t list; omitted_events : int}
+
+let create_bounded_collector () =
+  {
+    collected_rev = [];
+    collected_observations = 0;
+    collected_controls = 0;
+    collected_agent_text_bytes = 0;
+    collected_omissions = 0;
+    collected_marker = None;
+    collected_terminal = false;
+  }
+
+let saturating_increment value = if value = max_int then max_int else value + 1
+
+let omit_collected collector =
+  collector.collected_omissions <-
+    saturating_increment collector.collected_omissions
+
+let retain_collected collector event =
+  collector.collected_rev <- event :: collector.collected_rev
+
+let collect_observation collector event agent_text_bytes =
+  if
+    collector.collected_observations < max_pending_observational_events
+    && agent_text_bytes
+       <= max_pending_agent_text_bytes
+          - collector.collected_agent_text_bytes
+  then begin
+    collector.collected_observations <- collector.collected_observations + 1 ;
+    collector.collected_agent_text_bytes <-
+      collector.collected_agent_text_bytes + agent_text_bytes ;
+    retain_collected collector event
+  end
+  else omit_collected collector
+
+let merge_collected_marker collector event counts =
+  match collector.collected_marker with
+  | None ->
+      collector.collected_marker <- Some event ;
+      retain_collected collector event
+  | Some marker ->
+      let merged =
+        match marker.payload with
+        | Event_delivery_truncated previous ->
+            {
+              marker with
+              payload =
+                Event_delivery_truncated
+                  (merge_delivery_truncation previous counts);
+            }
+        | Task_started | Backend_selected _ | Preflight_started
+        | Preflight_completed | Version_probe_started
+        | Version_probe_completed | Availability_check_started
+        | Availability_check_completed | Attempt_started _
+        | Attempt_finished _ | Retry_transition _ | Process_started _
+        | Process_termination_requested | Process_kill_escalated
+        | Process_exited _ | Session_id _ | Agent_text_delta _
+        | Tool_started _ | Tool_finished _ | Token_usage _ | Terminal _ ->
+            assert false
+      in
+      collector.collected_marker <- Some merged ;
+      collector.collected_rev <-
+        List.map
+          (fun (retained : t) ->
+            if retained.seq = marker.seq then merged else retained)
+          collector.collected_rev ;
+      omit_collected collector
+
+let collect_bounded collector event =
+  match classify_payload event.payload with
+  | Agent_text_observation text ->
+      collect_observation collector event (String.length text)
+  | Token_usage_observation | Session_observation | Tool_observation ->
+      collect_observation collector event 0
+  | Nonterminal_control ->
+      if collector.collected_controls < max_pending_control_events then begin
+        collector.collected_controls <- collector.collected_controls + 1 ;
+        retain_collected collector event
+      end
+      else omit_collected collector
+  | Delivery_truncation_marker -> (
+      match event.payload with
+      | Event_delivery_truncated counts ->
+          merge_collected_marker collector event counts
+      | Task_started | Backend_selected _ | Preflight_started
+      | Preflight_completed | Version_probe_started | Version_probe_completed
+      | Availability_check_started | Availability_check_completed
+      | Attempt_started _ | Attempt_finished _ | Retry_transition _
+      | Process_started _ | Process_termination_requested
+      | Process_kill_escalated | Process_exited _ | Session_id _
+      | Agent_text_delta _ | Tool_started _ | Tool_finished _ | Token_usage _
+      | Terminal _ ->
+          assert false)
+  | Terminal_event ->
+      if collector.collected_terminal then omit_collected collector
+      else begin
+        collector.collected_terminal <- true ;
+        retain_collected collector event
+      end
+
+let collected_delivery collector =
+  {
+    events = List.rev collector.collected_rev;
+    omitted_events = collector.collected_omissions;
   }
 
 let record_truncation_unlocked sink truncation =
@@ -400,15 +558,18 @@ let enqueue_control_unlocked sink payload =
         add_pending_unlocked sink queue {event; kind = Control}
       else record_truncation_unlocked sink Control_omitted
 
-let emit_nonterminal_unlocked sink = function
-  | Agent_text_delta text -> emit_agent_text_unlocked sink text
-  | Token_usage _ as payload ->
+let emit_nonterminal_unlocked sink payload =
+  match classify_payload payload with
+  | Agent_text_observation text -> emit_agent_text_unlocked sink text
+  | Token_usage_observation ->
       enqueue_observation_unlocked sink payload Token_usage_omitted
-  | Session_id _ as payload ->
+  | Session_observation ->
       enqueue_observation_unlocked sink payload Session_omitted
-  | (Tool_started _ | Tool_finished _) as payload ->
+  | Tool_observation ->
       enqueue_observation_unlocked sink payload Tool_omitted
-  | payload -> enqueue_control_unlocked sink payload
+  | Nonterminal_control | Delivery_truncation_marker ->
+      enqueue_control_unlocked sink payload
+  | Terminal_event -> assert false
 
 let enqueue_terminal_unlocked sink terminal =
   match sink.queue with
@@ -416,7 +577,7 @@ let enqueue_terminal_unlocked sink terminal =
       add_pending_unlocked
         sink
         queue
-        (queued_event sink Terminal_event (Terminal terminal))
+        (queued_event sink Queued_terminal (Terminal terminal))
   | None ->
       ignore (make_event_unlocked sink (Terminal terminal)) ;
       ignore (Eio.Promise.try_resolve sink.resolve_delivery_complete ())
@@ -455,7 +616,38 @@ let transition_to_retry sink ~kind ~reason =
 let emit_terminal sink terminal = emit sink (Terminal terminal)
 
 module Private = struct
-  type pending_delivery = {event_count : int; agent_text_bytes : int}
+  type nonrec payload_class = payload_class =
+    | Agent_text_observation of string
+    | Token_usage_observation
+    | Session_observation
+    | Tool_observation
+    | Nonterminal_control
+    | Delivery_truncation_marker
+    | Terminal_event
+
+  type nonrec bounded_collector = bounded_collector
+
+  type nonrec collected_delivery = collected_delivery = {
+    events : t list;
+    omitted_events : int;
+  }
+
+  type pending_delivery = {
+    event_count : int;
+    observational_event_count : int;
+    control_event_count : int;
+    agent_text_bytes : int;
+    truncation_marker_retained : bool;
+    terminal_event_count : int;
+  }
+
+  let classify_payload = classify_payload
+
+  let create_bounded_collector = create_bounded_collector
+
+  let collect_bounded = collect_bounded
+
+  let collected_delivery = collected_delivery
 
   let delivery_complete sink = sink.delivery_complete
 
@@ -463,6 +655,10 @@ module Private = struct
     with_lock sink (fun () ->
         {
           event_count = sink.pending_event_count;
+          observational_event_count = sink.pending_observational_events;
+          control_event_count = sink.pending_control_events;
           agent_text_bytes = sink.pending_agent_text_bytes;
+          truncation_marker_retained = Option.is_some sink.pending_marker;
+          terminal_event_count = sink.pending_terminal_events;
         })
 end

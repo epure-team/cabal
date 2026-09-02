@@ -25,7 +25,10 @@ type completion_result = {
 }
 
 (** Stable host request DTO, re-exported from {!Backend_types}. Field semantics
-    and defaults are shared with the corresponding [task_spec] fields. *)
+    and defaults are shared with the corresponding [task_spec] fields. Direct
+    exhaustive record literals/patterns are source-breaking when this DTO gains
+    a field; {!make_completion_request} is the canonical forward-compatible
+    construction path. *)
 type completion_request = Backend_types.completion_request = {
   system_prompt : string;
   prompt : string;
@@ -61,7 +64,8 @@ type rich_completion_response = {
 
 (** Structured central rich-completion failure with its delivered normalized
     lifecycle trace. Complete CBL-05 attempts remain in an
-    {!Runtime_dispatch.Execution_failure}; use
+    {!Runtime_dispatch.Execution_failure} or partial
+    {!Runtime_dispatch.Dispatch_failure_with_execution}; use
     {!render_rich_completion_error} for a sanitized compatibility diagnostic. *)
 type rich_completion_error = {
   cause : Runtime_dispatch.detailed_error;
@@ -175,10 +179,11 @@ val make :
     The completer installs only a normalized event collector; it never installs
     or exposes [on_raw_line]. It awaits detailed outcome first and event delivery
     second, preserving the existing handle rule that outcome await is callback
-    independent. The collector is bounded by {!max_captured_events},
-    {!max_captured_agent_text_bytes}, and the CBL-04 observation/control split.
-    The terminal and legitimate lifecycle controls remain retainable under
-    observation floods. *)
+    independent. The shared CBL-04 collector is bounded by
+    {!max_captured_events}, {!max_captured_agent_text_bytes}, 192 observations,
+    62 ordinary non-terminal controls, one truncation marker, and one terminal.
+    The marker and terminal remain retainable under observation/control floods;
+    multiple delivered markers are folded with saturating counts. *)
 val make_rich :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->

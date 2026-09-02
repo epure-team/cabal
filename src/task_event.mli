@@ -99,12 +99,16 @@ val max_agent_text_delta_bytes : int
     truncation marker, and the terminal event. *)
 val max_pending_observational_events : int
 
-(** Number of pending slots reserved for controls. The canonical hard
-    two-attempt path with one owned process per attempt uses 21 non-terminal
-    controls; the larger ordinary cap leaves adapter headroom plus one dedicated
-    marker slot and one terminal slot. Abusive excess controls are summarized
+(** Number of pending slots reserved for controls: 62 ordinary non-terminal
+    controls, one dedicated truncation marker, and one terminal. The canonical
+    hard two-attempt path with one owned process per attempt uses 21 ordinary
+    controls, leaving adapter headroom. Abusive excess controls are summarized
     rather than retained. *)
 val control_event_reserve : int
+
+(** Maximum pending ordinary non-terminal controls. The remaining two reserve
+    slots are dedicated to one truncation marker and one terminal. *)
+val max_pending_control_events : int
 
 (** [create_sink ~sw ~now ?on_event ()] creates a sequencer and, when a
     callback is supplied, one task-local callback-drain fiber. [now] must return
@@ -146,7 +150,41 @@ val emit_terminal : sink -> terminal -> unit
 
 (** Internal delivery state used by {!Task_runtime}. *)
 module Private : sig
-  type pending_delivery = {event_count : int; agent_text_bytes : int}
+  (** Exhaustive payload partition shared by queueing and post-delivery bounded
+      collection. Adding a payload constructor must update this classifier. *)
+  type payload_class =
+    | Agent_text_observation of string
+    | Token_usage_observation
+    | Session_observation
+    | Tool_observation
+    | Nonterminal_control
+    | Delivery_truncation_marker
+    | Terminal_event
+
+  val classify_payload : payload -> payload_class
+
+  (** Collector applying the same 192-observation, 62 ordinary-control,
+      dedicated-marker, dedicated-terminal, and 64 KiB text partition after
+      callback delivery. Multiple delivered truncation markers are folded into
+      the retained marker with saturating counts. *)
+  type bounded_collector
+
+  type collected_delivery = {events : t list; omitted_events : int}
+
+  val create_bounded_collector : unit -> bounded_collector
+
+  val collect_bounded : bounded_collector -> t -> unit
+
+  val collected_delivery : bounded_collector -> collected_delivery
+
+  type pending_delivery = {
+    event_count : int;
+    observational_event_count : int;
+    control_event_count : int;
+    agent_text_bytes : int;
+    truncation_marker_retained : bool;
+    terminal_event_count : int;
+  }
 
   (** Resolves after the terminal callback returns. It resolves immediately
       after terminal enqueue when the sink has no callback. *)

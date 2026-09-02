@@ -48,77 +48,6 @@ let max_captured_events = Task_event.max_pending_events
 
 let max_captured_agent_text_bytes = Task_event.max_pending_agent_text_bytes
 
-let max_captured_observations = Task_event.max_pending_observational_events
-
-let max_captured_nonterminal_controls = Task_event.control_event_reserve - 1
-
-let saturating_increment value = if value = max_int then max_int else value + 1
-
-type event_collector = {
-  mutable events_rev : Task_event.t list;
-  mutable observations : int;
-  mutable nonterminal_controls : int;
-  mutable agent_text_bytes : int;
-  mutable omitted_events : int;
-  mutable terminal_retained : bool;
-}
-
-let create_event_collector () =
-  {
-    events_rev = [];
-    observations = 0;
-    nonterminal_controls = 0;
-    agent_text_bytes = 0;
-    omitted_events = 0;
-    terminal_retained = false;
-  }
-
-let omit_event collector =
-  collector.omitted_events <- saturating_increment collector.omitted_events
-
-let retain_event collector event =
-  collector.events_rev <- event :: collector.events_rev
-
-let capture_observation collector event agent_text_bytes =
-  if
-    collector.observations < max_captured_observations
-    && agent_text_bytes
-       <= max_captured_agent_text_bytes - collector.agent_text_bytes
-  then begin
-    collector.observations <- collector.observations + 1 ;
-    collector.agent_text_bytes <- collector.agent_text_bytes + agent_text_bytes ;
-    retain_event collector event
-  end
-  else omit_event collector
-
-let capture_event collector event =
-  match event.Task_event.payload with
-  | Task_event.Agent_text_delta text ->
-      capture_observation collector event (String.length text)
-  | Task_event.Token_usage _ | Task_event.Session_id _
-  | Task_event.Tool_started _ | Task_event.Tool_finished _ ->
-      capture_observation collector event 0
-  | Task_event.Terminal _ ->
-      if collector.terminal_retained then omit_event collector
-      else begin
-        collector.terminal_retained <- true ;
-        retain_event collector event
-      end
-  | _ ->
-      if
-        collector.nonterminal_controls < max_captured_nonterminal_controls
-      then begin
-        collector.nonterminal_controls <- collector.nonterminal_controls + 1 ;
-        retain_event collector event
-      end
-      else omit_event collector
-
-let event_trace collector =
-  {
-    events = List.rev collector.events_rev;
-    omitted_events = collector.omitted_events;
-  }
-
 let render_rich_completion_error error =
   Runtime_dispatch.render_detailed_error error.cause
 
@@ -270,19 +199,25 @@ let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?model ?mcp_servers
             ~read_only
             request
         in
-        let collector = create_event_collector () in
+        let collector = Task_event.Private.create_bounded_collector () in
         let handle =
           Task_runtime.start_task
             ~sw
             ~env
             ~limits
             ~backend_id:backend_name
-            ~on_event:(capture_event collector)
+            ~on_event:(Task_event.Private.collect_bounded collector)
             spec
         in
         let outcome = Task_runtime.await_detailed handle in
         Task_runtime.await_event_delivery handle ;
-        let event_trace = event_trace collector in
+        let collected = Task_event.Private.collected_delivery collector in
+        let event_trace =
+          {
+            events = collected.events;
+            omitted_events = collected.omitted_events;
+          }
+        in
         match outcome with
         | Ok execution ->
             Ok
