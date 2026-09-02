@@ -71,18 +71,18 @@ deterministic 64×64 PNG/JPEG and draft-2020-12 schema fixtures, passes every
 prompt on stdin, bounds version/task subprocesses, and prints only
 `PASS <mode>` or a fixed sanitized failure. Its schemas constrain object shape
 and color vocabulary but do not embed the expected image color or official-page
-text. Run all evidence modes with:
+text. Run the positive media evidence modes with:
 
 ```text
-./tools/probe_codex_media_web.py
+./tools/probe_codex_media_web.py media-initial resume-upload resume-reuse
 ```
 
-Individual evidence paths are named `media-initial`, `resume-upload`,
-`resume-reuse`, `web-cached`, and `web-live`. The final authenticated rerun on
-2026-09-02 passed all five content-dependent modes against exactly
-`codex-cli 0.131.0`. `--self-test` executes every mode-specific validator and
-negative assertion offline. Optional `--debug-public` reports only fixed
-search/fetch/official-page booleans.
+The probe also retains `web-cached` and `web-live` investigation modes. The final
+authenticated rerun on 2026-09-02 passed all three media modes against exactly
+`codex-cli 0.131.0`; cached mode remained search-only but failed its content
+assertion, so neither web mode backs a descriptor claim. `--self-test` executes
+every mode-specific validator and negative assertion offline. Optional
+`--debug-public` reports only fixed search/fetch/official-page booleans.
 
 ### Initial sealed absolute image plus native schema
 
@@ -153,6 +153,26 @@ independently checked to contain no `-i`. This proves that a schema-bearing retr
 can recall an image-derived fact from the already-fed session without duplicate
 uploads.
 
+### Cached search-only result
+
+Sanitized exact argv uses `-c 'web_search="cached"'`. The prompt requests only a
+site-restricted official Codex CLI search result and explicitly forbids opening,
+fetching, clicking, or reading any page. The validator requires a complete public
+search lifecycle and rejects any fetch/open-page action, including a negative
+self-test containing both search and fetch.
+
+Final authenticated result at 0.131.0:
+
+```text
+DEBUG public-web search=yes fetch=no official-page=no
+FAIL: Codex public answer failed the content assertion
+```
+
+The lifecycle proves the prompt can remain search-only, but the returned value
+repeatedly failed the content-dependent official-result check, including after a
+site-restricted bare-URL prompt. This is not sufficient positive capability
+evidence.
+
 ### Live web search and page fetch
 
 Sanitized exact argv:
@@ -163,16 +183,14 @@ codex exec --json --skip-git-repo-check --ignore-user-config \
   --output-schema '<task-schema-file>' -
 ```
 
-The prompt requires search, opening
+The separate live investigation prompt requires search, opening
 `https://developers.openai.com/codex/cli/`, and returning its visible primary
 H1. Outcome: exit 0; paired public web lifecycles establish both search and the
 official-page fetch, and the exact public answer is
-`{"page_h1":"Inspect, edit, and run code from your terminal"}`. The tagged
-schema/source separately pins `cached` as search without external live access
-and `disabled` as no web tool; CLI `-c` overrides remain the highest-precedence
-ordinary config layer. `web-cached` requires a complete cached-search lifecycle
-and the same exact official-page fact; `web-live` additionally requires the
-public search/fetch lifecycle and exact official URL.
+`{"page_h1":"Inspect, edit, and run code from your terminal"}`. This proves the
+live transport behavior only. Cabal's web gate is hierarchical, so live fetch
+cannot substitute for missing content-dependent evidence at the lower
+search-only level. The descriptor therefore advertises no web support.
 
 ## Adapter design and privacy
 
@@ -183,9 +201,10 @@ public search/fetch lifecycle and exact official URL.
   Codex receives only the sealed absolute path and never reopens the caller path.
 - `Upload_attachments` emits one `-i` pair per attachment.
   `Reuse_session_attachments` requires resume and emits none.
-- Web policy maps to fixed values only:
+- The adapter's fixed internal web mapping remains:
   `Web_disabled -> disabled`, `Web_search -> cached`, and
-  `Web_search_and_fetch -> live`.
+  `Web_search_and_fetch -> live`; central descriptor preflight rejects both
+  positive policies for the built-in Codex entry.
 - At `0.131.0`, `--ignore-user-config` suppresses only
   `$CODEX_HOME/config.toml` (authentication still uses `CODEX_HOME`); it does
   not suppress Cabal's managed project `.codex/config.toml`. The fixed task
@@ -223,6 +242,10 @@ pending/executing/released owner separates switch abandonment from active
 execution cleanup. Cleanup runs after all attempts and backend process cleanup,
 including timeout, cancellation, fatal exception, staging failure, cleanup
 retry, and abandoned-prepared-value paths. Cleanup retries are bounded to three;
+transport authorization is atomically and permanently revoked before the first
+deletion attempt, independently of retryable physical cleanup, so both sealed
+accessors reject after ordinary, timeout, cancellation, fatal, and persistent
+cleanup-failure release paths. Released inputs cannot be reauthorized. The
 detailed execution exposes only `Cleanup_not_required`, `Cleanup_succeeded`, or
 `Cleanup_failed`, and persistent failure emits a fixed warning without paths or
 exception data. Non-success results, structured schema failures, and propagating
@@ -247,21 +270,22 @@ paths before dispatch returns.
 | Resume media upload | yes | yes |
 | Session media reuse (no duplicate `-i`) | deterministic adapter test | yes |
 | Web disabled override | source + deterministic argv | yes |
-| Cached search | source + deterministic argv | yes |
-| Live search/fetch | yes | yes |
+| Cached search | search-only lifecycle, content assertion failed | no |
+| Live search/fetch | transport behavior observed, hierarchy incomplete | no |
 
-The descriptor advertises exactly PNG and JPEG media plus the maximum
-`Web_search_and_fetch` policy. The hierarchical web gate consequently permits
-disabled, cached-search, and live search/fetch requests. Arbitrary prompt file
-reading remains disabled because attachment transport does not establish that
-separate capability.
+The descriptor advertises exactly PNG and JPEG media and `Web_disabled`.
+The hierarchical gate rejects both cached-search and live search/fetch requests:
+a stronger transport mode is not evidence for the unproven lower level.
+Arbitrary prompt file reading remains disabled because attachment transport does
+not establish that separate capability.
 
 `Runtime_bootstrap.approved_runtime_capabilities` remains an independent trusted
-snapshot introduced by CBL-03. Its Codex media/web claims and versioned evidence
-were updated atomically with `Backend_registry`; exact-equality validation still
+snapshot introduced by CBL-03. Its Codex media claim and web downgrade were
+updated atomically with `Backend_registry`; exact-equality validation still
 rejects any future catalog/runtime drift. The enforced `0.131.0` baseline is the
-lowest version covered by the authenticated media, resume, web, schema, and
-strict-public-JSONL proof recorded here. Unsupported media kinds and malformed
+lowest version covered by the authenticated media, resume, schema, and
+strict-public-JSONL proof recorded here. Web observations remain investigation
+data, not positive capability evidence. Unsupported media kinds and malformed
 inputs still fail before config I/O, version probing, or backend process spawn.
 
 ## Deterministic tests
@@ -284,8 +308,9 @@ inputs still fail before config I/O, version probing, or backend process spawn.
 claim/evidence agreement and descriptor evidence validity, and pins the exact
 Codex claims. `test/test_runtime_bootstrap.ml` verifies that the independent
 snapshot matches and that drift fails closed. `test/test_task_preflight.ml` and
-`test/test_runtime_dispatch.ml` cover positive PNG/JPEG/web acceptance, exact
-adapter delivery intent, post-preflight namespace replacement/deletion, staged
+`test/test_runtime_dispatch.ml` cover positive PNG/JPEG acceptance, positive web
+rejection before side effects, exact adapter delivery intent, post-preflight
+namespace replacement/deletion, staged
 byte identity, retry reuse, one-shot concurrent/sequential claims, abandonment
 versus active cleanup ownership, bounded transient/persistent cleanup, sanitized
 cleanup telemetry, timeout/cancellation/fatal preservation, capability-before-

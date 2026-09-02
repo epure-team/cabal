@@ -451,9 +451,19 @@ secondary concurrent or sequential calls fail before backend/process effects.
 Pending abandonment and active execution have distinct cleanup ownership, so a
 switch release cannot remove an executing backend's inputs. Cleanup retries at
 most three times, emits only a fixed sanitized warning on persistent failure,
-and precedes outcome delivery or fatal propagation. Detailed results expose
+and precedes outcome delivery or fatal propagation. Transport authorization is
+atomically and permanently revoked before the first deletion attempt; both
+sealed accessors reject after release even when physical deletion fails and is
+retried. Detailed results expose
 `cleanup_status`; cleanup failure does not replace a non-success backend result,
 structured schema failure, or the identity of a propagating fatal exception.
+The `cleanup_status` field addition is intentionally source-breaking for direct
+`task_execution` record literals and exhaustive patterns. Prefer
+`Backend_types.make_task_execution`, whose cleanup default is
+`Cleanup_not_required`; pinned literals must add
+`cleanup_status = Backend_types.Cleanup_not_required`. Consumers that inspect
+central cleanup must handle `Cleanup_not_required`, `Cleanup_succeeded`, and
+`Cleanup_failed`; patterns that deliberately ignore cleanup should end in `_`.
 After preflight,
 dispatch runs one bounded version command, rejects parseable versions below the
 descriptor baseline, and checks runtime availability before execution. Missing
@@ -461,26 +471,34 @@ or unparseable version output keeps the compatibility skip policy; availability
 must still pass. Eio cancellation is normalized to `Cancelled` only after
 task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
-Codex is the only built-in currently advertising media/web transport: at the
-enforced `0.131.0` baseline it accepts exactly PNG/JPEG and up to
-`Web_search_and_fetch`, backed by the reproducible
-`tools/probe_codex_media_web.py` probe. Other built-ins remain media-disabled and
-`Web_disabled`. Direct low-level Codex calls remain compatible only for no
+Codex is the only built-in currently advertising media transport: at the
+enforced `0.131.0` baseline it accepts exactly PNG/JPEG, backed by the
+reproducible `tools/probe_codex_media_web.py` probe. Every built-in, including
+Codex, advertises `Web_disabled`. The final authenticated cached-mode probe
+reported `search=yes`, `fetch=no`, and `official-page=no`, but repeatedly failed
+its content-dependent official-result assertion. Live fetch behavior cannot
+establish the lower search-only level in a hierarchical gate, so Cabal makes no
+Codex web claim. Direct low-level Codex calls remain compatible only for no
 attachments plus `Web_disabled`; sensitive media/web calls fail before config
 I/O or spawn unless central dispatch installed the matching sealed authorization.
 The adapter never consults mutable global registry state for that decision.
 
-For authenticated manual verification, install and authenticate exactly
-`codex-cli 0.131.0`, then run `./tools/probe_codex_media_web.py` (or list selected
-modes). The five modes assert blue-PNG/red-JPEG recognition, a newly uploaded
-green image, session-only recall with no `-i`, cached search, and live
-search/fetch of the exact primary H1 on the official Codex CLI page. Schemas
-constrain structure without embedding the expected color or page text. The
-probe has bounded subprocess deadlines, creates private `0o700` input storage
+For authenticated media verification, install and authenticate exactly
+`codex-cli 0.131.0`, then run
+`./tools/probe_codex_media_web.py media-initial resume-upload resume-reuse`. The
+media modes assert blue-PNG/red-JPEG recognition, a newly uploaded green image,
+and session-only recall with no `-i`. The retained `web-cached` and `web-live`
+modes are investigation probes, not positive descriptor evidence; the default
+all-mode run remains red while cached search cannot pass its content assertion.
+Schemas constrain structure without embedding the expected color or page text.
+The probe has bounded subprocess deadlines, creates private `0o700` input storage
 outside its working directory, passes absolute `0o600` fixture paths, suppresses
 raw JSONL and stderr, and reports only sanitized `PASS <mode>` / `FAIL` lines.
-`--self-test` runs all mode validators without Codex or credentials;
-`--debug-public` prints only fixed search/fetch/official-page booleans. The probe
+`--self-test` runs all mode validators, including search-plus-fetch rejection for
+cached mode, without Codex or credentials. Invalid arguments, malformed records,
+timeouts, and interruption return fixed diagnostics without argparse usage,
+tracebacks, supplied values, or paths. `--debug-public` prints only fixed
+search/fetch/official-page booleans. The probe
 never prints fixture, workspace, authentication, session, tool-argument, or raw
 backend data.
 

@@ -106,6 +106,16 @@ standalone OCaml library and as the backend abstraction layer vendored under
   executions, and emit fixed diagnostics without paths or exception payloads.
   Cleanup failure must not replace a non-success backend result, structured
   schema failure, or a propagating fatal exception's identity.
+- Owner release atomically and permanently revokes transport authorization before
+  its first physical deletion attempt. Keep authorization and retryable physical
+  cleanup as separate state: cleanup failure must never reactivate either
+  `authorized_attachment_paths` or `sealed_attachment_delivery`, and released
+  prepared inputs cannot be authorized again.
+- Adding `task_execution.cleanup_status` is source-breaking for exhaustive record
+  literals/patterns. Prefer `Backend_types.make_task_execution`, whose default is
+  `Cleanup_not_required`; pinned literals must add
+  `cleanup_status = Backend_types.Cleanup_not_required`. Cleanup-aware consumers
+  handle all three constructors; intentionally cleanup-agnostic patterns use `_`.
 - Sealed staging protects against caller workspace path replacement and, through
   permissions, accidental/cross-user reads. It does not defend against hostile
   same-UID processes, privileged/system-level access, or a compromised OS.
@@ -117,9 +127,11 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Positive `media_support` and `web_support` claims require versioned
   `feature_evidence`. `E2e_test` evidence names its reproducible test in
   `notes`; `Manual_probe` stores the exact command in its payload.
-- Codex is the only built-in with positive media/web claims: exactly PNG/JPEG and
-  maximum `Web_search_and_fetch` at baseline `0.131.0`. All other built-ins remain
-  media-disabled and `Web_disabled`. Native JSON schema evidence remains
+- Codex is the only built-in with a positive media claim: exactly PNG/JPEG at
+  baseline `0.131.0`. Every built-in, including Codex, remains `Web_disabled`.
+  The final cached probe produced search without fetch but failed its
+  content-dependent official-result assertion; live fetch is not evidence for
+  the lower search-only hierarchical level. Native JSON schema evidence remains
   independently mandatory and must not be weakened.
 - Codex uploads only centrally sealed absolute paths and never original
   workspace paths. Sensitive low-level Codex calls without matching central
@@ -128,9 +140,11 @@ standalone OCaml library and as the backend abstraction layer vendored under
   delivery accessor and must not re-read `Backend_registry` or reconstruct retry
   delivery policy.
 - The Codex media/web probe must remain content-dependent: exact color assertions
-  for initial/new/resumed images, no `-i` on reuse, and exact official-page facts
-  plus public web lifecycle evidence. Keep subprocesses bounded and all
-  diagnostics fixed/sanitized; `--self-test` must exercise every mode validator.
+  for initial/new/resumed images, no `-i` on reuse, search-only cached prompts,
+  fetch rejection for cached evidence, and public live web lifecycle evidence.
+  Keep subprocesses bounded and all diagnostics fixed/sanitized; argparse errors
+  and interruption must emit no usage, traceback, supplied value, or path.
+  `--self-test` must exercise every validator and these negative CLI paths.
 
 ## Json_schema_validator — Story #623
 
