@@ -325,6 +325,49 @@ let register_descriptor d =
   if not (List.exists (fun e -> e.id = d.id) !extra_descriptors) then
     extra_descriptors := d :: !extra_descriptors
 
+(* mock-agent's descriptor is seeded here, at module initialisation, rather
+   than by whichever startup path happens to run first.
+
+   The bug this fixes: [supports_read_only] falls through to [None -> false]
+   for a backend with no descriptor, so a seam that registered the module but
+   not the descriptor made the read-only validator gate refuse [mock-agent]
+   claiming "read_only_support=false" -- the exact opposite of the record
+   below.  Whether a capability is declared cannot depend on registration
+   order; it is a static fact about a module compiled into this library.
+
+   It is seeded as an EXTRA descriptor, not added to [builtin_backends], and
+   the distinction is deliberate.  [builtin_backends] feeds [all ()] and
+   [read_only_safe_backend_ids ()] -- the latter being the list a human is
+   shown as "use one of these instead" when a validator is refused.
+   mock-agent is a deterministic stub that replays canned fixture text, so a
+   validator routed to it approves whatever the fixture says.  Advertising it
+   as a read-only-safe alternative would be inviting exactly the silent
+   governance hole that [test_demo_517]'s "validators do not gain mutable
+   powers accidentally" exists to prevent.  Selectable when you name it,
+   never suggested. *)
+let () =
+  register_descriptor
+    {
+      id = "mock-agent";
+      display_name = "Mock Agent (integration tests only)";
+      binary_name = "mock-agent";
+      baseline_version = "0.0.0";
+      capabilities =
+        {
+          structured_output = true;
+          streaming_output = false;
+          session_resume = false;
+          mcp_support = Mcp_none;
+          read_only_support = true;
+          project_config_surface = Config_none;
+          precedence_confidence = High;
+          generated_lsp_config = false;
+          file_reading = false;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
+        };
+    }
+
 let all () = builtin_backends
 
 let unsupported_capability_notes () = unsupported_capability_notes_data

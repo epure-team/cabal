@@ -25,14 +25,15 @@ let find_desc id =
   | Some d -> d
   | None -> Alcotest.failf "backend descriptor not found for id=%s" id
 
+(* The host's real registration path.  This used to be a hand-rolled copy of
+   the five OCaml backends -- the same copy that existed at fifteen other
+   seams and that this test's own subject, [Backend_registry.all ()], had
+   drifted away from.  Calling [Bootstrap.ensure] instead means the test
+   exercises what production does, and cannot drift again.  [Registry.clear]
+   does not reset Bootstrap's memo, so [reset] must accompany it. *)
 let register_host_runtime_backends () =
-  Registry.clear () ;
-  Adapter_loader.register_all () ;
-  Registry.register (module Claude_code) ;
-  Registry.register (module Gemini_cli) ;
-  Registry.register (module Codex_cli) ;
-  Registry.register (module Opencode_cli) ;
-  Registry.register (module Copilot_cli)
+  Bootstrap.reset () ;
+  Bootstrap.ensure ()
 
 let with_host_runtime_backends f =
   Registry.clear () ;

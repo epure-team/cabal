@@ -16,14 +16,16 @@ let with_tmpdir f =
       ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir))))
     (fun () -> f dir)
 
+(* Was a hand-rolled copy of the five OCaml backends -- one more instance of
+   the duplication this file's subject exists to check.  It also omitted
+   Mock_agent, so the moment [Backend_registry.all ()] gained that descriptor
+   the conformance walk below would have failed looking for a runtime module
+   that nothing here registered.  [Bootstrap.ensure] is the production path;
+   [reset] is needed because [Registry.clear] does not invalidate its memo. *)
 let register_builtin_runtime_backends () =
   Registry.clear () ;
-  Adapter_loader.register_all () ;
-  Registry.register (module Claude_code) ;
-  Registry.register (module Codex_cli) ;
-  Registry.register (module Opencode_cli) ;
-  Registry.register (module Gemini_cli) ;
-  Registry.register (module Copilot_cli)
+  Bootstrap.reset () ;
+  Bootstrap.ensure ()
 
 let epure_mcp_server () =
   Backend_types.make_mcp_server_config

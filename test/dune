@@ -292,3 +292,8 @@
  (name test_live_session_names)
  (libraries cabal alcotest)
  (modules test_live_session_names))
+
+(test
+ (name test_bootstrap)
+ (libraries cabal alcotest unix)
+ (modules test_bootstrap))

@@ -251,8 +251,24 @@ let register_all ?project_dir ?sw ?env () =
     (fun (_name, content) ->
       match load_string ~source:"builtin" content with
       | Ok cfg ->
-          let backend = Yaml_adapter.make_backend cfg in
-          Registry.register backend
+          (* Builtin adapters are the lowest priority tier, so they must not
+             displace a backend that is already registered -- in practice the
+             native OCaml backend of the same id, five of which the bundled
+             YAML files duplicate.  The test is deliberately BEFORE
+             [make_backend]: that function's side effect is
+             [Hashtbl.replace config_table cfg.name cfg], and once the table
+             holds a YAML row under a native's id, [Yaml_adapter.config_of]
+             returns it for the native backend too -- which is what made
+             [epure adapters list] label all five natives YAML-sourced, and
+             what falsifies config_of's documented "None for native backends".
+             Skipping the registration but not the table write would leave that
+             symptom in place, silently.  User-global and project-local
+             adapters below are deliberately NOT skipped: an explicit override
+             should replace a native, and should warn while doing it. *)
+          if Registry.get cfg.name <> None then ()
+          else
+            let backend = Yaml_adapter.make_backend cfg in
+            Registry.register backend
       | Error msg ->
           Diagnostics.warn
             "[adapter_loader] builtin adapter parse error: %s"
