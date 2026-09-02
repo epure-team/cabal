@@ -62,6 +62,32 @@ type unsupported_capability_note = {
 
 type descriptor_registration_error = Descriptor_id_already_registered
 
+let codex_media_evidence : Backend_types.feature_evidence =
+  {
+    tested_at_version = "0.131.0";
+    test_method =
+      Backend_types.Manual_probe
+        "codex exec --json --skip-git-repo-check --ignore-user-config -s read-only -c 'web_search=\"disabled\"' -i '<workspace-image-1.png>' -i '<workspace-image-2.jpg>' --output-schema '<task-schema-file>' -";
+    notes =
+      "Authenticated PNG/JPEG upload, native schema composition, and resume probes are recorded in docs/native-json-schema-investigation/codex.md.";
+    evidence_url =
+      Some
+        "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
+  }
+
+let codex_web_evidence : Backend_types.feature_evidence =
+  {
+    tested_at_version = "0.131.0";
+    test_method =
+      Backend_types.Manual_probe
+        "codex exec --json --skip-git-repo-check --ignore-user-config -s read-only -c 'web_search=\"live\"' -";
+    notes =
+      "Authenticated live web search returned paired web_search records and fetched an official public page; see docs/native-json-schema-investigation/codex.md.";
+    evidence_url =
+      Some
+        "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/tests/suite/web_search.rs";
+  }
+
 let builtin_backends =
   [
     {
@@ -97,7 +123,7 @@ let builtin_backends =
       id = "codex";
       display_name = "Codex CLI";
       binary_name = "codex";
-      baseline_version = "0.122.0";
+      baseline_version = "0.131.0";
       capabilities =
         {
           structured_output = true;
@@ -109,9 +135,16 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = false;
           file_reading = false;
-          media_support = {media_types = []; evidence = None};
+          media_support =
+            {
+              media_types = [Backend_types.Png; Backend_types.Jpeg];
+              evidence = Some codex_media_evidence;
+            };
           web_support =
-            {maximum = Backend_types.Web_disabled; evidence = None};
+            {
+              maximum = Backend_types.Web_search_and_fetch;
+              evidence = Some codex_web_evidence;
+            };
           native_json_schema_output = true;
           native_json_schema_output_evidence =
             Some

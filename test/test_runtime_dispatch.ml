@@ -160,6 +160,18 @@ let write_executable path contents =
     (fun () -> output_string channel contents) ;
   Unix.chmod path 0o700
 
+let write_binary_file path contents =
+  let channel = open_out_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr channel)
+    (fun () -> output_string channel contents)
+
+let read_file path =
+  let channel = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in_noerr channel)
+    (fun () -> really_input_string channel (in_channel_length channel))
+
 let spec ?(working_dir = ".") ?(read_only = false) ?resume_session_id
     ?json_schema ?(attachments = []) ?(web_access = Backend_types.Web_disabled)
     () =
@@ -454,7 +466,47 @@ let test_invalid_preflight_never_spawns_or_calls_backend () =
         "unexpected capability error: %s"
         (Runtime_dispatch.render_error error)
   | Ok _ -> Alcotest.fail "unsupported capability must fail") ;
-  check_no_side_effects "invalid capability"
+  check_no_side_effects "invalid capability" ;
+
+  let png = "\x89PNG\r\n\x1a\n" in
+  write_binary_file (Filename.concat temp_dir "unsupported.png") png ;
+  let unsupported_attachment =
+    Backend_types.
+      {
+        id = "unsupported-media";
+        path = "unsupported.png";
+        media_type = Png;
+        sha256 =
+          "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6";
+        size_bytes = String.length png;
+      }
+  in
+  let media_limits =
+    Task_preflight.
+      {max_attachments = 1; max_file_size_bytes = 16; max_total_size_bytes = 16}
+  in
+  (match
+     run
+       ~env
+       ~sw
+       ~backend_id:id
+       ~limits:media_limits
+       (spec
+          ~working_dir:temp_dir
+          ~attachments:[unsupported_attachment]
+          ())
+   with
+  | Error
+      (Runtime_dispatch.Preflight_failed
+        (Task_preflight.Capability
+          (Task_preflight.Unsupported_media_type Backend_types.Png))) ->
+      ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected unsupported-media error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "unsupported media must fail before spawn") ;
+  check_no_side_effects "unsupported media"
 
 let test_enforcer_uses_resolved_backend_snapshot_for_retry () =
   with_registry @@ fun () ->
@@ -764,6 +816,231 @@ let test_hardened_below_baseline_stops_before_backend () =
     false
     (Sys.file_exists backend_marker)
 
+let test_hardened_codex_dispatch_uses_proven_media_web_transport () =
+  with_registry @@ fun () ->
+  with_temp_dir "codex-media-web" @@ fun temp_dir ->
+  let version_marker = Filename.concat temp_dir "codex-version-ran" in
+  let backend_marker = Filename.concat temp_dir "codex-backend-ran" in
+  let argv_marker = Filename.concat temp_dir "codex-argv" in
+  let fake_codex = Filename.concat temp_dir "codex" in
+  write_executable
+    fake_codex
+    (Printf.sprintf
+       {|#!/bin/sh
+if [ "${1-}" = "--version" ]; then
+  printf 'version\n' >> %s
+  printf '%%s\n' 'codex-cli 0.131.0'
+  exit 0
+fi
+printf 'backend\n' >> %s
+: > %s
+for arg in "$@"; do
+  printf '%%s\n' "$arg" >> %s
+done
+printf '%%s\n' '{"type":"thread.started","thread_id":"thread-123"}'
+printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'
+printf '%%s\n' '{"type":"turn.completed","usage":{"input_tokens":2,"cached_input_tokens":1,"output_tokens":1}}'
+|}
+       (Filename.quote version_marker)
+       (Filename.quote backend_marker)
+       (Filename.quote argv_marker)
+       (Filename.quote argv_marker)) ;
+  with_path_prefix temp_dir @@ fun () ->
+  (match
+     Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins
+       ()
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let limits =
+    Task_preflight.
+      {max_attachments = 2; max_file_size_bytes = 16; max_total_size_bytes = 32}
+  in
+  let bad_bytes = "not-a-png" in
+  write_binary_file (Filename.concat temp_dir "bad.png") bad_bytes ;
+  let bad_attachment =
+    Backend_types.
+      {
+        id = "bad";
+        path = "bad.png";
+        media_type = Png;
+        sha256 =
+          "f6340893e73ce5f7c019eeebfc6d38224824f8f7565b421b51d54c1c0d25d5c6";
+        size_bytes = String.length bad_bytes;
+      }
+  in
+  (match
+     run
+       ~env
+       ~sw
+       ~backend_id:"codex"
+       ~limits
+       (spec ~working_dir:temp_dir ~attachments:[bad_attachment] ())
+   with
+  | Error
+      (Runtime_dispatch.Preflight_failed
+        (Task_preflight.Input (Task_preflight.Media_type_mismatch _))) ->
+      ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected invalid-media error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "invalid media must fail") ;
+  Alcotest.(check bool)
+    "rejected media creates no Codex project config"
+    false
+    (Sys.file_exists (Filename.concat temp_dir ".codex/config.toml")) ;
+  Alcotest.(check bool)
+    "rejected media runs no version process"
+    false
+    (Sys.file_exists version_marker) ;
+  Alcotest.(check bool)
+    "rejected media runs no backend process"
+    false
+    (Sys.file_exists backend_marker) ;
+
+  let png = "\x89PNG\r\n\x1a\n" in
+  let jpeg = "\xff\xd8\xff" in
+  write_binary_file (Filename.concat temp_dir "front image.png") png ;
+  write_binary_file (Filename.concat temp_dir "back.jpg") jpeg ;
+  let attachments =
+    Backend_types.
+      [
+        {
+          id = "front";
+          path = "front image.png";
+          media_type = Png;
+          sha256 =
+            "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6";
+          size_bytes = String.length png;
+        };
+        {
+          id = "back";
+          path = "back.jpg";
+          media_type = Jpeg;
+          sha256 =
+            "6e568e1f67fba258184c78181539e5e8fdee447e49bb706fc0ea34fbf12336a5";
+          size_bytes = String.length jpeg;
+        };
+      ]
+  in
+  let schema =
+    `Assoc
+      [
+        ("type", `String "object");
+        ("properties", `Assoc [("ok", `Assoc [("type", `String "boolean")])]);
+      ]
+  in
+  (match
+     run
+       ~env
+       ~sw
+       ~backend_id:"codex"
+       ~limits
+       (spec
+          ~working_dir:temp_dir
+          ~attachments
+          ~web_access:Backend_types.Web_search_and_fetch
+          ~json_schema:schema
+          ())
+   with
+  | Ok result ->
+      Alcotest.(check bool)
+        "proven Codex transport succeeds"
+        true
+        (result.Backend_types.status = Backend_types.Success) ;
+      Alcotest.(check string) "strict agent text" "ok" result.agent_text
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)) ;
+  Alcotest.(check bool)
+    "accepted input reaches version gate"
+    true
+    (Sys.file_exists version_marker) ;
+  Alcotest.(check bool)
+    "accepted input reaches Codex adapter process"
+    true
+    (Sys.file_exists backend_marker) ;
+  Alcotest.(check bool)
+    "accepted input creates managed Codex project config"
+    true
+    (Sys.file_exists (Filename.concat temp_dir ".codex/config.toml")) ;
+  let argv = read_file argv_marker in
+  let argv_lines = String.split_on_char '\n' argv in
+  Alcotest.(check int)
+    "requested upload intent emits two image flags"
+    2
+    (List.length (List.filter (String.equal "-i") argv_lines)) ;
+  List.iter
+    (fun expected ->
+      Alcotest.(check bool)
+        ("Codex argv contains " ^ expected)
+        true
+        (contains argv expected))
+    [
+      "front image.png";
+      "back.jpg";
+      {|web_search="live"|};
+      "--output-schema";
+    ]
+
+let test_hardened_codex_rejects_pre_proof_version () =
+  with_registry @@ fun () ->
+  with_temp_dir "codex-baseline" @@ fun temp_dir ->
+  let version_marker = Filename.concat temp_dir "codex-version-ran" in
+  let backend_marker = Filename.concat temp_dir "codex-backend-ran" in
+  let fake_codex = Filename.concat temp_dir "codex" in
+  write_executable
+    fake_codex
+    (Printf.sprintf
+       {|#!/bin/sh
+if [ "${1-}" = "--version" ]; then
+  printf 'version\n' >> %s
+  printf '%%s\n' 'codex-cli 0.130.0'
+  exit 0
+fi
+printf 'backend\n' >> %s
+printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"unexpected"}}'
+|}
+       (Filename.quote version_marker)
+       (Filename.quote backend_marker)) ;
+  with_path_prefix temp_dir @@ fun () ->
+  (match
+     Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins
+       ()
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  (match
+     run
+       ~env
+       ~sw
+       ~backend_id:"codex"
+       (spec ~working_dir:temp_dir ())
+   with
+  | Error Runtime_dispatch.Backend_version_unsupported -> ()
+  | Error error ->
+      Alcotest.failf
+        "unexpected Codex version error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "Codex 0.130.0 must be below the proven baseline") ;
+  Alcotest.(check bool)
+    "pre-proof Codex version is probed"
+    true
+    (Sys.file_exists version_marker) ;
+  Alcotest.(check bool)
+    "pre-proof Codex version does not execute adapter"
+    false
+    (Sys.file_exists backend_marker) ;
+  Alcotest.(check bool)
+    "pre-proof Codex version creates no project config"
+    false
+    (Sys.file_exists (Filename.concat temp_dir ".codex/config.toml"))
+
 let test_dispatch_sanitizes_backend_exceptions () =
   with_registry @@ fun () ->
   Eio_posix.run @@ fun env ->
@@ -1048,6 +1325,10 @@ let () =
             "invalid preflight never spawns or calls"
             `Quick
             test_invalid_preflight_never_spawns_or_calls_backend;
+          Alcotest.test_case
+            "hardened Codex uses proven media/web transport"
+            `Quick
+            test_hardened_codex_dispatch_uses_proven_media_web_transport;
         ] );
       ( "resolution",
         [
@@ -1075,6 +1356,10 @@ let () =
             "hardened below-baseline backend is blocked"
             `Quick
             test_hardened_below_baseline_stops_before_backend;
+          Alcotest.test_case
+            "Codex rejects versions below authenticated baseline"
+            `Quick
+            test_hardened_codex_rejects_pre_proof_version;
           Alcotest.test_case
             "ordinary backend exceptions are sanitized"
             `Quick

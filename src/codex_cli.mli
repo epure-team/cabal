@@ -16,13 +16,14 @@
     The backend uses [codex exec --json --full-auto] for non-interactive
     sandboxed execution (or [-s read-only] for validators).
 
-    Media/web argv construction is implemented and version-probed, but
-    {!run_task} still applies the effective descriptor gate before config I/O or
-    spawn. The built-in descriptor remains media/web-disabled until the
-    independent hardened runtime capability snapshot can be updated atomically.
+    Media/web argv construction is implemented and authenticated at the
+    enforced 0.131.0 baseline. {!run_task} applies the effective descriptor gate
+    before config I/O or spawn: the built-in contract accepts PNG/JPEG images
+    and web access through search-and-fetch, with versioned evidence mirrored in
+    the independent hardened runtime capability snapshot.
 
     {b MCP Integration:}
-    Codex 0.122.0 supports MCP via [.codex/config.toml].  Épure generates
+    Codex 0.131.0 supports MCP via [.codex/config.toml].  Épure generates
     this file with a template MCP section (disabled/comment-only by default)
     and serializes approved runtime [mcp_servers] into Codex TOML
     [mcp_servers.<name>] tables.  The config file is discovered automatically

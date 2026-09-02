@@ -154,7 +154,7 @@ let test_baseline_codex_parseable () =
   Alcotest.check
     result_semver
     "codex baseline parses"
-    (ok 0 122 0)
+    (ok 0 131 0)
     (Backend_version.of_string d.Backend_registry.baseline_version)
 
 let test_baseline_opencode_parseable () =
@@ -389,7 +389,7 @@ let test_gate_wired_passes_above_baseline () =
   match
     Cabal.Backend_completer.run_gate_for_output
       ~backend_name:"codex"
-      ~version_output:"codex 0.123.0"
+      ~version_output:"codex 0.132.0"
   with
   | Ok () -> ()
   | Error msg -> Alcotest.failf "expected gate to pass above baseline: %s" msg
@@ -666,7 +666,7 @@ let () =
             `Quick
             test_baseline_claude_code_parseable;
           Alcotest.test_case
-            "codex 0.122.0"
+            "codex 0.131.0"
             `Quick
             test_baseline_codex_parseable;
           Alcotest.test_case

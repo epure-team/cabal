@@ -457,40 +457,22 @@ let test_invalid_transport_fails_before_filesystem_or_spawn () =
     Codex_cli.run_task
       ~sw
       ~env
-      (command_spec ~attachments:[attachment] ())
+      (command_spec
+         ~attachments:[attachment]
+         ~web_access:Backend_types.Web_search_and_fetch
+         ())
   in
   match result.status with
   | Backend_types.Failed msg ->
+      Alcotest.(check bool)
+        "advertised media/web passed capability validation before rejection"
+        true
+        (contains_substring msg "an attachment path is not workspace-relative") ;
       Alcotest.(check bool)
         "failure does not reveal attachment path"
         false
         (contains_substring msg attachment.path)
   | _ -> Alcotest.fail "invalid request did not fail before spawn"
-
-let test_unsupported_capabilities_fail_before_filesystem_or_spawn () =
-  Eio_posix.run @@ fun env ->
-  Eio.Switch.run @@ fun sw ->
-  let cases =
-    [
-      ( command_spec
-          ~attachments:[media_attachment Backend_types.Png]
-          (),
-        "backend does not support requested PNG attachments" );
-      ( command_spec ~web_access:Backend_types.Web_search (),
-        "backend does not support the requested web access level" );
-    ]
-  in
-  List.iter
-    (fun (spec, expected_error) ->
-      let result = Codex_cli.run_task ~sw ~env spec in
-      match result.status with
-      | Backend_types.Failed msg ->
-          Alcotest.(check bool)
-            "capability error is returned before setup/spawn"
-            true
-            (contains_substring msg expected_error)
-      | _ -> Alcotest.fail "unsupported capability did not fail before spawn")
-    cases
 
 let assert_schema_file_wiring ?resume_session_id () =
   let spec =
@@ -627,9 +609,6 @@ let command_construction_tests =
     ( "invalid transport fails before filesystem/spawn",
       `Quick,
       test_invalid_transport_fails_before_filesystem_or_spawn );
-    ( "unsupported capabilities fail before filesystem/spawn",
-      `Quick,
-      test_unsupported_capabilities_fail_before_filesystem_or_spawn );
     ( "build_command with output schema",
       `Quick,
       test_build_command_with_output_schema_normal );

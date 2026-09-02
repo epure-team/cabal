@@ -5,14 +5,14 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Tests for Story #481 — Codex parity uplift (Codex 0.122.0).
+(** Tests for Story #481 — Codex parity uplift (Codex 0.131.0).
 
     Covers:
     - AC1: MCP support wired for approved entries; unapproved entries
            left disabled/template-only in generated config
     - AC2: Meaningful .codex/config.toml project config exists
     - AC3: Structured output, session ID, and resume behaviors preserved
-    - AC4: Capability flags match stable upstream docs for Codex 0.122.0 *)
+    - AC4: Capability flags match stable upstream docs for Codex 0.131.0 *)
 
 open Cabal
 
@@ -440,7 +440,7 @@ let test_codex_run_uses_project_mcp_without_transient_file () =
             true
             (Sys.file_exists marker)))
 
-(** {1 AC4 — All capability flags match stable upstream docs for Codex 0.122.0} *)
+(** {1 AC4 — All capability flags match stable upstream docs for Codex 0.131.0} *)
 
 let test_codex_capability_flags_match_baseline () =
   let open Backend_registry in
@@ -449,9 +449,9 @@ let test_codex_capability_flags_match_baseline () =
   | Some d ->
       let caps = d.capabilities in
       Alcotest.(check bool)
-        "AC4: baseline_version = 0.122.0"
+        "AC4: baseline_version = 0.131.0"
         true
-        (d.baseline_version = "0.122.0") ;
+        (d.baseline_version = "0.131.0") ;
       Alcotest.(check bool)
         "AC4: structured_output = true"
         true
@@ -465,7 +465,7 @@ let test_codex_capability_flags_match_baseline () =
         true
         caps.read_only_support ;
       Alcotest.(check bool)
-        "AC4: mcp_support = Mcp_config_file (parity with 0.122.0)"
+        "AC4: mcp_support = Mcp_config_file (parity with 0.131.0)"
         true
         (caps.mcp_support = Mcp_config_file) ;
       Alcotest.(check bool)
@@ -562,7 +562,7 @@ let () =
       ( "AC4 capability flags at baseline",
         [
           Alcotest.test_case
-            "all flags match Codex 0.122.0 upstream docs"
+            "all flags match Codex 0.131.0 upstream docs"
             `Quick
             test_codex_capability_flags_match_baseline;
         ] );

@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Backend | `codex` |
-| Cabal baseline | `0.122.0` |
+| Cabal baseline | `0.131.0` |
 | Installed/tested version | `codex-cli 0.131.0` |
 | Probe date | 2026-09-02 |
 | Sources accessed | 2026-09-02 |
@@ -13,7 +13,7 @@
 
 ## Upstream contracts inspected
 
-- Codex `0.122.0` `exec` CLI source (commit `230dcade`):
+- Historical Codex `0.122.0` `exec` CLI source (commit `230dcade`):
   <https://github.com/openai/codex/blob/230dcadee609fa99d6162fe1107457030e5270a7/codex-rs/exec/src/cli.rs>
 - Codex `0.131.0` `exec` CLI source:
   <https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/exec/src/cli.rs>
@@ -25,10 +25,11 @@
   legacy feature flags:
   <https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/tests/suite/web_search.rs>
 
-The baseline source contains all relevant surfaces: initial `-i/--image`,
-resume `-i/--image`, `--output-schema <FILE>`, `--json`, and the three
-`web_search` modes. The installed help and tagged `0.131.0` source confirm the
-same contracts.
+The tagged `0.131.0` baseline source contains all relevant surfaces: initial
+`-i/--image`, resume `-i/--image`, `--output-schema <FILE>`, `--json`, and the
+three `web_search` modes. The installed help confirms the same contracts; the
+historical `0.122.0` source remains linked to preserve the earlier native-schema
+investigation trail.
 
 Two ordering details are significant on resume:
 
@@ -159,27 +160,27 @@ the upstream test pins explicit `web_search` precedence over legacy web flags.
 | Capability | Transport proof | Advertised by the Codex descriptor in this branch |
 |---|---:|---:|
 | Native JSON schema | yes | yes (unchanged, independent evidence) |
-| PNG path media | yes | no |
-| JPEG path media | yes | no |
-| Resume media upload | yes | no |
-| Session media reuse (no duplicate `-i`) | deterministic adapter test | no |
-| Web disabled override | source + deterministic argv | yes as the existing default |
-| Cached search | source + deterministic argv | no |
-| Live search/fetch | yes | no |
+| PNG path media | yes | yes |
+| JPEG path media | yes | yes |
+| Resume media upload | yes | yes |
+| Session media reuse (no duplicate `-i`) | deterministic adapter test | yes |
+| Web disabled override | source + deterministic argv | yes |
+| Cached search | source + deterministic argv | yes |
+| Live search/fetch | yes | yes |
 
-The media/web transport code intentionally remains fail-closed at runtime.
-`Runtime_bootstrap.approved_runtime_capabilities` is an independent trusted
-snapshot introduced by CBL-03 and still pins Codex to `no_media` / `no_web`.
-Changing only `Backend_registry` makes hardened bootstrap reject Codex with
-`effective descriptor capabilities differ from the trusted runtime snapshot`.
-`src/runtime_bootstrap.ml` is outside CBL-07A's exclusive write scope, so this
-branch does not bypass or weaken that gate.
+The descriptor advertises exactly PNG and JPEG media plus the maximum
+`Web_search_and_fetch` policy. The hierarchical web gate consequently permits
+disabled, cached-search, and live search/fetch requests. Arbitrary prompt file
+reading remains disabled because attachment transport does not establish that
+separate capability.
 
-Enabling the proven claims requires one coordinated shared-file change: update
-the Codex entry in `Runtime_bootstrap.approved_runtime_capabilities` and the
-Codex descriptor together with identical versioned `feature_evidence`, then run
-the runtime/bootstrap/preflight suites. Until that integration is assigned,
-unsupported media/web requests fail before config I/O or process spawn.
+`Runtime_bootstrap.approved_runtime_capabilities` remains an independent trusted
+snapshot introduced by CBL-03. Its Codex media/web claims and versioned evidence
+were updated atomically with `Backend_registry`; exact-equality validation still
+rejects any future catalog/runtime drift. The enforced `0.131.0` baseline is the
+lowest version covered by the authenticated media, resume, web, schema, and
+strict-public-JSONL proof recorded here. Unsupported media kinds and malformed
+inputs still fail before config I/O, version probing, or backend process spawn.
 
 ## Deterministic tests
 
@@ -190,11 +191,15 @@ unsupported media/web requests fail before config I/O or process spawn.
 - image plus schema ordering;
 - disabled/cached/live web settings;
 - redacted argv;
-- fail-before-spawn behavior while the capability gate remains closed;
+- fail-before-spawn behavior for malformed or unsupported inputs;
 - positive public JSONL agent/session/tool/usage records; and
 - negative privacy fixtures for reasoning, errors, malformed input, raw
   fallback, tool arguments/results, and unsafe identifiers.
 
 `test/test_backend_registry.ml` iterates the full registry for media/web
-claim/evidence agreement and descriptor evidence validity; it also pins Codex
-as unadvertised until the independent runtime trust snapshot is updated.
+claim/evidence agreement and descriptor evidence validity, and pins the exact
+Codex claims. `test/test_runtime_bootstrap.ml` verifies that the independent
+snapshot matches and that drift fails closed. `test/test_task_preflight.ml` and
+`test/test_runtime_dispatch.ml` cover positive PNG/JPEG/web acceptance, exact
+adapter delivery intent, the `0.131.0` version gate, and rejected-input
+no-side-effect behavior.

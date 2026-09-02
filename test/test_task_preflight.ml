@@ -1023,6 +1023,33 @@ let test_non_native_json_schema_uses_fallback () =
     true
     (validate_capabilities descriptor (spec "/tmp" ~json_schema:schema) = Ok ())
 
+let test_codex_proven_media_and_web_capabilities () =
+  let descriptor =
+    match Backend_registry.find "codex" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Codex descriptor missing"
+  in
+  let attachments =
+    [
+      attachment ~id:"png" ~path:"cover.png" png;
+      attachment
+        ~id:"jpeg"
+        ~path:"back.jpg"
+        ~media_type:Backend_types.Jpeg
+        jpeg;
+    ]
+  in
+  List.iter
+    (fun web_access ->
+      Alcotest.(check bool)
+        "Codex accepts proven PNG/JPEG and web policy"
+        true
+        (validate_capabilities
+           descriptor
+           (spec "/tmp" ~attachments ~web_access)
+        = Ok ()))
+    [Backend_types.Web_search; Backend_types.Web_search_and_fetch]
+
 let input_tests =
   [
     ("valid PNG", `Quick, test_valid_png);
@@ -1073,6 +1100,9 @@ let capability_tests =
     ("read-only gate", `Quick, test_read_only_gate);
     ("session-resume gate", `Quick, test_session_resume_gate);
     ("non-native JSON schema fallback", `Quick, test_non_native_json_schema_uses_fallback);
+    ( "Codex proven media and web capabilities",
+      `Quick,
+      test_codex_proven_media_and_web_capabilities );
   ]
 
 let () =

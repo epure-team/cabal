@@ -25,6 +25,15 @@ let find_desc id =
   | Some d -> d
   | None -> Alcotest.failf "backend descriptor not found for id=%s" id
 
+let contains_substring haystack needle =
+  let hlen = String.length haystack in
+  let nlen = String.length needle in
+  let rec loop index =
+    index + nlen <= hlen
+    && (String.sub haystack index nlen = needle || loop (index + 1))
+  in
+  nlen = 0 || loop 0
+
 let register_host_runtime_backends () =
   Registry.clear () ;
   match
@@ -79,7 +88,7 @@ let test_codex_baseline () =
   let d = find_desc "codex" in
   Alcotest.(check string)
     "codex baseline"
-    "0.122.0"
+    "0.131.0"
     d.Backend_registry.baseline_version
 
 let test_opencode_baseline () =
@@ -262,18 +271,67 @@ let test_media_and_web_capability_evidence_invariants () =
         (Task_preflight.validate_descriptor d = Ok ()))
     (Backend_registry.all ())
 
-let test_codex_media_and_web_capabilities_remain_unadvertised () =
+let test_codex_media_and_web_capabilities_are_evidence_backed () =
   let d = find_desc "codex" in
   let media = d.capabilities.media_support in
-  Alcotest.(check (list bool))
-    "codex remains fail-closed until the independent runtime trust snapshot is updated"
-    [true; true; true; true]
-    [
-      media.media_types = [];
-      media.evidence = None;
-      d.capabilities.web_support.maximum = Backend_types.Web_disabled;
-      d.capabilities.web_support.evidence = None;
-    ]
+  Alcotest.(check bool)
+    "codex supports exactly PNG and JPEG"
+    true
+    (media.media_types = [Backend_types.Png; Backend_types.Jpeg]) ;
+  (match media.evidence with
+  | None -> Alcotest.fail "codex media evidence is missing"
+  | Some evidence ->
+      Alcotest.(check string)
+        "media evidence tested version"
+        "0.131.0"
+        evidence.tested_at_version ;
+      Alcotest.(check bool)
+        "media evidence is the authenticated manual probe"
+        true
+        (match evidence.test_method with
+        | Backend_types.Manual_probe command ->
+            contains_substring command "<workspace-image-1.png>"
+            && contains_substring command "<workspace-image-2.jpg>"
+            && contains_substring command "--output-schema"
+        | Backend_types.E2e_test -> false) ;
+      Alcotest.(check bool)
+        "media evidence references the investigation"
+        true
+        (contains_substring evidence.notes "codex.md")) ;
+  let web = d.capabilities.web_support in
+  Alcotest.(check bool)
+    "codex supports search and fetch"
+    true
+    (web.maximum = Backend_types.Web_search_and_fetch) ;
+  (match web.evidence with
+  | None -> Alcotest.fail "codex web evidence is missing"
+  | Some evidence ->
+      Alcotest.(check string)
+        "web evidence tested version"
+        "0.131.0"
+        evidence.tested_at_version ;
+      Alcotest.(check bool)
+        "web evidence is the authenticated live probe"
+        true
+        (match evidence.test_method with
+        | Backend_types.Manual_probe command ->
+            contains_substring command {|web_search="live"|}
+        | Backend_types.E2e_test -> false) ;
+      Alcotest.(check bool)
+        "web evidence references the investigation"
+        true
+        (contains_substring evidence.notes "codex.md")) ;
+  Alcotest.(check bool)
+    "media transport does not imply arbitrary prompt file references"
+    false
+    d.capabilities.file_reading ;
+  match d.capabilities.native_json_schema_output_evidence with
+  | None -> Alcotest.fail "independent native schema evidence is missing"
+  | Some evidence ->
+      Alcotest.(check (list string))
+        "native schema evidence remains independent"
+        ["0.131.0"; "2020-12"]
+        [evidence.tested_at_version; evidence.json_schema_draft]
 
 let test_non_codex_media_and_web_remain_disabled () =
   Backend_registry.all ()
@@ -516,9 +574,9 @@ let test_630_investigation_note_exists () =
 
 let test_630_investigation_note_cites_baseline () =
   Alcotest.(check bool)
-    "codex investigation note cites baseline_version 0.122.0"
+    "codex investigation note cites baseline_version 0.131.0"
     true
-    (note_contains "codex" "0.122.0")
+    (note_contains "codex" "0.131.0")
 
 (** Story #631 — opencode: AC2(b) documented non-support.
 
@@ -633,7 +691,7 @@ let () =
             "claude-code baseline 2.1.117"
             `Quick
             test_claude_code_baseline;
-          Alcotest.test_case "codex baseline 0.122.0" `Quick test_codex_baseline;
+          Alcotest.test_case "codex baseline 0.131.0" `Quick test_codex_baseline;
           Alcotest.test_case
             "opencode baseline 1.14.20"
             `Quick
@@ -686,9 +744,9 @@ let () =
             `Quick
             test_media_and_web_capability_evidence_invariants;
           Alcotest.test_case
-            "codex media and web support remains unadvertised"
+            "codex media and web support is evidence-backed"
             `Quick
-            test_codex_media_and_web_capabilities_remain_unadvertised;
+            test_codex_media_and_web_capabilities_are_evidence_backed;
           Alcotest.test_case
             "non-codex media and web support remains disabled"
             `Quick
@@ -751,7 +809,7 @@ let () =
             `Quick
             test_630_investigation_note_exists;
           Alcotest.test_case
-            "#630 codex investigation note cites baseline 0.122.0"
+            "#630 codex investigation note cites baseline 0.131.0"
             `Quick
             test_630_investigation_note_cites_baseline;
           Alcotest.test_case
