@@ -486,7 +486,15 @@ type cleanup_status =
     is measured once around the complete enforcer invocation and is not a sum of
     backend- or attempt-reported durations. [total_cost] aggregates each optional
     cost/token field independently across attempts. [final_session_id] is the
-    last non-empty session id returned by any completed attempt. *)
+    last non-empty session id returned by any completed attempt.
+
+    Adding [cleanup_status] was intentionally source-breaking for exhaustive
+    direct record literals and patterns. Downstream literals pinned to this API
+    must add [cleanup_status = Cleanup_not_required] when no central sealed-input
+    cleanup occurred. Prefer {!make_task_execution} for construction. Consumers
+    that inspect cleanup must handle [Cleanup_not_required],
+    [Cleanup_succeeded], and [Cleanup_failed]; consumers that intentionally
+    ignore future fields should use a record pattern ending in [_]. *)
 type task_execution = {
   final_result : task_result;
       (** Final projected result. On retry success this is the complete
@@ -610,6 +618,26 @@ val make_task_spec :
   ?json_schema:Yojson.Safe.t ->
   unit ->
   task_spec
+
+(** [make_task_execution ~final_result ()] is the canonical constructor for
+    direct, mock, and adapter-produced detailed executions. [attempts] defaults
+    to [[]]; elapsed, cost, and final session default from [final_result]; and
+    [cleanup_status] defaults to [Cleanup_not_required]. Central dispatch must
+    pass its actual bounded cleanup outcome instead of relying on that default.
+
+    This constructor is the forward-compatible alternative to exhaustive
+    [task_execution] record literals. Pattern consumers should either match all
+    three {!cleanup_status} constructors or use [{ final_result; _ }] when the
+    cleanup outcome is deliberately irrelevant. *)
+val make_task_execution :
+  final_result:task_result ->
+  ?attempts:task_attempt list ->
+  ?total_elapsed:duration ->
+  ?total_cost:cost ->
+  ?final_session_id:string ->
+  ?cleanup_status:cleanup_status ->
+  unit ->
+  task_execution
 
 (** [make_resume_task_spec ~base ~resume_session_id ()] creates a minimal,
     role-neutral task specification for resuming an interrupted backend

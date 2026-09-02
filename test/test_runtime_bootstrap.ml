@@ -628,10 +628,11 @@ let test_hardened_codex_positive_capabilities_are_exactly_trusted () =
     (descriptor.capabilities.media_support.media_types
     = [Backend_types.Png; Backend_types.Jpeg]) ;
   Alcotest.(check bool)
-    "Codex trusts live search and fetch"
+    "Codex trusts no hierarchical web level"
     true
     (descriptor.capabilities.web_support.maximum
-    = Backend_types.Web_search_and_fetch) ;
+    = Backend_types.Web_disabled
+    && descriptor.capabilities.web_support.evidence = None) ;
   Alcotest.(check bool)
     "independent runtime snapshot exactly matches positive catalog claims"
     true
@@ -650,11 +651,10 @@ let test_codex_positive_capability_mismatch_fails_closed () =
     | None -> Alcotest.fail "Codex descriptor missing"
   in
   Alcotest.(check bool)
-    "test precondition has positive media and web claims"
+    "test precondition has positive media and disabled web"
     true
     (descriptor.capabilities.media_support.media_types <> []
-    && descriptor.capabilities.web_support.maximum
-       <> Backend_types.Web_disabled) ;
+    && descriptor.capabilities.web_support.maximum = Backend_types.Web_disabled) ;
   let mismatches =
     [
       {
@@ -664,7 +664,10 @@ let test_codex_positive_capability_mismatch_fails_closed () =
       {
         descriptor.capabilities with
         web_support =
-          {maximum = Backend_types.Web_disabled; evidence = None};
+          {
+            maximum = Backend_types.Web_search;
+            evidence = descriptor.capabilities.media_support.evidence;
+          };
       };
     ]
   in

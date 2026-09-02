@@ -70,6 +70,8 @@ val requested_delivery : t -> Backend_types.attempt_delivery option
 (** [authorized_attachment_paths context ...] returns the sealed transport paths
     installed by central dispatch exactly when backend identity, attachment
     references, and web policy match the immutable authorization snapshot.
+    Owner release atomically and permanently invalidates the snapshot before
+    physical deletion starts, including when deletion fails and is retried.
     Returned paths are backend-transport data and must never be logged,
     serialized, or included in diagnostics. *)
 val authorized_attachment_paths :
@@ -89,7 +91,8 @@ type sealed_delivery = {
     delivery against the immutable central authorization. Upload attempts return
     the exact sealed list; session-reuse attempts return [[]]. Adapters should
     prefer this accessor over independently combining {!requested_delivery} and
-    {!authorized_attachment_paths}. *)
+    {!authorized_attachment_paths}. It rejects every access after owner release,
+    regardless of the physical cleanup outcome. *)
 val sealed_attachment_delivery :
   t ->
   backend_id:string ->
@@ -102,7 +105,8 @@ module Private : sig
       and must not rewrite the selected policy. *)
   val set_requested_delivery : t -> Backend_types.attempt_delivery -> unit
 
-  (** Install the central immutable transport authorization exactly once. *)
+  (** Install the central immutable transport authorization exactly once.
+      Released prepared inputs cannot be authorized again. *)
   val authorize_transport :
     t ->
     backend_id:string ->

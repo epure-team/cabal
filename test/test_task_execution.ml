@@ -1156,6 +1156,38 @@ let test_timeout_default_and_actual_passthrough () =
         received.timeout
   | _ -> Alcotest.fail "expected one captured spec"
 
+let test_task_execution_constructor_defaults () =
+  let final_cost = cost ~tokens_input:3 ~cost_usd:0.25 () in
+  let final_result =
+    result ~elapsed:1.5 ~cost:final_cost ~session_id:"constructor-session" ()
+  in
+  let execution = Backend_types.make_task_execution ~final_result () in
+  Alcotest.(check int) "no synthetic attempts" 0 (List.length execution.attempts) ;
+  Alcotest.(check (float 0.0))
+    "elapsed defaults from final result"
+    1.5
+    execution.total_elapsed ;
+  Alcotest.(check bool)
+    "cost defaults from final result"
+    true
+    (execution.total_cost = Some final_cost) ;
+  Alcotest.(check (option string))
+    "session defaults from final result"
+    (Some "constructor-session")
+    execution.final_session_id ;
+  Alcotest.(check bool)
+    "direct construction needs no central cleanup"
+    true
+    (execution.cleanup_status = Backend_types.Cleanup_not_required) ;
+  let overridden =
+    Backend_types.make_task_execution ~final_result
+      ~cleanup_status:Backend_types.Cleanup_succeeded ()
+  in
+  Alcotest.(check bool)
+    "central caller can override cleanup status"
+    true
+    (overridden.cleanup_status = Backend_types.Cleanup_succeeded)
+
 let () =
   Alcotest.run
     "CBL-05 detailed task execution"
@@ -1255,5 +1287,9 @@ let () =
             "timeout default and execution"
             `Quick
             test_timeout_default_and_actual_passthrough;
+          Alcotest.test_case
+            "task execution constructor defaults"
+            `Quick
+            test_task_execution_constructor_defaults;
         ] );
     ]

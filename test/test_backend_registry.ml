@@ -271,7 +271,7 @@ let test_media_and_web_capability_evidence_invariants () =
         (Task_preflight.validate_descriptor d = Ok ()))
     (Backend_registry.all ())
 
-let test_codex_media_and_web_capabilities_are_evidence_backed () =
+let test_codex_media_and_disabled_web_capabilities () =
   let d = find_desc "codex" in
   let media = d.capabilities.media_support in
   Alcotest.(check bool)
@@ -305,33 +305,9 @@ let test_codex_media_and_web_capabilities_are_evidence_backed () =
         (contains_substring evidence.notes "codex.md")) ;
   let web = d.capabilities.web_support in
   Alcotest.(check bool)
-    "codex supports search and fetch"
+    "codex web support remains disabled"
     true
-    (web.maximum = Backend_types.Web_search_and_fetch) ;
-  (match web.evidence with
-  | None -> Alcotest.fail "codex web evidence is missing"
-  | Some evidence ->
-      Alcotest.(check string)
-        "web evidence tested version"
-        "0.131.0"
-        evidence.tested_at_version ;
-      Alcotest.(check bool)
-        "web evidence names cached and live authenticated probes"
-        true
-        (match evidence.test_method with
-        | Backend_types.E2e_test ->
-            List.for_all
-              (contains_substring evidence.notes)
-              [
-                "tools/probe_codex_media_web.py";
-                "web-cached";
-                "web-live";
-              ]
-        | Backend_types.Manual_probe _ -> false) ;
-      Alcotest.(check bool)
-        "web evidence references the investigation"
-        true
-        (contains_substring evidence.notes "codex.md")) ;
+    (web.maximum = Backend_types.Web_disabled && web.evidence = None) ;
   Alcotest.(check bool)
     "media transport does not imply arbitrary prompt file references"
     false
@@ -755,9 +731,9 @@ let () =
             `Quick
             test_media_and_web_capability_evidence_invariants;
           Alcotest.test_case
-            "codex media and web support is evidence-backed"
+            "codex media evidence and disabled web"
             `Quick
-            test_codex_media_and_web_capabilities_are_evidence_backed;
+            test_codex_media_and_disabled_web_capabilities;
           Alcotest.test_case
             "non-codex media and web support remains disabled"
             `Quick

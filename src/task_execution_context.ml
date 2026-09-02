@@ -79,6 +79,9 @@ let authorization_mismatch =
 let authorization_missing =
   "central prepared transport authorization is required"
 
+let authorization_revoked =
+  "central prepared transport authorization has been released"
+
 let authorized_attachment_paths context ~backend_id ~attachment_references
     ~web_access_policy =
   match Atomic.get context.transport_authorization with
@@ -135,18 +138,24 @@ module Private = struct
     let authorization =
       { backend_id; attachment_references; web_access_policy; prepared_inputs }
     in
-    match Atomic.get context.transport_authorization with
+    if not (Task_preflight.Private.active prepared_inputs) then
+      Error authorization_revoked
+    else
+      match Atomic.get context.transport_authorization with
     | Some existing
       when existing.backend_id = backend_id
            && existing.attachment_references = attachment_references
            && existing.web_access_policy = web_access_policy
            && existing.prepared_inputs == prepared_inputs ->
-        Ok ()
+        if Task_preflight.Private.active prepared_inputs then Ok ()
+        else Error authorization_revoked
     | Some _ -> Error authorization_mismatch
     | None ->
         if
           Atomic.compare_and_set context.transport_authorization None
             (Some authorization)
-        then Ok ()
+        then
+          if Task_preflight.Private.active prepared_inputs then Ok ()
+          else Error authorization_revoked
         else Error authorization_mismatch
 end

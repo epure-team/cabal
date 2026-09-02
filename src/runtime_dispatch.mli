@@ -71,7 +71,8 @@ val render_detailed_error : detailed_error -> string
 
 (** Immutable, one-shot dispatch snapshot validated against one resolved
     registry entry. It owns any sealed attachment artifacts until its sole
-    execution or switch release. *)
+    execution or switch release. Owner release permanently revokes transport
+    authorization before retryable physical cleanup begins. *)
 type prepared
 
 (** Resolve, validate capabilities, preflight and seal attachment bytes,
@@ -94,7 +95,8 @@ val prepare :
     call may consume a [prepared], including when it has no attachments. Every
     later or concurrent call returns [Prepared_already_consumed] before backend
     or process side effects. Sealed cleanup uses a fixed bounded retry policy and
-    completes before the outcome is returned. *)
+    completes before the outcome is returned. Both sealed accessors reject after
+    release even when physical cleanup fails. *)
 val execute_prepared :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->

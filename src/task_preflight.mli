@@ -137,9 +137,11 @@ val validate_inputs :
 val prepare_inputs :
   limits:limits -> Backend_types.task_spec -> (prepared_inputs, error) result
 
-(** [release_inputs prepared] idempotently removes every sealed file and its
-    private directory. Cleanup failures are returned as sanitized typed errors
-    and may be retried by calling this function again. *)
+(** [release_inputs prepared] atomically and permanently revokes transport
+    access before its first deletion attempt, then idempotently removes every
+    sealed file and its private directory. Cleanup failures are returned as
+    sanitized typed errors and physical deletion may be retried by calling this
+    function again; a failed deletion never reauthorizes transport access. *)
 val release_inputs : prepared_inputs -> (unit, error) result
 
 (** [validate_descriptor descriptor] validates capability-evidence invariants
@@ -197,5 +199,7 @@ module Private : sig
     prepared_inputs -> (Backend_types.media_attachment * string) list
 
   val staging_directory : prepared_inputs -> string option
+  (** [active prepared] is false permanently once release has started,
+      independently of whether physical cleanup succeeds or is retried. *)
   val active : prepared_inputs -> bool
 end

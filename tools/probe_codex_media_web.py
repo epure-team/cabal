@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import io
 import json
 import re
 import struct
@@ -15,6 +17,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 
 EXPECTED_VERSION = "codex-cli 0.131.0"
@@ -62,6 +65,14 @@ class ProbeFailure(Exception):
     """A public, fixed diagnostic safe to print."""
 
 
+class SafeArgumentParser(argparse.ArgumentParser):
+    """Argument parser whose errors never reproduce supplied values or paths."""
+
+    def error(self, message: str) -> None:
+        del message
+        raise ProbeFailure("invalid probe arguments")
+
+
 def png_chunk(kind: bytes, payload: bytes) -> bytes:
     body = kind + payload
     return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
@@ -99,7 +110,11 @@ def mode_schema(mode: str) -> dict[str, Any]:
         return strict_object_schema({"new_image_dominant_color": color})
     if mode == "resume-reuse":
         return strict_object_schema({"remembered_image_dominant_color": color})
-    if mode in ("web-cached", "web-live"):
+    if mode == "web-cached":
+        return strict_object_schema(
+            {"official_result_url": {"type": "string", "minLength": 1, "maxLength": 300}}
+        )
+    if mode == "web-live":
         return strict_object_schema(
             {"page_h1": {"type": "string", "minLength": 1, "maxLength": 200}}
         )
@@ -221,6 +236,18 @@ def contains_official_page(value: Any) -> bool:
     return False
 
 
+def is_official_codex_cli_result(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlsplit(value)
+    path = parsed.path.rstrip("/")
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "developers.openai.com"
+        and (path == "/codex/cli" or path.startswith("/codex/cli/"))
+    )
+
+
 def parse_public_output(stdout: str) -> tuple[str, dict[str, Any], set[str], bool]:
     session_id: str | None = None
     final_message: str | None = None
@@ -290,10 +317,19 @@ def validate_mode(
     web_actions: set[str],
     official_page_seen: bool,
 ) -> None:
-    if result != expected:
+    cached_url = result.get("official_result_url")
+    cached_url_matches = (
+        mode == "web-cached"
+        and set(result) == {"official_result_url"}
+        and is_official_codex_cli_result(cached_url)
+    )
+    if not cached_url_matches and result != expected:
         raise ProbeFailure("Codex public answer failed the content assertion")
-    if mode == "web-cached" and "search" not in web_actions:
-        raise ProbeFailure("Codex emitted no complete public cached-search lifecycle")
+    if mode == "web-cached":
+        if "search" not in web_actions:
+            raise ProbeFailure("Codex emitted no complete public cached-search lifecycle")
+        if "fetch" in web_actions:
+            raise ProbeFailure("Codex cached-search probe emitted a forbidden fetch")
     if mode == "web-live":
         if not {"search", "fetch"}.issubset(web_actions) or not official_page_seen:
             raise ProbeFailure("Codex emitted no complete public search/fetch lifecycle")
@@ -403,11 +439,23 @@ def run_modes(
                 {"remembered_image_dominant_color": expected_color},
                 debug_public,
             )
-        elif mode in ("web-cached", "web-live"):
-            web_mode = "cached" if mode == "web-cached" else "live"
+        elif mode == "web-cached":
             run_probe(
                 workspace,
-                initial_argv(write_schema(sealed_inputs, mode), web_mode, ()),
+                initial_argv(write_schema(sealed_inputs, mode), "cached", ()),
+                "Use web search only with the query "
+                "'site:developers.openai.com/codex/cli OpenAI Codex CLI' to locate "
+                "an official Codex CLI documentation result. Do not open, fetch, "
+                "click, or read any page. Set official_result_url to the bare absolute "
+                "HTTPS URL from that search result, with no title or Markdown.",
+                mode,
+                {"official_result_url": OFFICIAL_PAGE},
+                debug_public,
+            )
+        elif mode == "web-live":
+            run_probe(
+                workspace,
+                initial_argv(write_schema(sealed_inputs, mode), "live", ()),
                 "Use web search to locate the official OpenAI Codex CLI page, then open "
                 f"and read {OFFICIAL_PAGE}. Return the page's visible primary H1 text "
                 "using the required JSON field. Do not answer from memory.",
@@ -487,7 +535,7 @@ def run_self_test() -> None:
         "media-initial": {"png_dominant_color": "blue", "jpeg_dominant_color": "red"},
         "resume-upload": {"new_image_dominant_color": "green"},
         "resume-reuse": {"remembered_image_dominant_color": "green"},
-        "web-cached": {"page_h1": OFFICIAL_PAGE_H1},
+        "web-cached": {"official_result_url": OFFICIAL_PAGE},
         "web-live": {"page_h1": OFFICIAL_PAGE_H1},
     }
     with tempfile.TemporaryDirectory(prefix="cabal-codex-probe-self-test-") as root:
@@ -524,6 +572,14 @@ def run_self_test() -> None:
             )
         )
         validate_mode(mode, result, expected, actions, official_page_seen)
+        if mode == "web-cached":
+            validate_mode(
+                mode,
+                {"official_result_url": OFFICIAL_PAGE + "features"},
+                expected,
+                actions,
+                official_page_seen,
+            )
         wrong = dict(expected)
         first_key = next(iter(wrong))
         wrong[first_key] = "incorrect"
@@ -536,6 +592,7 @@ def run_self_test() -> None:
 
     for mode, actions, official_page_seen in (
         ("web-cached", set(), False),
+        ("web-cached", {"search", "fetch"}, True),
         ("web-live", {"search"}, True),
         ("web-live", {"search", "fetch"}, False),
     ):
@@ -589,18 +646,88 @@ def run_self_test() -> None:
         "Codex probe process could not start",
     )
 
+    sensitive_marker = "/private/probe-token=never-print-this"
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument(
-        "--debug-public",
-        action="store_true",
-        help="print only fixed public lifecycle booleans; never raw backend data",
+    def expect_cli_failure(
+        argv: list[str], expected_message: str, side_effect: Any = None
+    ) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        run_patch = (
+            patch("subprocess.run", side_effect=side_effect)
+            if side_effect is not None
+            else contextlib.nullcontext()
+        )
+        with run_patch, contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+            stderr
+        ):
+            status = main(argv)
+        public_output = stdout.getvalue() + stderr.getvalue()
+        if (
+            status != 1
+            or stdout.getvalue() != ""
+            or stderr.getvalue() != f"FAIL: {expected_message}\n"
+            or sensitive_marker in public_output
+            or "Traceback" in public_output
+            or "usage:" in public_output
+        ):
+            raise ProbeFailure("offline CLI-sanitization self-test failed")
+
+    expect_cli_failure([sensitive_marker], "invalid probe arguments")
+    expect_cli_failure(
+        ["media-initial"],
+        "Codex version check timed out",
+        subprocess.TimeoutExpired(["codex", sensitive_marker], VERSION_TIMEOUT_SECONDS),
     )
-    parser.add_argument("modes", nargs="*", choices=MODES, default=MODES)
-    args = parser.parse_args()
+    expect_cli_failure(
+        ["media-initial"],
+        "Codex probe interrupted",
+        KeyboardInterrupt(sensitive_marker),
+    )
+    expect_cli_failure(
+        ["media-initial"],
+        "Codex emitted malformed public JSONL",
+        [
+            subprocess.CompletedProcess(
+                ["codex", "--version"], 0, EXPECTED_VERSION + "\n", ""
+            ),
+            subprocess.CompletedProcess(
+                ["codex", sensitive_marker], 0, sensitive_marker + "\n", ""
+            ),
+        ],
+    )
+
+    child = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), sensitive_marker],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=VERSION_TIMEOUT_SECONDS,
+    )
+    child_output = child.stdout + child.stderr
+    if (
+        child.returncode != 1
+        or child.stdout != ""
+        or child.stderr != "FAIL: invalid probe arguments\n"
+        or sensitive_marker in child_output
+        or "Traceback" in child_output
+        or "usage:" in child_output
+    ):
+        raise ProbeFailure("offline subprocess CLI-sanitization self-test failed")
+
+
+def main(argv: list[str] | None = None) -> int:
     try:
+        parser = SafeArgumentParser(description=__doc__)
+        parser.add_argument("--self-test", action="store_true")
+        parser.add_argument(
+            "--debug-public",
+            action="store_true",
+            help="print only fixed public lifecycle booleans; never raw backend data",
+        )
+        parser.add_argument("modes", nargs="*", choices=MODES, default=MODES)
+        args = parser.parse_args(argv)
         if args.self_test:
             run_self_test()
             print("PASS self-test")
@@ -623,6 +750,9 @@ def main() -> int:
         return 1
     except subprocess.TimeoutExpired:
         print("FAIL: Codex probe timed out", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("FAIL: Codex probe interrupted", file=sys.stderr)
         return 1
     except (OSError, UnicodeError, ValueError):
         print("FAIL: Codex probe I/O or decode failure", file=sys.stderr)

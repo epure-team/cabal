@@ -774,6 +774,9 @@ let test_cleanup_failure_is_sanitized_and_retryable () =
         "cleanup failure omits sensitive paths and bytes" false
         (contains rendered secret))
     [ workspace; staging_directory; png; digest png ];
+  Alcotest.(check bool)
+    "cleanup failure permanently revokes transport authorization" false
+    (Task_preflight.Private.active prepared);
   Unix.rmdir blocker;
   (match Task_preflight.release_inputs prepared with
   | Ok () -> ()
@@ -1089,7 +1092,7 @@ let test_non_native_json_schema_uses_fallback () =
     "non-native JSON schema does not fail capability preflight" true
     (validate_capabilities descriptor (spec "/tmp" ~json_schema:schema) = Ok ())
 
-let test_codex_proven_media_and_web_capabilities () =
+let test_codex_proven_media_and_disabled_web_capabilities () =
   let descriptor =
     match Backend_registry.find "codex" with
     | Some descriptor -> descriptor
@@ -1101,12 +1104,20 @@ let test_codex_proven_media_and_web_capabilities () =
       attachment ~id:"jpeg" ~path:"back.jpg" ~media_type:Backend_types.Jpeg jpeg;
     ]
   in
+  Alcotest.(check bool)
+    "Codex accepts proven PNG/JPEG with disabled web" true
+    (validate_capabilities descriptor
+       (spec "/tmp" ~attachments ~web_access:Backend_types.Web_disabled)
+    = Ok ());
   List.iter
     (fun web_access ->
-      Alcotest.(check bool)
-        "Codex accepts proven PNG/JPEG and web policy" true
-        (validate_capabilities descriptor (spec "/tmp" ~attachments ~web_access)
-        = Ok ()))
+      expect_capability_error
+        (function
+          | Task_preflight.Unsupported_web_access
+              {requested; maximum = Backend_types.Web_disabled} ->
+              requested = web_access
+          | _ -> false)
+        (validate_capabilities descriptor (spec "/tmp" ~attachments ~web_access)))
     [ Backend_types.Web_search; Backend_types.Web_search_and_fetch ]
 
 let input_tests =
@@ -1200,9 +1211,9 @@ let capability_tests =
     ( "non-native JSON schema fallback",
       `Quick,
       test_non_native_json_schema_uses_fallback );
-    ( "Codex proven media and web capabilities",
+    ( "Codex proven media and disabled web capabilities",
       `Quick,
-      test_codex_proven_media_and_web_capabilities );
+      test_codex_proven_media_and_disabled_web_capabilities );
   ]
 
 let () =

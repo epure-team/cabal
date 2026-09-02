@@ -215,10 +215,13 @@ type prepared_attachment = {
   staged_path : string;
 }
 
+type cleanup_state = Cleanup_pending | Cleanup_in_progress | Cleanup_complete
+
 type prepared_inputs = {
   staging_directory : string option;
   staged_attachments : prepared_attachment list;
-  released : bool Atomic.t;
+  transport_revoked : bool Atomic.t;
+  cleanup_state : cleanup_state Atomic.t;
   on_cleanup_attempt : unit -> unit;
 }
 
@@ -636,25 +639,39 @@ let cleanup_staging_directory staging_directory =
   if entries_removed && directory_removed then Ok ()
   else Error (Input Attachment_cleanup_failed)
 
-let release_inputs prepared =
-  if Atomic.exchange prepared.released true then Ok ()
-  else
-    let result =
-      try
-        prepared.on_cleanup_attempt ();
-        match prepared.staging_directory with
-        | None -> Ok ()
-        | Some staging_directory ->
-            cleanup_staged_paths staging_directory prepared.staged_attachments
-      with
-      | (Out_of_memory | Stack_overflow | Sys.Break) as fatal -> raise fatal
-      | _ -> Error (Input Attachment_cleanup_failed)
-    in
-    match result with
-    | Ok () -> Ok ()
-    | Error _ as error ->
-        Atomic.set prepared.released false;
-        error
+let rec release_inputs prepared =
+  Atomic.set prepared.transport_revoked true;
+  match Atomic.get prepared.cleanup_state with
+  | Cleanup_complete -> Ok ()
+  | Cleanup_in_progress -> Error (Input Attachment_cleanup_failed)
+  | Cleanup_pending ->
+      if
+        not
+          (Atomic.compare_and_set prepared.cleanup_state Cleanup_pending
+             Cleanup_in_progress)
+      then release_inputs prepared
+      else
+        let result =
+          try
+            prepared.on_cleanup_attempt ();
+            match prepared.staging_directory with
+            | None -> Ok ()
+            | Some staging_directory ->
+                cleanup_staged_paths staging_directory
+                  prepared.staged_attachments
+          with
+          | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
+              Atomic.set prepared.cleanup_state Cleanup_pending;
+              raise fatal
+          | _ -> Error (Input Attachment_cleanup_failed)
+        in
+        match result with
+        | Ok () ->
+            Atomic.set prepared.cleanup_state Cleanup_complete;
+            Ok ()
+        | Error _ as error ->
+            Atomic.set prepared.cleanup_state Cleanup_pending;
+            error
 
 let create_staging_directory ~workspace ~hooks =
   let created = ref None in
@@ -703,7 +720,8 @@ let prepare_inputs_with_hooks ~hooks ~limits spec =
           {
             staging_directory = None;
             staged_attachments = [];
-            released = Atomic.make false;
+            transport_revoked = Atomic.make false;
+            cleanup_state = Atomic.make Cleanup_pending;
             on_cleanup_attempt = hooks.on_cleanup_attempt;
           })
   else
@@ -723,7 +741,8 @@ let prepare_inputs_with_hooks ~hooks ~limits spec =
               {
                 staging_directory = Some staging_directory;
                 staged_attachments;
-                released = Atomic.make false;
+                transport_revoked = Atomic.make false;
+                cleanup_state = Atomic.make Cleanup_pending;
                 on_cleanup_attempt = hooks.on_cleanup_attempt;
               }
         | Error _ as error -> (
@@ -857,7 +876,7 @@ module Private = struct
       prepared.staged_attachments
 
   let staging_directory prepared = prepared.staging_directory
-  let active prepared = not (Atomic.get prepared.released)
+  let active prepared = not (Atomic.get prepared.transport_revoked)
 
   let prepare_inputs_with_hooks ?(on_staging_directory = fun _ -> ())
       ?(on_staged_file = fun _ _ -> ()) ?(on_cleanup_attempt = fun () -> ())

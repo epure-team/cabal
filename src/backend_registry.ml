@@ -73,17 +73,6 @@ let codex_media_evidence : Backend_types.feature_evidence =
         "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
   }
 
-let codex_web_evidence : Backend_types.feature_evidence =
-  {
-    tested_at_version = "0.131.0";
-    test_method = Backend_types.E2e_test;
-    notes =
-      "Reproducible authenticated probe: tools/probe_codex_media_web.py web-cached web-live. It exercises cached search and live search/fetch and validates only public JSONL web_search lifecycle and schema-conforming agent output. See docs/native-json-schema-investigation/codex.md.";
-    evidence_url =
-      Some
-        "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/tests/suite/web_search.rs";
-  }
-
 let builtin_backends =
   [
     {
@@ -137,10 +126,7 @@ let builtin_backends =
               evidence = Some codex_media_evidence;
             };
           web_support =
-            {
-              maximum = Backend_types.Web_search_and_fetch;
-              evidence = Some codex_web_evidence;
-            };
+            {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = true;
           native_json_schema_output_evidence =
             Some
@@ -253,6 +239,18 @@ let builtin_backends =
 
 let unsupported_capability_notes_data =
   [
+    {
+      backend_id = "codex";
+      feature = "web_support";
+      evidence_url =
+        "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/tests/suite/web_search.rs";
+      note =
+        "The authenticated 0.131.0 cached-mode probe emitted a complete search \
+         lifecycle without fetch/open-page actions, but repeatedly failed its \
+         content-dependent official-result assertion. Live fetch evidence does \
+         not imply the stricter search-only level, so the hierarchical \
+         capability remains disabled.";
+    };
     {
       backend_id = "codex";
       feature = "streaming_output";

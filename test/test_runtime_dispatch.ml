@@ -22,6 +22,22 @@ let limits =
   Task_preflight.
     { max_attachments = 0; max_file_size_bytes = 0; max_total_size_bytes = 0 }
 
+let assert_transport_revoked label ~backend_id ~attachment context =
+  let attachment_references = [ attachment ] in
+  let web_access_policy = Backend_types.Web_disabled in
+  (match
+     Task_execution_context.authorized_attachment_paths context ~backend_id
+       ~attachment_references ~web_access_policy
+   with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail (label ^ " retained authorized attachment paths"));
+  match
+    Task_execution_context.sealed_attachment_delivery context ~backend_id
+      ~attachment_references ~web_access_policy
+  with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail (label ^ " retained sealed attachment delivery")
+
 let descriptor_for ?(session_resume = false) ?(native = false)
     ?(read_only = false) ?(binary_name = "dispatch-test")
     ?(baseline_version = "1.0.0") ?(media_types = [])
@@ -854,10 +870,12 @@ let test_dispatch_sanitizes_persistent_cleanup_failure () =
   let id = "dispatch-cleanup-failure" in
   let staging_directory = ref None in
   let blocker = ref None in
+  let captured_context = ref None in
   register_pair ~id ~media_types:[ Backend_types.Png ]
     ~version_policy:Runtime_entry.No_version_gate
     (make_backend ~id ~calls:(ref 0)
        ~on_context:(fun context ->
+         captured_context := Some context;
          match
            Task_execution_context.authorized_attachment_paths context
              ~backend_id:id ~attachment_references:[ attachment ]
@@ -918,6 +936,11 @@ let test_dispatch_sanitizes_persistent_cleanup_failure () =
            match !blocker with
            | Some path -> Unix.rmdir path
            | None -> Alcotest.fail "cleanup blocker was not installed"));
+  (match !captured_context with
+  | Some context ->
+      assert_transport_revoked "persistent cleanup failure" ~backend_id:id
+        ~attachment context
+  | None -> Alcotest.fail "cleanup failure captured no execution context");
   match !staging_directory with
   | Some path ->
       Alcotest.(check bool)
@@ -952,7 +975,8 @@ let test_sealed_attachments_cleanup_on_cancellation_and_fatal_exception () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let run_task = spec ~working_dir:temp_dir ~attachments:[ attachment ] () in
-  let capture_paths id captured context =
+  let capture_paths id captured captured_context context =
+    captured_context := Some context;
     match
       Task_execution_context.authorized_attachment_paths context ~backend_id:id
         ~attachment_references:[ attachment ]
@@ -963,11 +987,13 @@ let test_sealed_attachments_cleanup_on_cancellation_and_fatal_exception () =
   in
   let cancellation_id = "dispatch-sealed-cancellation" in
   let cancellation_paths = ref [] in
+  let cancellation_context = ref None in
   let started, resolve_started = Eio.Promise.create () in
   register_pair ~id:cancellation_id ~media_types:[ Backend_types.Png ]
     ~version_policy:Runtime_entry.No_version_gate
     (make_backend ~id:cancellation_id ~calls:(ref 0)
-       ~on_context:(capture_paths cancellation_id cancellation_paths)
+       ~on_context:
+         (capture_paths cancellation_id cancellation_paths cancellation_context)
        (fun ~sw:_ ~env ?on_raw_line:_ _ ->
          Eio.Promise.resolve resolve_started ();
          Eio.Time.sleep (Eio.Stdenv.clock env) 30.0;
@@ -989,13 +1015,19 @@ let test_sealed_attachments_cleanup_on_cancellation_and_fatal_exception () =
       Alcotest.(check bool)
         "cancelled task removes sealed file" false (Sys.file_exists path))
     !cancellation_paths;
+  (match !cancellation_context with
+  | Some context ->
+      assert_transport_revoked "cancelled task" ~backend_id:cancellation_id
+        ~attachment context
+  | None -> Alcotest.fail "cancelled task captured no execution context");
 
   let fatal_id = "dispatch-sealed-fatal" in
   let fatal_paths = ref [] in
+  let fatal_context = ref None in
   register_pair ~id:fatal_id ~media_types:[ Backend_types.Png ]
     ~version_policy:Runtime_entry.No_version_gate
     (make_backend ~id:fatal_id ~calls:(ref 0)
-       ~on_context:(capture_paths fatal_id fatal_paths)
+       ~on_context:(capture_paths fatal_id fatal_paths fatal_context)
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> raise Out_of_memory));
   let fatal_handle =
     Task_runtime.start_task ~sw ~env ~limits:attachment_limits
@@ -1010,7 +1042,12 @@ let test_sealed_attachments_cleanup_on_cancellation_and_fatal_exception () =
     (fun path ->
       Alcotest.(check bool)
         "fatal task removes sealed file" false (Sys.file_exists path))
-    !fatal_paths
+    !fatal_paths;
+  match !fatal_context with
+  | Some context ->
+      assert_transport_revoked "fatal task" ~backend_id:fatal_id ~attachment
+        context
+  | None -> Alcotest.fail "fatal task captured no execution context"
 
 let test_sealed_attachments_cleanup_on_backend_failure_and_timeout () =
   with_registry @@ fun () ->
@@ -1041,10 +1078,12 @@ let test_sealed_attachments_cleanup_on_backend_failure_and_timeout () =
     (fun (label, status) ->
       let id = "dispatch-sealed-" ^ label in
       let captured_paths = ref [] in
+      let captured_context = ref None in
       register_pair ~id ~media_types:[ Backend_types.Png ]
         ~version_policy:Runtime_entry.No_version_gate
         (make_backend ~id ~calls:(ref 0)
            ~on_context:(fun context ->
+             captured_context := Some context;
              match
                Task_execution_context.authorized_attachment_paths context
                  ~backend_id:id ~attachment_references:[ attachment ]
@@ -1070,7 +1109,11 @@ let test_sealed_attachments_cleanup_on_backend_failure_and_timeout () =
         (fun path ->
           Alcotest.(check bool)
             (label ^ " removes sealed file") false (Sys.file_exists path))
-        !captured_paths)
+        !captured_paths;
+      match !captured_context with
+      | Some context ->
+          assert_transport_revoked label ~backend_id:id ~attachment context
+      | None -> Alcotest.fail (label ^ " captured no execution context"))
     [
       ("failed", Backend_types.Failed "backend failure");
       ("timeout", Backend_types.Timeout);
@@ -1105,7 +1148,7 @@ let test_abandoned_prepared_attachments_cleanup_on_switch_release () =
     (make_backend ~id ~calls:(ref 0)
        (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
   let cleanup_attempts = ref 0 in
-  let staged_path =
+  let staged_path, released_context =
     Eio_posix.run @@ fun env ->
     Eio.Switch.run @@ fun sw ->
     let sink = Task_event.create_sink ~sw ~now:(fun () -> 0.0) () in
@@ -1137,7 +1180,7 @@ let test_abandoned_prepared_attachments_cleanup_on_switch_release () =
         Alcotest.(check bool)
           "sealed file exists while prepared value is live" true
           (Sys.file_exists path);
-        path
+        (path, context)
     | Ok _ -> Alcotest.fail "unexpected abandoned sealed attachment set"
     | Error message -> Alcotest.fail message
   in
@@ -1148,7 +1191,9 @@ let test_abandoned_prepared_attachments_cleanup_on_switch_release () =
     "switch release removes abandoned private directory" false
     (Sys.file_exists (Filename.dirname staged_path));
   Alcotest.(check int) "abandoned cleanup is claimed exactly once" 1
-    !cleanup_attempts
+    !cleanup_attempts;
+  assert_transport_revoked "abandoned prepared task" ~backend_id:id ~attachment
+    released_context
 
 exception Test_switch_cancelled
 
@@ -1708,7 +1753,7 @@ let test_hardened_below_baseline_stops_before_backend () =
     "hardened backend did not run" false
     (Sys.file_exists backend_marker)
 
-let test_hardened_codex_dispatch_uses_proven_media_web_transport () =
+let test_hardened_codex_dispatch_uses_proven_media_transport () =
   with_registry @@ fun () ->
   with_temp_dir "codex-media-web" @@ fun temp_dir ->
   let version_marker = Filename.concat temp_dir "codex-version-ran" in
@@ -1813,6 +1858,30 @@ printf '%%s\n' '{"type":"turn.completed","usage":{"input_tokens":2,"cached_input
     "rejected media runs no backend process" false
     (Sys.file_exists backend_marker);
 
+  (match
+     run ~env ~sw ~backend_id:"codex" ~limits
+       (spec ~working_dir:temp_dir ~web_access:Backend_types.Web_search ())
+   with
+  | Error
+      (Runtime_dispatch.Preflight_failed
+         (Task_preflight.Capability
+            (Task_preflight.Unsupported_web_access
+              {
+                requested = Backend_types.Web_search;
+                maximum = Backend_types.Web_disabled;
+              }))) ->
+      ()
+  | Error error ->
+      Alcotest.failf "unexpected disabled-web error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "unproven cached web must fail");
+  Alcotest.(check bool)
+    "rejected web runs no version process" false
+    (Sys.file_exists version_marker);
+  Alcotest.(check bool)
+    "rejected web runs no backend process" false
+    (Sys.file_exists backend_marker);
+
   let png = "\x89PNG\r\n\x1a\n" in
   let jpeg = "\xff\xd8\xff" in
   write_binary_file front_path png;
@@ -1848,8 +1917,7 @@ printf '%%s\n' '{"type":"turn.completed","usage":{"input_tokens":2,"cached_input
   in
   (match
      run ~env ~sw ~backend_id:"codex" ~limits
-       (spec ~working_dir:temp_dir ~attachments
-          ~web_access:Backend_types.Web_search_and_fetch ~json_schema:schema ())
+       (spec ~working_dir:temp_dir ~attachments ~json_schema:schema ())
    with
   | Ok result ->
       Alcotest.(check bool)
@@ -1921,7 +1989,7 @@ printf '%%s\n' '{"type":"turn.completed","usage":{"input_tokens":2,"cached_input
       Alcotest.(check bool)
         ("Codex argv contains " ^ expected)
         true (contains argv expected))
-    [ {|web_search="live"|}; "--output-schema" ]
+    [ {|web_search="disabled"|}; "--output-schema" ]
 
 let test_hardened_codex_rejects_pre_proof_version () =
   with_registry @@ fun () ->
@@ -2348,8 +2416,8 @@ let () =
           Alcotest.test_case
             "capability rejection precedes attachment staging" `Quick
             test_capability_rejection_precedes_attachment_staging;
-          Alcotest.test_case "hardened Codex uses proven media/web transport"
-            `Quick test_hardened_codex_dispatch_uses_proven_media_web_transport;
+          Alcotest.test_case "hardened Codex uses proven media transport"
+            `Quick test_hardened_codex_dispatch_uses_proven_media_transport;
         ] );
       ( "resolution",
         [
