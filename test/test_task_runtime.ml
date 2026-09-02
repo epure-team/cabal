@@ -107,6 +107,38 @@ let status_of_result = function
   | Ok result -> result.Backend_types.status
   | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
 
+let execution_of_detailed = function
+  | Ok execution -> execution
+  | Error error ->
+      Alcotest.fail (Runtime_dispatch.render_detailed_error error)
+
+let status_of_detailed outcome =
+  (execution_of_detailed outcome).Backend_types.final_result.status
+
+let object_schema = `Assoc [("type", `String "object")]
+
+let cost input output usd : Backend_types.cost =
+  {
+    tokens_input = Some input;
+    tokens_output = Some output;
+    cost_usd = Some usd;
+    cache_creation_input_tokens = None;
+    cache_read_input_tokens = None;
+  }
+
+let check_single_completed_attempt execution expected =
+  match execution.Backend_types.attempts with
+  | [attempt] ->
+      Alcotest.(check int) "completed attempt number" 1 attempt.number ;
+      Alcotest.(check bool)
+        "completed attempt result"
+        true
+        (attempt.result = expected)
+  | attempts ->
+      Alcotest.failf
+        "expected one completed attempt, got %d"
+        (List.length attempts)
+
 let test_success_repeatable_await_and_event_dedup () =
   with_registry @@ fun () ->
   let calls = ref 0 in
@@ -215,6 +247,39 @@ let test_concurrent_await_is_repeatable () =
     true
     (Eio.Promise.await_exn first = Eio.Promise.await_exn second)
 
+let test_detailed_await_is_repeatable_and_concurrent () =
+  with_registry @@ fun () ->
+  let calls = ref 0 in
+  register_backend
+    ~id:"detailed-await"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env ?context:_ ?on_raw_line:_ _ ->
+      incr calls ;
+      Eio.Time.sleep (Eio.Stdenv.clock env) 0.01 ;
+      success ~session_id:"memoized-session" ()) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"detailed-await"
+      (spec ())
+  in
+  let first =
+    Eio.Fiber.fork_promise ~sw (fun () -> Task_runtime.await_detailed handle)
+  in
+  let second =
+    Eio.Fiber.fork_promise ~sw (fun () -> Task_runtime.await_detailed handle)
+  in
+  let first = Eio.Promise.await_exn first in
+  let second = Eio.Promise.await_exn second in
+  let repeated = Task_runtime.await_detailed handle in
+  Alcotest.(check bool) "concurrent detailed awaits agree" true (first = second) ;
+  Alcotest.(check bool) "repeated detailed await agrees" true (first = repeated) ;
+  Alcotest.(check int) "detailed await invokes once" 1 !calls
+
 let test_await_is_independent_from_callback_completion () =
   with_registry @@ fun () ->
   register_backend
@@ -245,9 +310,10 @@ let test_await_is_independent_from_callback_completion () =
   in
   Eio.Promise.await terminal_callback_started ;
   Alcotest.(check bool)
-    "await completes while terminal callback is blocked"
+    "detailed await completes while terminal callback is blocked"
     true
-    (status_of_result (Task_runtime.await handle) = Backend_types.Success) ;
+    (status_of_detailed (Task_runtime.await_detailed handle)
+    = Backend_types.Success) ;
   Eio.Promise.resolve resolve_release_terminal_callback () ;
   Task_runtime.await_event_delivery handle
 
@@ -281,7 +347,9 @@ let test_process_callback_can_await_same_handle () =
         match event.Task_event.payload with
         | Task_event.Process_started _ | Task_event.Terminal _ ->
             let handle = Eio.Promise.await handle_ready in
-            let status = status_of_result (Task_runtime.await handle) in
+            let status =
+              status_of_detailed (Task_runtime.await_detailed handle)
+            in
             callback_statuses := status :: !callback_statuses ;
             (match event.payload with
             | Task_event.Terminal _ ->
@@ -294,7 +362,8 @@ let test_process_callback_can_await_same_handle () =
   Alcotest.(check bool)
     "owner completes"
     true
-    (status_of_result (Task_runtime.await handle) = Backend_types.Success) ;
+    (status_of_detailed (Task_runtime.await_detailed handle)
+    = Backend_types.Success) ;
   Eio.Promise.await terminal_callback_done ;
   Task_runtime.await_event_delivery handle ;
   Alcotest.(check int)
@@ -550,6 +619,275 @@ let test_retry_attempts_share_deadline () =
     | (_, Task_event.Attempt_timed_out) :: _ -> true
     | _ -> false) ;
   Alcotest.(check int) "one terminal after retry timeout" 1 (terminal_count events)
+
+let test_detailed_deadline_during_retry_retains_completed_progress () =
+  with_registry @@ fun () ->
+  let calls = ref 0 in
+  let first_cost = cost 7 3 0.25 in
+  let first =
+    success
+      ~text:"not-json"
+      ~session_id:"deadline-session"
+      ~cost:first_cost
+      ()
+  in
+  register_backend
+    ~id:"detailed-retry-timeout"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env ?context:_ ?on_raw_line:_ _ ->
+      incr calls ;
+      if !calls = 1 then first
+      else begin
+        Eio.Time.sleep (Eio.Stdenv.clock env) 30.0 ;
+        success ()
+      end) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let events = ref [] in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"detailed-retry-timeout"
+      ~on_event:(fun event -> events := event :: !events)
+      (spec ~timeout:0.03 ~json_schema:object_schema ())
+  in
+  let execution =
+    execution_of_detailed (Task_runtime.await_detailed handle)
+  in
+  Task_runtime.await_event_delivery handle ;
+  Alcotest.(check int) "retry was invoked" 2 !calls ;
+  Alcotest.(check bool)
+    "outer deadline is final timeout"
+    true
+    (execution.final_result.status = Backend_types.Timeout) ;
+  check_single_completed_attempt execution first ;
+  Alcotest.(check bool)
+    "completed cost retained"
+    true
+    (execution.total_cost = Some first_cost) ;
+  Alcotest.(check (option string))
+    "completed session retained"
+    (Some "deadline-session")
+    execution.final_session_id ;
+  Alcotest.(check bool)
+    "outer elapsed retained"
+    true
+    (execution.total_elapsed >= 0.02) ;
+  let events = List.rev !events in
+  let first_finish =
+    List.exists
+      (fun event ->
+        event.Task_event.attempt = 1
+        && event.payload
+           = Task_event.Attempt_finished Task_event.Attempt_succeeded)
+      events
+  in
+  let second_timeout =
+    List.exists
+      (fun event ->
+        event.Task_event.attempt = 2
+        && event.payload
+           = Task_event.Attempt_finished Task_event.Attempt_timed_out)
+      events
+  in
+  Alcotest.(check bool) "completed detail has matching event" true first_finish ;
+  Alcotest.(check bool)
+    "interrupted retry has timeout event but no fabricated detail"
+    true
+    second_timeout
+
+let test_detailed_cancellation_between_attempts_retains_progress () =
+  with_registry @@ fun () ->
+  let calls = ref 0 in
+  let first = success ~text:"not-json" ~session_id:"between-session" () in
+  register_backend
+    ~id:"detailed-cancel-between"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ _ ->
+      incr calls ;
+      if !calls = 1 then first else success ()) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let handle_ready, resolve_handle_ready = Eio.Promise.create () in
+  let events = ref [] in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"detailed-cancel-between"
+      ~on_event:(fun event ->
+        events := event :: !events ;
+        match event.Task_event.attempt, event.payload with
+        | 1, Task_event.Attempt_finished Task_event.Attempt_succeeded ->
+            Task_runtime.cancel (Eio.Promise.await handle_ready)
+        | _ -> ())
+      (spec ~json_schema:object_schema ())
+  in
+  Eio.Promise.resolve resolve_handle_ready handle ;
+  let execution =
+    execution_of_detailed (Task_runtime.await_detailed handle)
+  in
+  Task_runtime.await_event_delivery handle ;
+  Alcotest.(check int) "retry was not invoked" 1 !calls ;
+  Alcotest.(check bool)
+    "between-attempt cancellation normalized"
+    true
+    (execution.final_result.status = Backend_types.Cancelled) ;
+  check_single_completed_attempt execution first ;
+  Alcotest.(check bool)
+    "retry transition absent"
+    false
+    (List.exists
+       (fun event ->
+         match event.Task_event.payload with
+         | Task_event.Retry_transition _ -> true
+         | _ -> false)
+       !events)
+
+let test_detailed_cancellation_during_retry_retains_completed_progress () =
+  with_registry @@ fun () ->
+  let calls = ref 0 in
+  let first = success ~text:"not-json" ~session_id:"during-session" () in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let retry_entered, resolve_retry_entered = Eio.Promise.create () in
+  register_backend
+    ~id:"detailed-cancel-during"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env ?context:_ ?on_raw_line:_ _ ->
+      incr calls ;
+      if !calls = 1 then first
+      else begin
+        Eio.Promise.resolve resolve_retry_entered () ;
+        Eio.Time.sleep (Eio.Stdenv.clock env) 30.0 ;
+        success ()
+      end) ;
+  let events = ref [] in
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"detailed-cancel-during"
+      ~on_event:(fun event -> events := event :: !events)
+      (spec ~json_schema:object_schema ())
+  in
+  Eio.Promise.await retry_entered ;
+  Task_runtime.cancel handle ;
+  let execution =
+    execution_of_detailed (Task_runtime.await_detailed handle)
+  in
+  Task_runtime.await_event_delivery handle ;
+  Alcotest.(check int) "retry entered" 2 !calls ;
+  Alcotest.(check bool)
+    "during-retry cancellation normalized"
+    true
+    (execution.final_result.status = Backend_types.Cancelled) ;
+  check_single_completed_attempt execution first ;
+  Alcotest.(check bool)
+    "interrupted retry emitted cancellation finish"
+    true
+    (List.exists
+       (fun event ->
+         event.Task_event.attempt = 2
+         && event.payload
+            = Task_event.Attempt_finished Task_event.Attempt_cancelled)
+       !events)
+
+let test_detailed_cancellation_before_first_attempt_has_empty_progress () =
+  with_registry @@ fun () ->
+  let calls = ref 0 in
+  register_backend
+    ~id:"detailed-cancel-before"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ _ ->
+      incr calls ;
+      success ()) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"detailed-cancel-before"
+      (spec ())
+  in
+  Task_runtime.cancel handle ;
+  let execution =
+    execution_of_detailed (Task_runtime.await_detailed handle)
+  in
+  Alcotest.(check int) "backend not invoked" 0 !calls ;
+  Alcotest.(check int) "no attempt fabricated" 0 (List.length execution.attempts) ;
+  Alcotest.(check bool)
+    "pre-attempt cancellation normalized"
+    true
+    (execution.final_result.status = Backend_types.Cancelled) ;
+  Alcotest.(check (option bool))
+    "no aggregate fabricated"
+    None
+    (Option.map (fun _ -> true) execution.total_cost) ;
+  Alcotest.(check (option string))
+    "no session fabricated"
+    None
+    execution.final_session_id
+
+let test_detailed_ordinary_exception_retains_completed_progress () =
+  with_registry @@ fun () ->
+  let calls = ref 0 in
+  let first_cost = cost 2 4 0.5 in
+  let first =
+    success
+      ~text:"not-json"
+      ~session_id:"exception-session"
+      ~cost:first_cost
+      ()
+  in
+  register_backend
+    ~id:"detailed-progress-exception"
+    ~available:(fun ~sw:_ ~env:_ -> true)
+    (fun ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ _ ->
+      incr calls ;
+      if !calls = 1 then first
+      else failwith "private ordinary exception /secret/path") ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let handle =
+    Task_runtime.start_task
+      ~sw
+      ~env
+      ~limits
+      ~backend_id:"detailed-progress-exception"
+      (spec ~json_schema:object_schema ())
+  in
+  match Task_runtime.await_detailed handle with
+  | Error
+      ((Runtime_dispatch.Dispatch_failure_with_execution
+          {failure = Runtime_dispatch.Backend_execution_failed; execution}) as
+       error) ->
+      Alcotest.(check int) "retry raised after first result" 2 !calls ;
+      check_single_completed_attempt execution first ;
+      Alcotest.(check bool)
+        "completed aggregate retained"
+        true
+        (execution.total_cost = Some first_cost) ;
+      Alcotest.(check (option string))
+        "completed session survives ordinary exception"
+        (Some "exception-session")
+        execution.final_session_id ;
+      let rendered = Runtime_dispatch.render_detailed_error error in
+      Alcotest.(check string)
+        "ordinary error stays generic"
+        "backend execution failed"
+        rendered
+  | Error error ->
+      Alcotest.failf
+        "unexpected detailed error: %s"
+        (Runtime_dispatch.render_detailed_error error)
+  | Ok _ -> Alcotest.fail "ordinary retry exception unexpectedly succeeded"
 
 let test_non_success_stops_retry_and_emits_one_terminal () =
   with_registry @@ fun () ->
@@ -893,7 +1231,7 @@ let test_fatal_await_preserves_exception_after_process_cleanup () =
         | _ -> ())
       (spec ())
   in
-  (match Task_runtime.await handle with
+  (match Task_runtime.await_detailed handle with
   | exception Out_of_memory -> ()
   | exception error ->
       Alcotest.failf "wrong fatal exception: %s" (Printexc.to_string error)
@@ -941,6 +1279,10 @@ let () =
             `Quick
             test_concurrent_await_is_repeatable;
           Alcotest.test_case
+            "detailed await is repeatable and concurrent"
+            `Quick
+            test_detailed_await_is_repeatable_and_concurrent;
+          Alcotest.test_case
             "await independent from callback"
             `Quick
             test_await_is_independent_from_callback_completion;
@@ -975,6 +1317,18 @@ let () =
             "fatal await follows process cleanup"
             `Quick
             test_fatal_await_preserves_exception_after_process_cleanup;
+          Alcotest.test_case
+            "detailed cancellation before first attempt"
+            `Quick
+            test_detailed_cancellation_before_first_attempt_has_empty_progress;
+          Alcotest.test_case
+            "detailed cancellation between attempts"
+            `Quick
+            test_detailed_cancellation_between_attempts_retains_progress;
+          Alcotest.test_case
+            "detailed cancellation during retry"
+            `Quick
+            test_detailed_cancellation_during_retry_retains_completed_progress;
         ] );
       ( "deadline",
         [
@@ -987,9 +1341,17 @@ let () =
             `Quick
             test_retry_attempts_share_deadline;
           Alcotest.test_case
+            "detailed retry timeout retains progress"
+            `Quick
+            test_detailed_deadline_during_retry_retains_completed_progress;
+          Alcotest.test_case
             "non-success stops retry"
             `Quick
             test_non_success_stops_retry_and_emits_one_terminal;
+          Alcotest.test_case
+            "detailed ordinary exception retains progress"
+            `Quick
+            test_detailed_ordinary_exception_retains_completed_progress;
         ] );
       ( "privacy",
         [

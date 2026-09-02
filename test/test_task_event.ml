@@ -629,6 +629,184 @@ let test_alternating_abusive_controls_use_one_bounded_marker () =
         counts.control_events
   | [] | _ :: _ :: _ -> Alcotest.fail "expected one truncation marker"
 
+let test_published_delivery_bounds_are_exact () =
+  Alcotest.(check int) "total pending bound" 256 Task_event.max_pending_events ;
+  Alcotest.(check int)
+    "observation bound"
+    192
+    Task_event.max_pending_observational_events ;
+  Alcotest.(check int) "control reserve" 64 Task_event.control_event_reserve ;
+  Alcotest.(check int)
+    "ordinary non-terminal controls"
+    62
+    Task_event.max_pending_control_events ;
+  Alcotest.(check int)
+    "marker and terminal consume remainder"
+    Task_event.control_event_reserve
+    (Task_event.max_pending_control_events + 2) ;
+  Alcotest.(check int)
+    "aggregate public text bytes"
+    (64 * 1024)
+    Task_event.max_pending_agent_text_bytes ;
+  Alcotest.(check int)
+    "per-delta public text bytes"
+    (16 * 1024)
+    Task_event.max_agent_text_delta_bytes
+
+let test_shared_bounded_collector_retains_marker_and_terminal () =
+  Eio_posix.run @@ fun _env ->
+  Eio.Switch.run @@ fun sw ->
+  let first_started, resolve_first_started = Eio.Promise.create () in
+  let release_first, resolve_release_first = Eio.Promise.create () in
+  let callback_count = ref 0 in
+  let collector = Task_event.Private.create_bounded_collector () in
+  let sink =
+    Task_event.create_sink
+      ~sw
+      ~now:(fun () -> 0.0)
+      ~on_event:(fun event ->
+        incr callback_count ;
+        Task_event.Private.collect_bounded collector event ;
+        if event.Task_event.seq = 1 then begin
+          Eio.Promise.resolve resolve_first_started () ;
+          Eio.Promise.await release_first
+        end)
+      ()
+  in
+  Task_event.emit sink Task_event.Task_started ;
+  Eio.Promise.await first_started ;
+  let text_events =
+    Task_event.max_pending_agent_text_bytes
+    / Task_event.max_agent_text_delta_bytes
+  in
+  for _ = 1 to text_events do
+    Task_event.emit
+      sink
+      (Task_event.Agent_text_delta
+         (String.make Task_event.max_agent_text_delta_bytes 'x'))
+  done ;
+  let usage : Backend_types.cost =
+    {
+      tokens_input = Some 1;
+      tokens_output = Some 1;
+      cost_usd = None;
+      cache_creation_input_tokens = None;
+      cache_read_input_tokens = None;
+    }
+  in
+  for _ = text_events + 1 to Task_event.max_pending_observational_events do
+    Task_event.emit sink (Task_event.Token_usage usage)
+  done ;
+  Task_event.emit sink (Task_event.Token_usage usage) ;
+  let emitted_controls = 1_000 in
+  for _ = 1 to emitted_controls do
+    Task_event.emit sink Task_event.Preflight_started
+  done ;
+  Task_event.emit_terminal sink Task_event.Succeeded ;
+  let pending = Task_event.Private.pending_delivery sink in
+  Alcotest.(check int)
+    "pending queue reaches exact total bound"
+    Task_event.max_pending_events
+    pending.event_count ;
+  Alcotest.(check int)
+    "pending observations reach exact bound"
+    Task_event.max_pending_observational_events
+    pending.observational_event_count ;
+  Alcotest.(check int)
+    "pending ordinary controls reach exact cap"
+    Task_event.max_pending_control_events
+    pending.control_event_count ;
+  Alcotest.(check int)
+    "pending text reaches exact 64 KiB cap"
+    Task_event.max_pending_agent_text_bytes
+    pending.agent_text_bytes ;
+  Alcotest.(check bool)
+    "pending marker has a dedicated slot"
+    true
+    pending.truncation_marker_retained ;
+  Alcotest.(check int)
+    "pending terminal has a dedicated slot"
+    1
+    pending.terminal_event_count ;
+  Eio.Promise.resolve resolve_release_first () ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  let collected = Task_event.Private.collected_delivery collector in
+  Alcotest.(check int)
+    "one active callback plus bounded pending queue was delivered"
+    (Task_event.max_pending_events + 1)
+    !callback_count ;
+  Alcotest.(check int)
+    "post-delivery collector remains bounded"
+    Task_event.max_pending_events
+    (List.length collected.events) ;
+  Alcotest.(check int)
+    "one excess delivered ordinary control is omitted"
+    1
+    collected.omitted_events ;
+  let observations, controls, markers, terminals, text_bytes =
+    List.fold_left
+      (fun (observations, controls, markers, terminals, text_bytes) event ->
+        match Task_event.Private.classify_payload event.Task_event.payload with
+        | Task_event.Private.Agent_text_observation text ->
+            ( observations + 1,
+              controls,
+              markers,
+              terminals,
+              text_bytes + String.length text )
+        | Task_event.Private.Token_usage_observation
+        | Task_event.Private.Session_observation
+        | Task_event.Private.Tool_observation ->
+            (observations + 1, controls, markers, terminals, text_bytes)
+        | Task_event.Private.Nonterminal_control ->
+            (observations, controls + 1, markers, terminals, text_bytes)
+        | Task_event.Private.Delivery_truncation_marker ->
+            (observations, controls, markers + 1, terminals, text_bytes)
+        | Task_event.Private.Terminal_event ->
+            (observations, controls, markers, terminals + 1, text_bytes))
+      (0, 0, 0, 0, 0)
+      collected.events
+  in
+  Alcotest.(check int)
+    "collector observation partition"
+    Task_event.max_pending_observational_events
+    observations ;
+  Alcotest.(check int)
+    "collector ordinary-control partition"
+    Task_event.max_pending_control_events
+    controls ;
+  Alcotest.(check int) "collector retains truncation marker" 1 markers ;
+  Alcotest.(check int) "collector retains terminal" 1 terminals ;
+  Alcotest.(check int)
+    "collector retains exactly 64 KiB text"
+    Task_event.max_pending_agent_text_bytes
+    text_bytes ;
+  let marker =
+    List.find_map
+      (fun event ->
+        match event.Task_event.payload with
+        | Task_event.Event_delivery_truncated counts -> Some counts
+        | _ -> None)
+      collected.events
+    |> function
+    | Some marker -> marker
+    | None -> Alcotest.fail "bounded collector lost truncation marker"
+  in
+  Alcotest.(check int)
+    "marker reports saturated usage"
+    1
+    marker.token_usage_events ;
+  Alcotest.(check int)
+    "marker reports abusive pending controls"
+    (emitted_controls - Task_event.max_pending_control_events)
+    marker.control_events ;
+  Alcotest.(check bool)
+    "terminal remains the last collected event"
+    true
+    (match List.rev collected.events with
+    | {Task_event.payload = Task_event.Terminal Task_event.Succeeded; _} :: _ ->
+        true
+    | _ -> false)
+
 let test_claude_parser_emits_only_proven_public_content () =
   let reasoning =
     {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private-chain-of-thought"}]}}|}
@@ -798,6 +976,14 @@ let () =
             "alternating abusive controls keep one marker"
             `Quick
             test_alternating_abusive_controls_use_one_bounded_marker;
+          Alcotest.test_case
+            "published delivery bounds are exact"
+            `Quick
+            test_published_delivery_bounds_are_exact;
+          Alcotest.test_case
+            "shared post-delivery collector is bounded"
+            `Quick
+            test_shared_bounded_collector_retains_marker_and_terminal;
         ] );
       ( "backend parser",
         [
