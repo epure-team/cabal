@@ -19,6 +19,10 @@ type error =
 
 type detailed_error =
   | Dispatch_failure of error
+  | Dispatch_failure_with_execution of {
+      failure : error;
+      execution : Backend_types.task_execution;
+    }
   | Execution_failure of Backend_types.task_execution_error
 
 type detailed_outcome =
@@ -42,6 +46,8 @@ let render_error = function
 
 let render_detailed_error = function
   | Dispatch_failure error -> render_error error
+  | Dispatch_failure_with_execution {failure; execution = _} ->
+      render_error failure
   | Execution_failure error ->
       render_error
         (Schema_enforcement_failed (Json_schema_enforcer.render_error error))
@@ -49,6 +55,8 @@ let render_detailed_error = function
 let project_detailed_outcome_with_context ~has_context = function
   | Ok execution -> Ok execution.Backend_types.final_result
   | Error (Dispatch_failure error) -> Error error
+  | Error (Dispatch_failure_with_execution {failure; execution = _}) ->
+      Error failure
   | Error
       (Execution_failure
         (Backend_types.Schema_retry_failed
@@ -67,8 +75,11 @@ let project_detailed_outcome_with_context ~has_context = function
       Error
         (Schema_enforcement_failed (Json_schema_enforcer.render_error error))
 
-let project_detailed_outcome outcome =
+let project_contextual_detailed_outcome outcome =
   project_detailed_outcome_with_context ~has_context:true outcome
+
+let project_prepared_detailed_outcome outcome =
+  project_detailed_outcome_with_context ~has_context:false outcome
 
 let ( let* ) result continuation = Result.bind result continuation
 
@@ -113,6 +124,52 @@ type prepared = {
   backend : Agentic_backend.t;
   spec : Backend_types.task_spec;
 }
+
+let seconds_of_span span = Mtime.Span.to_float_ns span /. 1_000_000_000.0
+
+let elapsed_since clock started_at =
+  seconds_of_span (Mtime.span started_at (Eio.Time.Mono.now clock))
+
+let make_result status = Backend_types.make_task_result ~status ()
+
+let nonblank_session_id = function
+  | Some session_id -> (
+      match String.trim session_id with "" -> None | value -> Some value)
+  | None -> None
+
+let final_session_id attempts =
+  List.fold_left
+    (fun selected (attempt : Backend_types.task_attempt) ->
+      match nonblank_session_id attempt.result.session_id with
+      | Some session_id -> Some session_id
+      | None -> selected)
+    None
+    attempts
+
+let make_terminal_execution ~attempts ~total_elapsed status =
+  {
+    Backend_types.final_result = make_result status;
+    attempts;
+    total_elapsed;
+    total_cost =
+      Backend_types.aggregate_costs
+        (List.map
+           (fun (attempt : Backend_types.task_attempt) -> attempt.result.cost)
+           attempts);
+    final_session_id = final_session_id attempts;
+  }
+
+let dispatch_failure_with_progress ~progress ~total_elapsed failure =
+  match Json_schema_enforcer.Private.completed_attempts progress with
+  | [] -> Error (Dispatch_failure failure)
+  | attempts ->
+      let execution =
+        make_terminal_execution
+          ~attempts
+          ~total_elapsed
+          (Backend_types.Failed (render_error failure))
+      in
+      Error (Dispatch_failure_with_execution {failure; execution})
 
 let emit context payload =
   Option.iter (fun value -> Task_execution_context.emit value payload) context
@@ -163,20 +220,38 @@ let prepare ~sw ~env ~limits ~backend_id ?context spec =
   Eio.Fiber.yield () ;
   Ok {backend; spec}
 
-let execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared =
+let execute_prepared_detailed_with_progress ~sw ~env ?context ?on_raw_line
+    ~progress prepared =
+  let clock = Eio.Stdenv.mono_clock env in
+  let started_at = Eio.Time.Mono.now clock in
   match
     protect Backend_execution_failed (fun () ->
-        Json_schema_enforcer.run_task_detailed
+        Json_schema_enforcer.Private.run_task_detailed
           ~sw
           ~env
           ?context
           ?on_raw_line
+          ~progress
           ~backend:prepared.backend
           prepared.spec)
   with
-  | Error error -> Error (Dispatch_failure error)
+  | Error failure ->
+      dispatch_failure_with_progress
+        ~progress
+        ~total_elapsed:(elapsed_since clock started_at)
+        failure
   | Ok (Ok execution) -> Ok execution
   | Ok (Error error) -> Error (Execution_failure error)
+
+let execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared =
+  let progress = Json_schema_enforcer.Private.create_progress () in
+  execute_prepared_detailed_with_progress
+    ~sw
+    ~env
+    ?context
+    ?on_raw_line
+    ~progress
+    prepared
 
 let execute_prepared ~sw ~env ?context ?on_raw_line prepared =
   execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared
@@ -191,19 +266,6 @@ type task_handle = {
   delivery_complete : unit Eio.Promise.t;
   completed : bool Atomic.t;
 }
-
-let seconds_of_span span = Mtime.Span.to_float_ns span /. 1_000_000_000.0
-
-let make_result status = Backend_types.make_task_result ~status ()
-
-let make_terminal_execution ~total_elapsed status =
-  {
-    Backend_types.final_result = make_result status;
-    attempts = [];
-    total_elapsed;
-    total_cost = None;
-    final_session_id = None;
-  }
 
 let emit_result_metadata context result =
   (match result.Backend_types.session_id with
@@ -239,7 +301,8 @@ let emit_terminal sink context = function
       in
       Task_event.emit_terminal sink terminal
 
-let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline =
+let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline
+    progress =
   let context =
     Task_execution_context.create
       ~remaining_time:(fun () -> Task_deadline.remaining deadline)
@@ -250,17 +313,20 @@ let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline =
         match prepare ~sw ~env ~limits ~backend_id ~context spec with
         | Error error -> Error (Dispatch_failure error)
         | Ok prepared ->
-            execute_prepared_detailed
+            execute_prepared_detailed_with_progress
               ~sw
               ~env
               ~context
               ?on_raw_line
+              ~progress
               prepared)
   with
   | `Completed result -> (result, context)
   | `Timeout ->
       ( Ok
           (make_terminal_execution
+             ~attempts:
+               (Json_schema_enforcer.Private.completed_attempts progress)
              ~total_elapsed:(Task_deadline.elapsed deadline)
              Backend_types.Timeout),
         context )
@@ -269,6 +335,7 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
   let detailed_outcome, resolve_detailed_outcome = Eio.Promise.create () in
   let ready, resolve_ready = Eio.Promise.create () in
   let completed = Atomic.make false in
+  let progress = Json_schema_enforcer.Private.create_progress () in
   Eio.Fiber.fork ~sw (fun () ->
       let mono_clock = Eio.Stdenv.mono_clock env in
       let started_at = Eio.Time.Mono.now mono_clock in
@@ -307,6 +374,7 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                       spec
                       sink
                       deadline
+                      progress
                   with
                   | Eio.Cancel.Cancelled _ ->
                       let context =
@@ -317,6 +385,9 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                       in
                       ( Ok
                           (make_terminal_execution
+                             ~attempts:
+                               (Json_schema_enforcer.Private.completed_attempts
+                                  progress)
                              ~total_elapsed:(Task_deadline.elapsed deadline)
                              Backend_types.Cancelled),
                         context )
@@ -329,11 +400,17 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                             Task_deadline.remaining deadline)
                           sink
                       in
-                      ( Error (Dispatch_failure Backend_execution_failed),
+                      ( dispatch_failure_with_progress
+                          ~progress
+                          ~total_elapsed:(Task_deadline.elapsed deadline)
+                          Backend_execution_failed,
                         context ))
             in
             Eio.Cancel.protect (fun () ->
-                emit_terminal sink context (project_detailed_outcome result) ;
+                emit_terminal
+                  sink
+                  context
+                  (project_contextual_detailed_outcome result) ;
                 Atomic.set completed true ;
                 Eio.Promise.resolve_ok resolve_detailed_outcome result)
           with
@@ -356,7 +433,8 @@ let cancel handle =
 
 let await_detailed handle = Eio.Promise.await_exn handle.detailed_outcome
 
-let await handle = await_detailed handle |> project_detailed_outcome
+let await handle =
+  await_detailed handle |> project_contextual_detailed_outcome
 
 let await_event_delivery handle = Eio.Promise.await handle.delivery_complete
 
@@ -372,6 +450,9 @@ module Private = struct
   let await_detailed = await_detailed
 
   let await_event_delivery = await_event_delivery
+
+  let project_prepared_detailed_outcome =
+    project_prepared_detailed_outcome
 end
 
 let run_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =

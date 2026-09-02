@@ -35,7 +35,8 @@ val await : t -> (Backend_types.task_result, Runtime_dispatch.error) result
 (** Await the memoized CBL-05 execution or structured central failure. Like
     {!await}, this never waits for event callbacks and is safe to invoke from
     this handle's own callback. Repeated and concurrent calls return the same
-    value. *)
+    value. Outer deadline/cancellation outcomes retain every backend result that
+    completed before interruption; an in-flight attempt is never fabricated. *)
 val await_detailed : t -> Runtime_dispatch.detailed_outcome
 
 (** Wait until the terminal event callback has returned and all earlier queued
