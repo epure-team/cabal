@@ -35,8 +35,9 @@
 include Agentic_backend.S
 
 (** Extract safe normalized payloads from one Codex JSONL event. Agent text,
-    session/tool identity, and token counts are retained; raw tool arguments
-    and outputs are omitted. *)
+    canonical lowercase UUID thread identity, safe tool identity, and
+    non-negative integer token counts are retained; raw tool arguments and
+    outputs are omitted. Invalid token fields are ignored independently. *)
 val normalized_events_of_line : string -> Task_event.payload list
 
 (** Prepared Codex process invocation. [argv] is passed directly to the process
@@ -54,7 +55,9 @@ type backend_invocation = {
     argv. [Upload_attachments] adds one [-i] pair per workspace-relative image;
     [Reuse_session_attachments] is accepted only for resume and adds none.
     Web policy is forced with an invocation-scoped config override, independently
-    of user config. A schema-bearing [spec] requires [schema_path]. *)
+    of user config. A schema-bearing [spec] requires [schema_path]. Resume IDs
+    must use the canonical lowercase UUID syntax emitted in Codex
+    [thread.started] records; validation occurs before config I/O or spawn. *)
 val build_invocation :
   ?schema_path:string ->
   ?attachment_delivery:Backend_types.attachment_delivery ->
@@ -94,7 +97,9 @@ val project_config_artifacts :
 (** [parse_jsonl_output stdout] parses Codex's JSONL output and extracts only
     the last protocol-proven completed agent message and completed-turn usage.
     Malformed, reasoning, error, and unknown records are ignored; raw stdout is
-    never used as fallback text.
+    never used as fallback text. Token fields must be non-negative JSON integers;
+    zero is preserved, invalid fields are ignored independently, and totals
+    saturate at [max_int].
 
     {pre}
     (none)
@@ -135,7 +140,9 @@ val parse_stdout_text : string -> string
 (** Strict final public assistant text parser for Codex JSONL. *)
 val parse_public_stdout_text : string -> string
 
-(** Strict session parser accepting only [thread.started]. *)
+(** Strict session parser accepting only the [thread_id] field of
+    [thread.started] when it is a canonical lowercase UUID
+    ([8-4-4-4-12] hexadecimal syntax). *)
 val parse_public_session_id : string -> string option
 
 (** [build_command ~mcp_config_path spec] constructs the Codex CLI command and

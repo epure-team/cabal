@@ -293,6 +293,51 @@ let safe_protocol_identifier value =
   then Some value
   else None
 
+let canonical_codex_thread_id value =
+  let lowercase_hex = function
+    | '0' .. '9' | 'a' .. 'f' -> true
+    | _ -> false
+  in
+  let rec valid_from index =
+    if index = 36 then true
+    else
+      let valid_character =
+        match index with
+        | 8 | 13 | 18 | 23 -> value.[index] = '-'
+        | _ -> lowercase_hex value.[index]
+      in
+      valid_character && valid_from (index + 1)
+  in
+  if String.length value = 36 && valid_from 0 then Some value else None
+
+let nonnegative_token_member name json =
+  match Yojson.Safe.Util.member name json with
+  | `Int value when value >= 0 -> Some value
+  | _ -> None
+
+let token_usage_of_json usage =
+  match usage with
+  | `Assoc _ ->
+      let tokens_input = nonnegative_token_member "input_tokens" usage in
+      let tokens_output = nonnegative_token_member "output_tokens" usage in
+      let cache_read_input_tokens =
+        nonnegative_token_member "cached_input_tokens" usage
+      in
+      if
+        Option.is_none tokens_input && Option.is_none tokens_output
+        && Option.is_none cache_read_input_tokens
+      then None
+      else
+        Some
+          {
+            Backend_types.tokens_input;
+            tokens_output;
+            cost_usd = None;
+            cache_creation_input_tokens = None;
+            cache_read_input_tokens;
+          }
+  | _ -> None
+
 let normalized_events_of_line line =
   try
     let json = Yojson.Safe.from_string line in
@@ -308,12 +353,9 @@ let normalized_events_of_line line =
     in
     (match event_type, item_type with
     | Some "thread.started", _ ->
-        let session_id =
-          match json |> member "thread_id" |> to_string_option with
-          | Some id -> Some id
-          | None -> json |> member "session_id" |> to_string_option
-        in
-        Option.bind session_id safe_protocol_identifier
+        Option.bind
+          (json |> member "thread_id" |> to_string_option)
+          canonical_codex_thread_id
         |> Option.iter (fun id -> add (Task_event.Session_id id))
     | Some "item.completed", Some "agent_message" ->
         Option.iter
@@ -334,19 +376,10 @@ let normalized_events_of_line line =
         else add (Task_event.Tool_finished {id; name = Some name})
     | _ -> ()) ;
     let usage = json |> member "usage" in
-    if event_type = Some "turn.completed" && usage <> `Null then begin
-      add
-        (Task_event.Token_usage
-           {
-             Backend_types.tokens_input =
-               usage |> member "input_tokens" |> to_int_option;
-              tokens_output = usage |> member "output_tokens" |> to_int_option;
-              cost_usd = None;
-              cache_creation_input_tokens = None;
-              cache_read_input_tokens =
-                usage |> member "cached_input_tokens" |> to_int_option;
-           })
-    end ;
+    if event_type = Some "turn.completed" then
+      Option.iter
+        (fun usage -> add (Task_event.Token_usage usage))
+        (token_usage_of_json usage) ;
     List.rev !events
   with _ -> []
 
@@ -354,10 +387,21 @@ let normalized_events_of_line line =
    reasoning/error records, and raw stdout are never promoted to agent text. *)
 let parse_jsonl_output stdout =
   let last_text = ref "" in
-  let total_input = ref 0 in
-  let total_output = ref 0 in
-  let total_cache_read_input = ref 0 in
-  let has_usage = ref false in
+  let total_input = ref None in
+  let total_output = ref None in
+  let total_cache_read_input = ref None in
+  let saturating_add left right =
+    if right > Stdlib.max_int - left then Stdlib.max_int else left + right
+  in
+  let add_token_value total = function
+    | None -> ()
+    | Some value ->
+        total :=
+          Some
+            (match !total with
+            | None -> value
+            | Some accumulated -> saturating_add accumulated value)
+  in
   String.split_on_char '\n' stdout
   |> List.iter (fun line ->
          normalized_events_of_line line
@@ -365,31 +409,24 @@ let parse_jsonl_output stdout =
               | Task_event.Agent_text_delta text when text <> "" ->
                   last_text := text
               | Token_usage usage ->
-                  has_usage := true ;
-                  Option.iter
-                    (fun value -> total_input := !total_input + value)
-                    usage.tokens_input ;
-                  Option.iter
-                    (fun value -> total_output := !total_output + value)
-                    usage.tokens_output ;
-                  Option.iter
-                    (fun value ->
-                      total_cache_read_input := !total_cache_read_input + value)
+                  add_token_value total_input usage.tokens_input ;
+                  add_token_value total_output usage.tokens_output ;
+                  add_token_value
+                    total_cache_read_input
                     usage.cache_read_input_tokens
               | _ -> ())) ;
   let cost =
-    if !has_usage then
+    if
+      Option.is_some !total_input || Option.is_some !total_output
+      || Option.is_some !total_cache_read_input
+    then
       Some
         {
-          tokens_input = (if !total_input > 0 then Some !total_input else None);
-          tokens_output =
-            (if !total_output > 0 then Some !total_output else None);
+          tokens_input = !total_input;
+          tokens_output = !total_output;
           cost_usd = None;
           cache_creation_input_tokens = None;
-          cache_read_input_tokens =
-            (if !total_cache_read_input > 0 then
-               Some !total_cache_read_input
-             else None);
+          cache_read_input_tokens = !total_cache_read_input;
         }
     else None
   in
@@ -444,6 +481,13 @@ let validate_attachment_paths attachments =
   then Ok ()
   else invocation_error "an attachment path is not workspace-relative"
 
+let validate_resume_session_id = function
+  | None -> Ok ()
+  | Some session_id -> (
+      match canonical_codex_thread_id session_id with
+      | Some _ -> Ok ()
+      | None -> invocation_error "the resume session id is invalid")
+
 let validate_capabilities spec =
   match Backend_registry.find id with
   | None -> invocation_error "the built-in capability descriptor is unavailable"
@@ -459,6 +503,7 @@ let validate_attachment_delivery attachment_delivery spec =
   | (Upload_attachments | Reuse_session_attachments), (None | Some _) -> Ok ()
 
 let validate_transport_request ~attachment_delivery spec =
+  let* () = validate_resume_session_id spec.resume_session_id in
   let* () = validate_attachment_paths spec.attachments in
   validate_attachment_delivery attachment_delivery spec
 
@@ -503,17 +548,14 @@ let build_invocation ?schema_path
     | Some path -> (["--output-schema"; path], ["--output-schema"; "<schema>"])
     | None -> ([], [])
   in
-  let common =
+  let shared_options =
     [
-      "codex";
-      "exec";
       "--json";
       "--skip-git-repo-check";
       "--ignore-user-config";
       "-c";
       Printf.sprintf "web_search=\"%s\"" (web_search_mode spec.web_access);
     ]
-    @ sandbox_args
   in
   let attachments =
     match attachment_delivery with
@@ -524,10 +566,18 @@ let build_invocation ?schema_path
   let redacted_images = redacted_image_args attachments in
   let command, redacted_command =
     match spec.resume_session_id with
-    | None -> (images @ ["-"], redacted_images @ ["-"])
+    | None ->
+        ( ["codex"; "exec"] @ shared_options @ sandbox_args @ model_args
+          @ schema_args @ images @ ["-"],
+          ["codex"; "exec"] @ shared_options @ sandbox_args
+          @ redacted_model_args @ redacted_schema_args @ redacted_images @ ["-"]
+        )
     | Some session_id ->
-        ( ["resume"; session_id] @ images @ ["-"],
-          ["resume"; "<session-id>"] @ redacted_images @ ["-"] )
+        ( ["codex"; "exec"] @ schema_args @ sandbox_args
+          @ ["resume"; session_id] @ shared_options @ model_args @ images @ ["-"],
+          ["codex"; "exec"] @ redacted_schema_args @ sandbox_args
+          @ ["resume"; "<session-id>"] @ shared_options @ redacted_model_args
+          @ redacted_images @ ["-"] )
   in
   let full_prompt =
     if String.length spec.instructions > 0 then
@@ -539,10 +589,9 @@ let build_invocation ?schema_path
   in
   Ok
     {
-      argv = common @ model_args @ schema_args @ command;
+      argv = command;
       stdin = Some full_prompt;
-      redacted_argv =
-        common @ redacted_model_args @ redacted_schema_args @ redacted_command;
+      redacted_argv = redacted_command;
     }
 
 let build_command_with_schema_path ?schema_path ?attachment_delivery

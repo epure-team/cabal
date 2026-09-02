@@ -15,6 +15,8 @@ let test_id () = Alcotest.(check string) "id" "codex" Codex_cli.id
 
 let test_name () = Alcotest.(check string) "name" "OpenAI Codex" Codex_cli.name
 
+let valid_thread_id = "019c1f65-7f5a-7e13-9f8a-0c4f68d6a321"
+
 let identity_tests =
   [
     ("id is codex", `Quick, test_id); ("name is OpenAI Codex", `Quick, test_name);
@@ -24,7 +26,7 @@ let identity_tests =
 
 let test_parse_jsonl_with_message_and_usage () =
   let input =
-    {|{"type":"thread.started","thread_id":"abc"}
+    {|{"type":"thread.started","thread_id":"019c1f65-7f5a-7e13-9f8a-0c4f68d6a321"}
 {"type":"item.completed","item":{"type":"agent_message","text":"First message"}}
 {"type":"item.completed","item":{"type":"agent_message","text":"Final result"}}
 {"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":75}}|}
@@ -74,7 +76,11 @@ let test_parse_jsonl_ignores_non_public_records () =
   Alcotest.(check bool) "no cost" true (Option.is_none cost)
 
 let test_parse_stdout_text_retains_legacy_raw_fallback () =
-  let input = {|{"type":"thread.started","thread_id":"thread-123"}|} in
+  let input =
+    Printf.sprintf
+      {|{"type":"thread.started","thread_id":"%s"}|}
+      valid_thread_id
+  in
   Alcotest.(check string)
     "legacy helper retains raw fallback"
     input
@@ -95,7 +101,9 @@ let payload_kind = function
 let test_normalized_events_public_protocol_records () =
   let lines =
     [
-      {|{"type":"thread.started","thread_id":"thread-123"}|};
+      Printf.sprintf
+        {|{"type":"thread.started","thread_id":"%s"}|}
+        valid_thread_id;
       {|{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"public answer"}}|};
       {|{"type":"item.started","item":{"id":"tool-1","type":"web_search","query":"private query omitted"}}|};
       {|{"type":"item.completed","item":{"id":"tool-1","type":"web_search","result":"private result omitted"}}|};
@@ -109,12 +117,13 @@ let test_normalized_events_public_protocol_records () =
     (List.map payload_kind events) ;
   match events with
   | [
-   Task_event.Session_id "thread-123";
+   Task_event.Session_id session_id;
    Agent_text_delta "public answer";
    Tool_started {id = Some "tool-1"; name = "web_search"};
    Tool_finished {id = Some "tool-1"; name = Some "web_search"};
    Token_usage usage;
   ] ->
+      Alcotest.(check string) "canonical session id" valid_thread_id session_id ;
       Alcotest.(check (option int)) "input usage" (Some 12) usage.tokens_input ;
       Alcotest.(check (option int))
         "output usage"
@@ -125,6 +134,124 @@ let test_normalized_events_public_protocol_records () =
         (Some 4)
         usage.cache_read_input_tokens
   | _ -> Alcotest.fail "unexpected normalized event payloads"
+
+let test_session_parser_accepts_only_canonical_codex_thread_ids () =
+  let valid_line =
+    Printf.sprintf
+      {|{"type":"thread.started","thread_id":"%s"}|}
+      valid_thread_id
+  in
+  Alcotest.(check (option string))
+    "canonical UUID is accepted"
+    (Some valid_thread_id)
+    (Codex_cli.parse_public_session_id valid_line) ;
+  let invalid_ids =
+    [
+      "";
+      "--last";
+      "thread-123";
+      "019C1F65-7F5A-7E13-9F8A-0C4F68D6A321";
+      "019c1f65-7f5a-7e13-9f8a-0c4f68d6a32";
+      "019c1f65-7f5a-7e13-9f8a-0c4f68d6a321\n";
+      String.make 129 'a';
+    ]
+  in
+  List.iter
+    (fun invalid_id ->
+      let line =
+        `Assoc
+          [
+            ("type", `String "thread.started");
+            ("thread_id", `String invalid_id);
+          ]
+        |> Yojson.Safe.to_string
+      in
+      Alcotest.(check (option string))
+        "invalid thread id is rejected"
+        None
+        (Codex_cli.parse_public_session_id line))
+    invalid_ids ;
+  let undocumented_fallback =
+    Printf.sprintf
+      {|{"type":"thread.started","session_id":"%s"}|}
+      valid_thread_id
+  in
+  Alcotest.(check (option string))
+    "session_id fallback is not accepted for thread.started"
+    None
+    (Codex_cli.parse_public_session_id undocumented_fallback)
+
+let test_token_fields_reject_invalid_values () =
+  let above_max_int =
+    Int64.(to_string (add (of_int Stdlib.max_int) 1L))
+  in
+  let invalid_lines =
+    [
+      {|{"type":"turn.completed","usage":{"input_tokens":-1,"output_tokens":-2,"cached_input_tokens":-3}}|};
+      {|{"type":"turn.completed","usage":{"input_tokens":"1","output_tokens":1.5,"cached_input_tokens":true}}|};
+      Printf.sprintf
+        {|{"type":"turn.completed","usage":{"input_tokens":%s,"output_tokens":%s,"cached_input_tokens":%s}}|}
+        above_max_int
+        above_max_int
+        above_max_int;
+    ]
+  in
+  List.iter
+    (fun line ->
+      Alcotest.(check (list string))
+        "invalid-only usage emits no token event"
+        []
+        (Codex_cli.normalized_events_of_line line |> List.map payload_kind) ;
+      let _, cost = Codex_cli.parse_jsonl_output line in
+      Alcotest.(check bool)
+        "invalid-only usage emits no cost"
+        true
+        (Option.is_none cost))
+    invalid_lines
+
+let test_token_fields_preserve_zero_and_independent_valid_values () =
+  let zero_line =
+    {|{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0,"cached_input_tokens":0}}|}
+  in
+  let _, zero_cost = Codex_cli.parse_jsonl_output zero_line in
+  (match zero_cost with
+  | Some cost ->
+      Alcotest.(check (list (option int)))
+        "zero token values are preserved"
+        [Some 0; Some 0; Some 0]
+        [cost.tokens_input; cost.tokens_output; cost.cache_read_input_tokens]
+  | None -> Alcotest.fail "zero usage was discarded") ;
+  let independent =
+    {|{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":"bad","cached_input_tokens":-1}}
+{"type":"turn.completed","usage":{"input_tokens":null,"output_tokens":3,"cached_input_tokens":false}}
+{"type":"turn.completed","usage":{"input_tokens":-4,"output_tokens":[],"cached_input_tokens":4}}|}
+  in
+  let _, cost = Codex_cli.parse_jsonl_output independent in
+  match cost with
+  | Some cost ->
+      Alcotest.(check (list (option int)))
+        "valid token fields survive invalid siblings"
+        [Some 2; Some 3; Some 4]
+        [cost.tokens_input; cost.tokens_output; cost.cache_read_input_tokens]
+  | None -> Alcotest.fail "independent valid token fields were discarded"
+
+let test_token_aggregation_saturates_at_max_int () =
+  let line value =
+    Printf.sprintf
+      {|{"type":"turn.completed","usage":{"input_tokens":%d,"output_tokens":%d,"cached_input_tokens":%d}}|}
+      value
+      value
+      value
+  in
+  let input = String.concat "\n" [line Stdlib.max_int; line 1] in
+  let _, cost = Codex_cli.parse_jsonl_output input in
+  match cost with
+  | Some cost ->
+      Alcotest.(check (list (option int)))
+        "all token totals saturate without wrapping"
+        [Some Stdlib.max_int; Some Stdlib.max_int; Some Stdlib.max_int]
+        [cost.tokens_input; cost.tokens_output; cost.cache_read_input_tokens]
+  | None -> Alcotest.fail "saturated usage was discarded"
 
 let test_normalized_events_ignore_private_and_unsafe_records () =
   let lines =
@@ -166,6 +293,18 @@ let jsonl_output_tests =
     ( "ignore private and unsafe protocol records",
       `Quick,
       test_normalized_events_ignore_private_and_unsafe_records );
+    ( "session parser accepts canonical UUIDs only",
+      `Quick,
+      test_session_parser_accepts_only_canonical_codex_thread_ids );
+    ( "invalid token fields are rejected",
+      `Quick,
+      test_token_fields_reject_invalid_values );
+    ( "zero and independent token fields are preserved",
+      `Quick,
+      test_token_fields_preserve_zero_and_independent_valid_values );
+    ( "token aggregation saturates at max_int",
+      `Quick,
+      test_token_aggregation_saturates_at_max_int );
   ]
 
 (** {1 Command Construction Tests} *)
@@ -188,6 +327,38 @@ let read_file path =
 
 let remove_if_exists path =
   try if Sys.file_exists path then Sys.remove path with _ -> ()
+
+let rec remove_tree path =
+  if Sys.file_exists path then
+    match (Unix.lstat path).st_kind with
+    | Unix.S_DIR ->
+        Sys.readdir path
+        |> Array.iter (fun name -> remove_tree (Filename.concat path name)) ;
+        Unix.rmdir path
+    | _ -> Sys.remove path
+
+let with_temp_dir label f =
+  let path = Filename.temp_dir ("cabal-codex-" ^ label ^ "-") "" in
+  Fun.protect ~finally:(fun () -> remove_tree path) (fun () -> f path)
+
+let with_path_prefix path f =
+  let previous = Sys.getenv_opt "PATH" in
+  let next =
+    match previous with
+    | Some value when value <> "" -> path ^ ":" ^ value
+    | Some _ | None -> path
+  in
+  Unix.putenv "PATH" next ;
+  Fun.protect
+    ~finally:(fun () -> Unix.putenv "PATH" (Option.value ~default:"" previous))
+    f
+
+let write_executable path contents =
+  let channel = open_out path in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr channel)
+    (fun () -> output_string channel contents) ;
+  Unix.chmod path 0o700
 
 let rec find_flag_value_index flag index = function
   | candidate :: value :: _ when String.equal candidate flag ->
@@ -262,6 +433,21 @@ let expected_root ?(web = "disabled") ?(read_only = false) ?model ?schema () =
   @ (match model with Some value -> ["-m"; value] | None -> [])
   @ (match schema with Some path -> ["--output-schema"; path] | None -> [])
 
+let expected_resume ?(web = "disabled") ?(read_only = false) ?model ?schema
+    session_id =
+  ["codex"; "exec"]
+  @ (match schema with Some path -> ["--output-schema"; path] | None -> [])
+  @ (if read_only then ["-s"; "read-only"] else ["--full-auto"])
+  @ ["resume"; session_id]
+  @ [
+      "--json";
+      "--skip-git-repo-check";
+      "--ignore-user-config";
+      "-c";
+      Printf.sprintf "web_search=\"%s\"" web;
+    ]
+  @ (match model with Some value -> ["-m"; value] | None -> [])
+
 let test_build_invocation_zero_images_exact_argv () =
   let invocation = build_invocation (command_spec ()) in
   Alcotest.(check (list string))
@@ -308,35 +494,60 @@ let test_build_invocation_multiple_images_exact_argv () =
       ])
     invocation.argv
 
-let test_build_invocation_resume_uploads_images () =
-  let attachment = media_attachment Backend_types.Png in
+let test_build_invocation_resume_uploads_png_jpeg_with_schema () =
+  let attachments =
+    [
+      media_attachment ~id:"front" ~path:"media/front.png" Backend_types.Png;
+      media_attachment ~id:"back" ~path:"media/back.jpg" Backend_types.Jpeg;
+    ]
+  in
+  let schema_path = "/private/schema path.json" in
   let invocation =
     build_invocation
+      ~schema_path
       ~attachment_delivery:Backend_types.Upload_attachments
       (command_spec
-         ~attachments:[attachment]
-         ~resume_session_id:"session-secret"
+         ~attachments
+         ~resume_session_id:valid_thread_id
+         ~json_schema:sample_output_schema
+         ~read_only:true
          ())
   in
   Alcotest.(check (list string))
-    "resume upload places image after resume subcommand"
-    (expected_root ()
-    @ ["resume"; "session-secret"; "-i"; "media/cover.png"; "-"])
+    "resume root schema/sandbox precede subcommand and PNG/JPEG follow UUID"
+    (expected_resume
+       ~read_only:true
+       ~schema:schema_path
+       valid_thread_id
+    @ ["-i"; "media/front.png"; "-i"; "media/back.jpg"; "-"])
     invocation.argv
 
-let test_build_invocation_resume_reuses_images () =
-  let attachment = media_attachment Backend_types.Png in
+let test_build_invocation_resume_reuses_media_with_schema () =
+  let attachments =
+    [
+      media_attachment ~id:"front" ~path:"media/front.png" Backend_types.Png;
+      media_attachment ~id:"back" ~path:"media/back.jpg" Backend_types.Jpeg;
+    ]
+  in
+  let schema_path = "/private/schema path.json" in
   let invocation =
     build_invocation
+      ~schema_path
       ~attachment_delivery:Backend_types.Reuse_session_attachments
       (command_spec
-         ~attachments:[attachment]
-         ~resume_session_id:"session-secret"
+         ~attachments
+         ~resume_session_id:valid_thread_id
+         ~json_schema:sample_output_schema
+         ~read_only:true
          ())
   in
   Alcotest.(check (list string))
-    "resume reuse does not duplicate image flags"
-    (expected_root () @ ["resume"; "session-secret"; "-"])
+    "resume reuse composes root schema without duplicate image flags"
+    (expected_resume
+       ~read_only:true
+       ~schema:schema_path
+       valid_thread_id
+    @ ["-"])
     invocation.argv
 
 let test_build_invocation_image_schema_composition () =
@@ -384,17 +595,18 @@ let test_build_invocation_redacts_sensitive_argv () =
       ~schema_path:"/private/schema path.json"
       (command_spec
          ~attachments
-         ~resume_session_id:"session-secret"
+         ~resume_session_id:valid_thread_id
          ~json_schema:sample_output_schema
          ~model:"private-model"
          ())
   in
   Alcotest.(check (list string))
     "redacted argv keeps flags and counts only"
-    (expected_root ~model:"<model>" ~schema:"<schema>" ()
+    (expected_resume
+       ~model:"<model>"
+       ~schema:"<schema>"
+       "<session-id>"
     @ [
-        "resume";
-        "<session-id>";
         "-i";
         "<attachment-1>";
         "-i";
@@ -413,7 +625,7 @@ let test_build_invocation_redacts_sensitive_argv () =
       "front cover.png";
       "back cover.jpg";
       "schema path.json";
-      "session-secret";
+      valid_thread_id;
       "private-model";
       "private prompt payload";
       "private/workspace";
@@ -446,6 +658,78 @@ let test_build_invocation_rejects_reuse_without_resume () =
   with
   | Ok _ -> Alcotest.fail "session attachment reuse accepted without resume"
   | Error _ -> ()
+
+let invalid_resume_session_ids () =
+  [
+    "";
+    " ";
+    "--last";
+    "thread-123";
+    "019C1F65-7F5A-7E13-9F8A-0C4F68D6A321";
+    "019c1f65-7f5a-7e13-9f8a-0c4f68d6a321\n";
+    String.make 129 'a';
+  ]
+
+let test_build_invocation_rejects_invalid_resume_session_ids () =
+  List.iter
+    (fun invalid_id ->
+      match
+        Codex_cli.build_invocation
+          ~attachment_delivery:Backend_types.Upload_attachments
+          ~mcp_config_path:None
+          (command_spec ~resume_session_id:invalid_id ())
+      with
+      | Ok _ -> Alcotest.fail "invalid resume session id accepted"
+      | Error msg ->
+          Alcotest.(check bool)
+            "session rejection is sanitized"
+            true
+            (contains_substring msg "resume session id is invalid") ;
+          if String.trim invalid_id <> "" then
+            Alcotest.(check bool)
+              "session rejection omits caller value"
+              false
+              (contains_substring msg invalid_id))
+    (invalid_resume_session_ids ())
+
+let test_invalid_resume_session_ids_fail_before_config_or_spawn () =
+  with_temp_dir "invalid-session" @@ fun temp_dir ->
+  let marker = Filename.concat temp_dir "codex-ran" in
+  let fake_codex = Filename.concat temp_dir "codex" in
+  write_executable
+    fake_codex
+    (Printf.sprintf
+       "#!/bin/sh\nprintf 'ran\\n' > %s\nexit 99\n"
+       (Filename.quote marker)) ;
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  List.iter
+    (fun invalid_id ->
+      let spec =
+        Backend_types.make_task_spec
+          ~prompt:"must not run"
+          ~working_dir:temp_dir
+          ~resume_session_id:invalid_id
+          ()
+      in
+      let result = Codex_cli.run_task ~sw ~env spec in
+      (match result.status with
+      | Backend_types.Failed msg ->
+          Alcotest.(check bool)
+            "run_task returns sanitized session rejection"
+            true
+            (contains_substring msg "resume session id is invalid")
+      | _ -> Alcotest.fail "invalid session did not fail") ;
+      Alcotest.(check bool)
+        "invalid session creates no Codex config"
+        false
+        (Sys.file_exists (Filename.concat temp_dir ".codex/config.toml")) ;
+      Alcotest.(check bool)
+        "invalid session spawns no Codex process"
+        false
+        (Sys.file_exists marker))
+    (invalid_resume_session_ids ())
 
 let test_invalid_transport_fails_before_filesystem_or_spawn () =
   Eio_posix.run @@ fun env ->
@@ -526,7 +810,7 @@ let test_build_command_with_output_schema_normal () =
   assert_schema_file_wiring ()
 
 let test_build_command_with_output_schema_resume () =
-  assert_schema_file_wiring ~resume_session_id:"sess-abc-123" ()
+  assert_schema_file_wiring ~resume_session_id:valid_thread_id ()
 
 let test_build_command_without_output_schema () =
   let specs =
@@ -538,7 +822,7 @@ let test_build_command_without_output_schema () =
       Backend_types.make_task_spec
         ~prompt:"No schema resume"
         ~working_dir:"/tmp/test"
-        ~resume_session_id:"sess-no-schema"
+        ~resume_session_id:valid_thread_id
         ();
     ]
   in
@@ -589,10 +873,10 @@ let command_construction_tests =
       test_build_invocation_multiple_images_exact_argv );
     ( "resume uploads images",
       `Quick,
-      test_build_invocation_resume_uploads_images );
+      test_build_invocation_resume_uploads_png_jpeg_with_schema );
     ( "resume reuses session images",
       `Quick,
-      test_build_invocation_resume_reuses_images );
+      test_build_invocation_resume_reuses_media_with_schema );
     ( "image and schema compose",
       `Quick,
       test_build_invocation_image_schema_composition );
@@ -606,6 +890,12 @@ let command_construction_tests =
     ( "reuse without resume rejected",
       `Quick,
       test_build_invocation_rejects_reuse_without_resume );
+    ( "invalid resume session IDs rejected",
+      `Quick,
+      test_build_invocation_rejects_invalid_resume_session_ids );
+    ( "invalid resume IDs fail before config or spawn",
+      `Quick,
+      test_invalid_resume_session_ids_fail_before_config_or_spawn );
     ( "invalid transport fails before filesystem/spawn",
       `Quick,
       test_invalid_transport_fails_before_filesystem_or_spawn );
@@ -701,6 +991,37 @@ let native_e2e_source () =
     "libs/cabal/test/test_native_json_schema_backends.ml"
     "test/test_native_json_schema_backends.ml"
 
+let test_authenticated_media_web_probe_artifact_is_reproducible () =
+  let path =
+    Filename.concat (project_root ()) "tools/probe_codex_media_web.py"
+  in
+  Alcotest.(check bool) "probe artifact exists" true (Sys.file_exists path) ;
+  let permissions = (Unix.stat path).st_perm in
+  Alcotest.(check bool)
+    "probe artifact is executable"
+    true
+    (permissions land 0o111 <> 0) ;
+  let source = read_file path in
+  List.iter
+    (fun expected ->
+      Alcotest.(check bool)
+        ("probe artifact covers " ^ expected)
+        true
+        (contains_substring source expected))
+    [
+      "codex-cli 0.131.0";
+      "media-initial";
+      "resume-upload";
+      "resume-reuse";
+      "web-cached";
+      "web-live";
+      "--output-schema";
+      "thread.started";
+      "agent_message";
+      "web_search";
+      "input=prompt";
+    ]
+
 let test_e2e_harness_removes_shared_model_env_var () =
   List.iter
     (fun (label, source) ->
@@ -785,6 +1106,9 @@ let test_e2e_harness_uses_test_managed_namespace () =
 
 let e2e_harness_model_contract_tests =
   [
+    ( "authenticated media/web probe artifact is reproducible",
+      `Quick,
+      test_authenticated_media_web_probe_artifact_is_reproducible );
     ( "E2E harness removes shared model env var",
       `Quick,
       test_e2e_harness_removes_shared_model_env_var );
