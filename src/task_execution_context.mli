@@ -42,8 +42,8 @@ val session_id_emitted : t -> bool
 (** Whether a backend parser already emitted token usage. *)
 val token_usage_emitted : t -> bool
 
-(** Mark that a structured backend parser is authoritative for result text.
-    Its non-empty final text is suppressed until {!mark_final_public_text}. *)
+(** Mark that a structured backend parser is authoritative for result text. Its
+    non-empty final text is suppressed until {!mark_final_public_text}. *)
 val claim_structured_text : t -> unit
 
 (** Whether a structured parser claimed authority over public text events. *)
@@ -67,8 +67,29 @@ val final_public_text : t -> bool
     has selected an attempt policy. *)
 val requested_delivery : t -> Backend_types.attempt_delivery option
 
+(** [authorized_attachment_paths context ...] returns the sealed transport paths
+    installed by central dispatch exactly when backend identity, attachment
+    references, and web policy match the immutable authorization snapshot.
+    Returned paths are backend-transport data and must never be logged,
+    serialized, or included in diagnostics. *)
+val authorized_attachment_paths :
+  t ->
+  backend_id:string ->
+  attachment_references:Backend_types.media_attachment list ->
+  web_access_policy:Backend_types.web_access ->
+  (string list, string) result
+
 module Private : sig
+  (** Enforcer-owned setter. Backend transports should use {!requested_delivery}
+      and must not rewrite the selected policy. *)
   val set_requested_delivery : t -> Backend_types.attempt_delivery -> unit
-  (** Enforcer-owned setter. Backend transports should use
-      {!requested_delivery} and must not rewrite the selected policy. *)
+
+  (** Install the central immutable transport authorization exactly once. *)
+  val authorize_transport :
+    t ->
+    backend_id:string ->
+    attachment_references:Backend_types.media_attachment list ->
+    web_access_policy:Backend_types.web_access ->
+    prepared_inputs:Task_preflight.prepared_inputs ->
+    (unit, string) result
 end

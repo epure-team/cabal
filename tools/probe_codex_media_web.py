@@ -76,6 +76,8 @@ def write_fixtures(workspace: Path) -> tuple[Path, Path, Path]:
         ),
         encoding="utf-8",
     )
+    for path in (png, jpeg, schema):
+        path.chmod(0o600)
     return png, jpeg, schema
 
 
@@ -94,7 +96,7 @@ def initial_argv(schema: Path, web_mode: str, images: tuple[Path, ...]) -> list[
         str(schema),
     ]
     for image in images:
-        argv.extend(("-i", image.name))
+        argv.extend(("-i", str(image.resolve())))
     argv.append("-")
     return argv
 
@@ -120,7 +122,7 @@ def resume_argv(
         'web_search="disabled"',
     ]
     for image in images:
-        argv.extend(("-i", image.name))
+        argv.extend(("-i", str(image.resolve())))
     argv.append("-")
     return argv
 
@@ -179,8 +181,10 @@ def run_probe(
     return session_id
 
 
-def run_modes(workspace: Path, selected_modes: tuple[str, ...]) -> None:
-    png, jpeg, schema = write_fixtures(workspace)
+def run_modes(
+    workspace: Path, sealed_inputs: Path, selected_modes: tuple[str, ...]
+) -> None:
+    png, jpeg, schema = write_fixtures(sealed_inputs)
     session_id: str | None = None
 
     def ensure_session() -> str:
@@ -236,7 +240,14 @@ def main() -> int:
     try:
         require_version()
         with tempfile.TemporaryDirectory(prefix="cabal-codex-probe-") as temp_dir:
-            run_modes(Path(temp_dir), tuple(args.modes) or MODES)
+            with tempfile.TemporaryDirectory(
+                prefix="cabal-codex-probe-inputs-"
+            ) as inputs_dir:
+                sealed_inputs = Path(inputs_dir)
+                sealed_inputs.chmod(0o700)
+                run_modes(
+                    Path(temp_dir), sealed_inputs, tuple(args.modes) or MODES
+                )
     except (OSError, ProbeFailure) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1

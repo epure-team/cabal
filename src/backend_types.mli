@@ -244,9 +244,9 @@ type media_type = Png | Jpeg [@@deriving show, eq, yojson]
 
 (** Caller-declared metadata for one workspace-relative media file.
 
-    The file itself is not serialized into the task. Hosts should validate the
-    metadata and workspace confinement with [Task_preflight.validate_inputs]
-    before invoking a backend. *)
+    The file itself is not serialized into the task. Hosts should invoke through
+    [Runtime_dispatch], which validates metadata/workspace confinement and seals
+    the exact authorized bytes with [Task_preflight.prepare_inputs]. *)
 type media_attachment = {
   id : string;  (** Opaque, non-empty identifier unique within the task. *)
   path : string;  (** Workspace-relative file path. *)

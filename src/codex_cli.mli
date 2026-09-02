@@ -7,27 +7,25 @@
 
 (** OpenAI Codex CLI agentic backend.
 
-    This module implements the [AGENTIC_BACKEND.S] interface for the
-    OpenAI Codex CLI tool. It spawns [codex exec] in non-interactive mode
-    with JSONL output and collects results.
+    This module implements the [AGENTIC_BACKEND.S] interface for the OpenAI
+    Codex CLI tool. It spawns [codex exec] in non-interactive mode with JSONL
+    output and collects results.
 
-    {b Configuration:}
-    Codex CLI is expected to be installed and accessible in the PATH.
-    The backend uses [codex exec --json --full-auto] for non-interactive
-    sandboxed execution (or [-s read-only] for validators).
+    {b Configuration:} Codex CLI is expected to be installed and accessible in
+    the PATH. The backend uses [codex exec --json --full-auto] for
+    non-interactive sandboxed execution (or [-s read-only] for validators).
 
-    Media/web argv construction is implemented and authenticated at the
-    enforced 0.131.0 baseline. {!run_task} applies the effective descriptor gate
-    before config I/O or spawn: the built-in contract accepts PNG/JPEG images
-    and web access through search-and-fetch, with versioned evidence mirrored in
-    the independent hardened runtime capability snapshot.
+    Media/web argv construction is implemented and authenticated at the enforced
+    0.131.0 baseline. Sensitive media/web execution requires the immutable
+    authorization installed by central dispatch; the adapter does not consult
+    mutable registry state. PNG/JPEG uploads use only sealed transport paths
+    produced by preflight, never caller workspace paths.
 
-    {b MCP Integration:}
-    Codex 0.131.0 supports MCP via [.codex/config.toml].  Épure generates
-    this file with a template MCP section (disabled/comment-only by default)
-    and serializes approved runtime [mcp_servers] into Codex TOML
-    [mcp_servers.<name>] tables.  The config file is discovered automatically
-    by Codex at the fixed project path. Persistent MCP [env] entries store
+    {b MCP Integration:} Codex 0.131.0 supports MCP via [.codex/config.toml].
+    Épure generates this file with a template MCP section (disabled/comment-only
+    by default) and serializes approved runtime [mcp_servers] into Codex TOML
+    [mcp_servers.<name>] tables. The config file is discovered automatically by
+    Codex at the fixed project path. Persistent MCP [env] entries store
     environment-variable references (for example, [$EPURE_DB]) rather than raw
     runtime values. *)
 
@@ -43,23 +41,26 @@ val normalized_events_of_line : string -> Task_event.payload list
 (** Prepared Codex process invocation. [argv] is passed directly to the process
     launcher without a shell. [stdin] carries the prompt/instructions, while
     [redacted_argv] preserves useful flag names and attachment counts without
-    paths, session/model values, schema paths, workspace paths, or prompt data. *)
+    paths, session/model values, schema paths, workspace paths, or prompt data.
+*)
 type backend_invocation = {
   argv : string list;
   stdin : string option;
   redacted_argv : string list;
 }
 
-(** [build_invocation ?schema_path ~attachment_delivery spec] validates the
-    Codex-specific transport request and constructs its actual and redacted
-    argv. [Upload_attachments] adds one [-i] pair per workspace-relative image;
-    [Reuse_session_attachments] is accepted only for resume and adds none.
-    Web policy is forced with an invocation-scoped config override, independently
-    of user config. A schema-bearing [spec] requires [schema_path]. Resume IDs
-    must use the canonical lowercase UUID syntax emitted in Codex
-    [thread.started] records; validation occurs before config I/O or spawn. *)
+(** [build_invocation ?schema_path ?attachment_paths ~attachment_delivery spec]
+    validates the Codex-specific transport request and constructs its actual and
+    redacted argv. [Upload_attachments] requires one absolute sealed path per
+    attachment and adds one [-i] pair per sealed image;
+    [Reuse_session_attachments] is accepted only for resume and adds none. Web
+    policy is forced with an invocation-scoped config override, independently of
+    user config. A schema-bearing [spec] requires [schema_path]. Resume IDs must
+    use the canonical lowercase UUID syntax emitted in Codex [thread.started]
+    records; validation occurs before config I/O or spawn. *)
 val build_invocation :
   ?schema_path:string ->
+  ?attachment_paths:string list ->
   ?attachment_delivery:Backend_types.attachment_delivery ->
   mcp_config_path:string option ->
   Backend_types.task_spec ->
@@ -141,15 +142,17 @@ val parse_stdout_text : string -> string
 val parse_public_stdout_text : string -> string
 
 (** Strict session parser accepting only the [thread_id] field of
-    [thread.started] when it is a canonical lowercase UUID
-    ([8-4-4-4-12] hexadecimal syntax). *)
+    [thread.started] when it is a canonical lowercase UUID ([8-4-4-4-12]
+    hexadecimal syntax). *)
 val parse_public_session_id : string -> string option
 
 (** [build_command ~mcp_config_path spec] constructs the Codex CLI command and
     stdin content for a task invocation.  When [spec.read_only] is [true],
     passes [-s read-only] (OS-level sandbox); otherwise
     [--full-auto]. Attachment delivery defaults to a fresh upload; use
-    {!build_invocation} to test explicit resume-reuse behavior.
+    {!build_invocation} with sealed [attachment_paths] to test media upload or
+    explicit resume-reuse behavior. This helper rejects attachment-bearing specs
+    because it has no central sealed-path authorization.
     Exported for testing.
 
     {pre}

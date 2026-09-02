@@ -25,8 +25,7 @@ type detailed_error =
     }
   | Execution_failure of Backend_types.task_execution_error
 
-type detailed_outcome =
-  (Backend_types.task_execution, detailed_error) result
+type detailed_outcome = (Backend_types.task_execution, detailed_error) result
 
 let render_error = function
   | Invalid_timeout -> "task timeout must be non-negative and not NaN"
@@ -46,7 +45,7 @@ let render_error = function
 
 let render_detailed_error = function
   | Dispatch_failure error -> render_error error
-  | Dispatch_failure_with_execution {failure; execution = _} ->
+  | Dispatch_failure_with_execution { failure; execution = _ } ->
       render_error failure
   | Execution_failure error ->
       render_error
@@ -55,20 +54,20 @@ let render_detailed_error = function
 let project_detailed_outcome_with_context ~has_context = function
   | Ok execution -> Ok execution.Backend_types.final_result
   | Error (Dispatch_failure error) -> Error error
-  | Error (Dispatch_failure_with_execution {failure; execution = _}) ->
+  | Error (Dispatch_failure_with_execution { failure; execution = _ }) ->
       Error failure
   | Error
       (Execution_failure
-        (Backend_types.Schema_retry_failed
-          {
-            execution;
-            attempt_2_failure =
-              ( Backend_types.Transport_failure
-                  (Backend_types.Timeout | Backend_types.Cancelled)
-              | Backend_types.Resume_failure
-                  (Backend_types.Timeout | Backend_types.Cancelled) );
-            _;
-          }))
+         (Backend_types.Schema_retry_failed
+            {
+              execution;
+              attempt_2_failure =
+                ( Backend_types.Transport_failure
+                    (Backend_types.Timeout | Backend_types.Cancelled)
+                | Backend_types.Resume_failure
+                    (Backend_types.Timeout | Backend_types.Cancelled) );
+              _;
+            }))
     when has_context ->
       Ok execution.Backend_types.final_result
   | Error (Execution_failure error) ->
@@ -90,7 +89,7 @@ let protect error f =
   | _ -> Error error
 
 let check_version ~env descriptor =
-  let command = [descriptor.Backend_registry.binary_name; "--version"] in
+  let command = [ descriptor.Backend_registry.binary_name; "--version" ] in
   let* probe =
     protect Version_check_failed (fun () ->
         Backend_process.probe_version_command ~env command)
@@ -109,11 +108,12 @@ let check_version ~env descriptor =
   Ok probe
 
 let check_availability ~sw ~env ~backend ~origin ~version_probe =
-  match origin, version_probe with
+  match (origin, version_probe) with
   | (Runtime_entry.Handwritten | Runtime_entry.Yaml), Some version_probe ->
       if version_probe.Backend_process.command_available then Ok ()
       else Error Backend_unavailable
-  | (Runtime_entry.Handwritten | Runtime_entry.Yaml | Runtime_entry.Custom), _ ->
+  | (Runtime_entry.Handwritten | Runtime_entry.Yaml | Runtime_entry.Custom), _
+    ->
       let* available =
         protect Availability_check_failed (fun () ->
             Agentic_backend.available ~sw ~env backend)
@@ -122,7 +122,11 @@ let check_availability ~sw ~env ~backend ~origin ~version_probe =
 
 type prepared = {
   backend : Agentic_backend.t;
+  backend_id : string;
   spec : Backend_types.task_spec;
+  inputs : Task_preflight.prepared_inputs;
+  fallback_context : Task_execution_context.t;
+  release_hook : Eio.Switch.hook;
 }
 
 let seconds_of_span span = Mtime.Span.to_float_ns span /. 1_000_000_000.0
@@ -143,8 +147,7 @@ let final_session_id attempts =
       match nonblank_session_id attempt.result.session_id with
       | Some session_id -> Some session_id
       | None -> selected)
-    None
-    attempts
+    None attempts
 
 let make_terminal_execution ~attempts ~total_elapsed status =
   {
@@ -164,20 +167,35 @@ let dispatch_failure_with_progress ~progress ~total_elapsed failure =
   | [] -> Error (Dispatch_failure failure)
   | attempts ->
       let execution =
-        make_terminal_execution
-          ~attempts
-          ~total_elapsed
+        make_terminal_execution ~attempts ~total_elapsed
           (Backend_types.Failed (render_error failure))
       in
-      Error (Dispatch_failure_with_execution {failure; execution})
+      Error (Dispatch_failure_with_execution { failure; execution })
 
 let emit context payload =
   Option.iter (fun value -> Task_execution_context.emit value payload) context
 
+let release_prepared prepared =
+  match Task_preflight.release_inputs prepared.inputs with
+  | Ok () ->
+      ignore (Eio.Switch.try_remove_hook prepared.release_hook);
+      Ok ()
+  | Error _ as error -> error
+
+let authorize_context prepared context =
+  Task_execution_context.Private.authorize_transport context
+    ~backend_id:prepared.backend_id
+    ~attachment_references:prepared.spec.Backend_types.attachments
+    ~web_access_policy:prepared.spec.web_access ~prepared_inputs:prepared.inputs
+
+let make_fallback_context ~sw =
+  let sink = Task_event.create_sink ~sw ~now:(fun () -> 0.0) () in
+  Task_execution_context.create ~remaining_time:(fun () -> None) sink
+
 let prepare ~sw ~env ~limits ~backend_id ?context spec =
   (* Give cancellation requested immediately after [start_task] a deterministic
      checkpoint before registry resolution or any preflight side effect. *)
-  Eio.Fiber.yield () ;
+  Eio.Fiber.yield ();
   let* entry =
     match Registry.find_entry backend_id with
     | Some (Registry.Validated entry) -> Ok entry
@@ -186,77 +204,109 @@ let prepare ~sw ~env ~limits ~backend_id ?context spec =
   in
   let backend = entry.Runtime_entry.backend in
   let descriptor = entry.effective_descriptor in
-  emit context (Task_event.Backend_selected {backend_id}) ;
-  Eio.Fiber.yield () ;
-  emit context Task_event.Preflight_started ;
-  let* () =
-    match Task_preflight.validate_inputs ~limits spec with
-    | Ok () -> Ok ()
+  emit context (Task_event.Backend_selected { backend_id });
+  Eio.Fiber.yield ();
+  emit context Task_event.Preflight_started;
+  let* inputs =
+    match Task_preflight.prepare_inputs ~limits spec with
+    | Ok inputs -> Ok inputs
     | Error error -> Error (Preflight_failed error)
   in
-  let* () =
-    match Task_preflight.validate_capabilities ~descriptor spec with
-    | Ok () -> Ok ()
-    | Error error -> Error (Preflight_failed error)
+  let release_hook =
+    Eio.Switch.on_release_cancellable sw (fun () ->
+        ignore (Task_preflight.release_inputs inputs))
   in
-  emit context Task_event.Preflight_completed ;
-  Eio.Fiber.yield () ;
-  let* version_probe =
-    match entry.version_policy with
-    | Runtime_entry.Enforce_baseline ->
-        emit context Task_event.Version_probe_started ;
-        let result = Result.map Option.some (check_version ~env descriptor) in
-        if Result.is_ok result then
-          emit context Task_event.Version_probe_completed ;
-        result
-    | Runtime_entry.No_version_gate -> Ok None
+  let fallback_context =
+    match context with
+    | Some context -> context
+    | None -> make_fallback_context ~sw
   in
-  Eio.Fiber.yield () ;
-  emit context Task_event.Availability_check_started ;
-  let* () =
-    check_availability ~sw ~env ~backend ~origin:entry.origin ~version_probe
+  let prepared =
+    { backend; backend_id; spec; inputs; fallback_context; release_hook }
   in
-  emit context Task_event.Availability_check_completed ;
-  Eio.Fiber.yield () ;
-  Ok {backend; spec}
+  let continue () =
+    let* () =
+      match Task_preflight.validate_capabilities ~descriptor spec with
+      | Ok () -> Ok ()
+      | Error error -> Error (Preflight_failed error)
+    in
+    let* () =
+      match authorize_context prepared fallback_context with
+      | Ok () -> Ok ()
+      | Error _ -> Error Backend_execution_failed
+    in
+    emit context Task_event.Preflight_completed;
+    Eio.Fiber.yield ();
+    let* version_probe =
+      match entry.version_policy with
+      | Runtime_entry.Enforce_baseline ->
+          emit context Task_event.Version_probe_started;
+          let result = Result.map Option.some (check_version ~env descriptor) in
+          if Result.is_ok result then
+            emit context Task_event.Version_probe_completed;
+          result
+      | Runtime_entry.No_version_gate -> Ok None
+    in
+    Eio.Fiber.yield ();
+    emit context Task_event.Availability_check_started;
+    let* () =
+      check_availability ~sw ~env ~backend ~origin:entry.origin ~version_probe
+    in
+    emit context Task_event.Availability_check_completed;
+    Eio.Fiber.yield ();
+    Ok prepared
+  in
+  match continue () with
+  | Ok _ as success -> success
+  | Error failure -> (
+      match release_prepared prepared with
+      | Ok () -> Error failure
+      | Error cleanup_error -> Error (Preflight_failed cleanup_error))
+  | exception error ->
+      ignore (release_prepared prepared);
+      raise error
 
 let execute_prepared_detailed_with_progress ~sw ~env ?context ?on_raw_line
     ~progress prepared =
   let clock = Eio.Stdenv.mono_clock env in
   let started_at = Eio.Time.Mono.now clock in
-  match
-    protect Backend_execution_failed (fun () ->
-        Json_schema_enforcer.Private.run_task_detailed
-          ~sw
-          ~env
-          ?context
-          ?on_raw_line
-          ~progress
-          ~backend:prepared.backend
-          prepared.spec)
-  with
-  | Error failure ->
-      dispatch_failure_with_progress
-        ~progress
+  let context = Option.value ~default:prepared.fallback_context context in
+  let outcome =
+    try
+      match authorize_context prepared context with
+      | Error _ -> Error (Dispatch_failure Backend_execution_failed)
+      | Ok () -> (
+          match
+            protect Backend_execution_failed (fun () ->
+                Json_schema_enforcer.Private.run_task_detailed ~sw ~env ~context
+                  ?on_raw_line ~progress ~backend:prepared.backend prepared.spec)
+          with
+          | Error failure ->
+              dispatch_failure_with_progress ~progress
+                ~total_elapsed:(elapsed_since clock started_at)
+                failure
+          | Ok (Ok execution) -> Ok execution
+          | Ok (Error error) -> Error (Execution_failure error))
+    with error ->
+      ignore (release_prepared prepared);
+      raise error
+  in
+  match release_prepared prepared with
+  | Ok () -> outcome
+  | Error cleanup_error ->
+      dispatch_failure_with_progress ~progress
         ~total_elapsed:(elapsed_since clock started_at)
-        failure
-  | Ok (Ok execution) -> Ok execution
-  | Ok (Error error) -> Error (Execution_failure error)
+        (Preflight_failed cleanup_error)
+  | exception error -> raise error
 
 let execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared =
   let progress = Json_schema_enforcer.Private.create_progress () in
-  execute_prepared_detailed_with_progress
-    ~sw
-    ~env
-    ?context
-    ?on_raw_line
-    ~progress
-    prepared
+  execute_prepared_detailed_with_progress ~sw ~env ?context ?on_raw_line
+    ~progress prepared
 
 let execute_prepared ~sw ~env ?context ?on_raw_line prepared =
   execute_prepared_detailed ~sw ~env ?context ?on_raw_line prepared
-  |> project_detailed_outcome_with_context
-       ~has_context:(Option.is_some context)
+  |> project_detailed_outcome_with_context ~has_context:(Option.is_some context)
 
 exception Task_cancelled
 
@@ -269,19 +319,18 @@ type task_handle = {
 
 let emit_result_metadata context result =
   (match result.Backend_types.session_id with
-  | Some session_id when not (Task_execution_context.session_id_emitted context) ->
+  | Some session_id when not (Task_execution_context.session_id_emitted context)
+    ->
       Task_execution_context.emit context (Task_event.Session_id session_id)
-  | None | Some _ -> ()) ;
+  | None | Some _ -> ());
   if
     result.Backend_types.agent_text <> ""
-    && not (Task_execution_context.agent_text_emitted context)
-    &&
-    (not (Task_execution_context.structured_text_claimed context)
-    || Task_execution_context.final_public_text context)
+    && (not (Task_execution_context.agent_text_emitted context))
+    && ((not (Task_execution_context.structured_text_claimed context))
+       || Task_execution_context.final_public_text context)
   then
-    Task_execution_context.emit
-      context
-      (Task_event.Agent_text_delta result.Backend_types.agent_text) ;
+    Task_execution_context.emit context
+      (Task_event.Agent_text_delta result.Backend_types.agent_text);
   match result.Backend_types.cost with
   | Some cost when not (Task_execution_context.token_usage_emitted context) ->
       Task_execution_context.emit context (Task_event.Token_usage cost)
@@ -291,7 +340,7 @@ let emit_terminal sink context = function
   | Error error ->
       Task_event.emit_terminal sink (Task_event.Failed (render_error error))
   | Ok result ->
-      emit_result_metadata context result ;
+      emit_result_metadata context result;
       let terminal =
         match result.Backend_types.status with
         | Backend_types.Success -> Task_event.Succeeded
@@ -313,13 +362,8 @@ let execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink deadline
         match prepare ~sw ~env ~limits ~backend_id ~context spec with
         | Error error -> Error (Dispatch_failure error)
         | Ok prepared ->
-            execute_prepared_detailed_with_progress
-              ~sw
-              ~env
-              ~context
-              ?on_raw_line
-              ~progress
-              prepared)
+            execute_prepared_detailed_with_progress ~sw ~env ~context
+              ?on_raw_line ~progress prepared)
   with
   | `Completed result -> (result, context)
   | `Timeout ->
@@ -340,22 +384,21 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
       let mono_clock = Eio.Stdenv.mono_clock env in
       let started_at = Eio.Time.Mono.now mono_clock in
       let sink =
-        Task_event.create_sink
-          ~sw
+        Task_event.create_sink ~sw
           ~now:(fun () ->
             seconds_of_span
               (Mtime.span started_at (Eio.Time.Mono.now mono_clock)))
-          ?on_event
-          ()
+          ?on_event ()
       in
-      Task_event.emit sink Task_event.Task_started ;
+      Task_event.emit sink Task_event.Task_started;
       Eio.Cancel.sub (fun cancellation ->
-          Eio.Promise.resolve
-            resolve_ready
-            (cancellation, Task_event.Private.delivery_complete sink) ;
+          Eio.Promise.resolve resolve_ready
+            (cancellation, Task_event.Private.delivery_complete sink);
           try
             let result, context =
-              match Task_deadline.create mono_clock spec.Backend_types.timeout with
+              match
+                Task_deadline.create mono_clock spec.Backend_types.timeout
+              with
               | Error Task_deadline.Invalid_timeout ->
                   let context =
                     Task_execution_context.create
@@ -365,16 +408,8 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                   (Error (Dispatch_failure Invalid_timeout), context)
               | Ok deadline -> (
                   try
-                    execute
-                      ~sw
-                      ~env
-                      ~limits
-                      ~backend_id
-                      ?on_raw_line
-                      spec
-                      sink
-                      deadline
-                      progress
+                    execute ~sw ~env ~limits ~backend_id ?on_raw_line spec sink
+                      deadline progress
                   with
                   | Eio.Cancel.Cancelled _ ->
                       let context =
@@ -400,31 +435,26 @@ let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
                             Task_deadline.remaining deadline)
                           sink
                       in
-                      ( dispatch_failure_with_progress
-                          ~progress
+                      ( dispatch_failure_with_progress ~progress
                           ~total_elapsed:(Task_deadline.elapsed deadline)
                           Backend_execution_failed,
                         context ))
             in
             Eio.Cancel.protect (fun () ->
-                emit_terminal
-                  sink
-                  context
-                  (project_contextual_detailed_outcome result) ;
-                Atomic.set completed true ;
+                emit_terminal sink context
+                  (project_contextual_detailed_outcome result);
+                Atomic.set completed true;
                 Eio.Promise.resolve_ok resolve_detailed_outcome result)
-          with
-          | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
-              Eio.Cancel.protect (fun () ->
-                  (try
-                     Task_event.emit_terminal
-                       sink
-                       (Task_event.Failed "backend execution failed")
-                   with _ -> ()) ;
-                  Atomic.set completed true ;
-                  Eio.Promise.resolve_error resolve_detailed_outcome fatal))) ;
+          with (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
+            Eio.Cancel.protect (fun () ->
+                (try
+                   Task_event.emit_terminal sink
+                     (Task_event.Failed "backend execution failed")
+                 with _ -> ());
+                Atomic.set completed true;
+                Eio.Promise.resolve_error resolve_detailed_outcome fatal)));
   let cancellation, delivery_complete = Eio.Promise.await ready in
-  {cancellation; detailed_outcome; delivery_complete; completed}
+  { cancellation; detailed_outcome; delivery_complete; completed }
 
 let cancel handle =
   if not (Atomic.get handle.completed) then
@@ -432,47 +462,23 @@ let cancel handle =
     with Invalid_argument _ -> ()
 
 let await_detailed handle = Eio.Promise.await_exn handle.detailed_outcome
-
-let await handle =
-  await_detailed handle |> project_contextual_detailed_outcome
-
+let await handle = await_detailed handle |> project_contextual_detailed_outcome
 let await_event_delivery handle = Eio.Promise.await handle.delivery_complete
 
 module Private = struct
   type nonrec task_handle = task_handle
 
   let start_task = start_task
-
   let cancel = cancel
-
   let await = await
-
   let await_detailed = await_detailed
-
   let await_event_delivery = await_event_delivery
-
-  let project_prepared_detailed_outcome =
-    project_prepared_detailed_outcome
+  let project_prepared_detailed_outcome = project_prepared_detailed_outcome
 end
 
 let run_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
-  start_task
-    ~sw
-    ~env
-    ~limits
-    ~backend_id
-    ?on_event
-    ?on_raw_line
-    spec
-  |> await
+  start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec |> await
 
 let run_task_detailed ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
-  start_task
-    ~sw
-    ~env
-    ~limits
-    ~backend_id
-    ?on_event
-    ?on_raw_line
-    spec
+  start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec
   |> await_detailed

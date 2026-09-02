@@ -8,12 +8,11 @@
 open Backend_types
 
 let id = "codex"
-
 let name = "OpenAI Codex"
 
 (* Static fallback — used when OPENAI_API_KEY is absent or the probe fails. *)
 let models =
-  ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"]
+  [ "gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini" ]
 
 (* Keep only chat / reasoning models from the OpenAI /v1/models response;
    skip embeddings, tts, whisper, dall-e, etc. *)
@@ -52,9 +51,7 @@ let models_probe =
       | None -> Error "OPENAI_API_KEY not set"
       | Some api_key -> (
           match
-            Backend_process.capture_version_output
-              ~env
-              ~timeout_seconds:10.0
+            Backend_process.capture_version_output ~env ~timeout_seconds:10.0
               [
                 "curl";
                 "-sf";
@@ -71,10 +68,9 @@ let models_probe =
               | ms -> Ok ms)))
 
 let available ~sw:_ ~env =
-  Backend_process.check_available ~env ["codex"; "--version"]
+  Backend_process.check_available ~env [ "codex"; "--version" ]
 
 let supports_session_resume = true
-
 let native_json_schema_output = true
 
 let config_body =
@@ -87,7 +83,7 @@ let config_body =
 
 let toml_basic_string s =
   let buf = Buffer.create (String.length s + 2) in
-  Buffer.add_char buf '"' ;
+  Buffer.add_char buf '"';
   String.iter
     (function
       | '"' -> Buffer.add_string buf "\\\""
@@ -102,8 +98,8 @@ let toml_basic_string s =
           if code < 0x20 then
             Buffer.add_string buf (Printf.sprintf "\\u%04X" code)
           else Buffer.add_char buf c)
-    s ;
-  Buffer.add_char buf '"' ;
+    s;
+  Buffer.add_char buf '"';
   Buffer.contents buf
 
 let is_bare_key s =
@@ -139,19 +135,14 @@ let toml_env_entries env =
 let mcp_server_toml (cfg : mcp_server_config) =
   let server_key = toml_key cfg.name in
   let base =
-    Printf.sprintf
-      "[mcp_servers.%s]\ncommand = %s\nargs = %s\n"
-      server_key
+    Printf.sprintf "[mcp_servers.%s]\ncommand = %s\nargs = %s\n" server_key
       (toml_basic_string cfg.command)
       (toml_string_array cfg.args)
   in
   match persistent_env_references cfg.env with
   | [] -> base
   | env ->
-      Printf.sprintf
-        "%s\n[mcp_servers.%s.env]\n%s\n"
-        base
-        server_key
+      Printf.sprintf "%s\n[mcp_servers.%s.env]\n%s\n" base server_key
         (toml_env_entries env)
 
 let config_body_for_mcp_servers = function
@@ -167,10 +158,8 @@ let project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers:_ =
       managed_namespace;
       project_relative_path = ".codex/config.toml";
       content =
-        Backend_config_writer.with_managed_header
-          ~managed_namespace
-          Backend_config_writer.Hash
-          ~backend_id:id
+        Backend_config_writer.with_managed_header ~managed_namespace
+          Backend_config_writer.Hash ~backend_id:id
           (config_body_for_mcp_servers mcp_servers);
     };
   ]
@@ -261,20 +250,20 @@ let check_project_config ~sw:_ ~env ~project_dir ~setup_result =
         let findings = ref [] in
         let add finding = findings := finding :: !findings in
         if contains_substring content "[model]" then
-          add "stale [model] table is present" ;
+          add "stale [model] table is present";
         if contains_substring content "model_provider" then
-          add "stale model_provider key is present" ;
+          add "stale model_provider key is present";
         if contains_substring content "provider =" then
-          add "stale provider assignment is present" ;
+          add "stale provider assignment is present";
         if not (contains_substring content "# [mcp_servers.example]") then
-          add "commented [mcp_servers.example] template is missing" ;
+          add "commented [mcp_servers.example] template is missing";
         if
           List.exists
             (fun line ->
               active_mcp_table_line line
               && not (active_mcp_table_has_valid_shape line))
             lines
-        then add "active MCP tables must use [mcp_servers.<name>] shape" ;
+        then add "active MCP tables must use [mcp_servers.<name>] shape";
         match !findings with
         | [] -> Agentic_backend.Config_valid
         | findings ->
@@ -288,16 +277,14 @@ let safe_protocol_identifier value =
     | _ -> false
   in
   if
-    value <> "" && String.length value <= 128
+    value <> ""
+    && String.length value <= 128
     && String.for_all safe_character value
   then Some value
   else None
 
 let canonical_codex_thread_id value =
-  let lowercase_hex = function
-    | '0' .. '9' | 'a' .. 'f' -> true
-    | _ -> false
-  in
+  let lowercase_hex = function '0' .. '9' | 'a' .. 'f' -> true | _ -> false in
   let rec valid_from index =
     if index = 36 then true
     else
@@ -324,7 +311,8 @@ let token_usage_of_json usage =
         nonnegative_token_member "cached_input_tokens" usage
       in
       if
-        Option.is_none tokens_input && Option.is_none tokens_output
+        Option.is_none tokens_input
+        && Option.is_none tokens_output
         && Option.is_none cache_read_input_tokens
       then None
       else
@@ -351,7 +339,7 @@ let normalized_events_of_line line =
       | `Assoc _ -> item |> member "type" |> to_string_option
       | _ -> None
     in
-    (match event_type, item_type with
+    (match (event_type, item_type) with
     | Some "thread.started", _ ->
         Option.bind
           (json |> member "thread_id" |> to_string_option)
@@ -361,10 +349,10 @@ let normalized_events_of_line line =
         Option.iter
           (fun text -> add (Task_event.Agent_text_delta text))
           (item |> member "text" |> to_string_option)
-    | (Some "item.started" | Some "item.completed"),
-      Some
-        (( "command_execution" | "file_change" | "mcp_tool_call" | "web_search" )
-        as item_kind) ->
+    | ( (Some "item.started" | Some "item.completed"),
+        Some
+          (("command_execution" | "file_change" | "mcp_tool_call" | "web_search")
+           as item_kind) ) ->
         let id =
           Option.bind
             (item |> member "id" |> to_string_option)
@@ -372,14 +360,14 @@ let normalized_events_of_line line =
         in
         let name = item_kind in
         if event_type = Some "item.started" then
-          add (Task_event.Tool_started {id; name})
-        else add (Task_event.Tool_finished {id; name = Some name})
-    | _ -> ()) ;
+          add (Task_event.Tool_started { id; name })
+        else add (Task_event.Tool_finished { id; name = Some name })
+    | _ -> ());
     let usage = json |> member "usage" in
     if event_type = Some "turn.completed" then
       Option.iter
         (fun usage -> add (Task_event.Token_usage usage))
-        (token_usage_of_json usage) ;
+        (token_usage_of_json usage);
     List.rev !events
   with _ -> []
 
@@ -404,20 +392,18 @@ let parse_jsonl_output stdout =
   in
   String.split_on_char '\n' stdout
   |> List.iter (fun line ->
-         normalized_events_of_line line
-         |> List.iter (function
-              | Task_event.Agent_text_delta text when text <> "" ->
-                  last_text := text
-              | Token_usage usage ->
-                  add_token_value total_input usage.tokens_input ;
-                  add_token_value total_output usage.tokens_output ;
-                  add_token_value
-                    total_cache_read_input
-                    usage.cache_read_input_tokens
-              | _ -> ())) ;
+      normalized_events_of_line line
+      |> List.iter (function
+        | Task_event.Agent_text_delta text when text <> "" -> last_text := text
+        | Token_usage usage ->
+            add_token_value total_input usage.tokens_input;
+            add_token_value total_output usage.tokens_output;
+            add_token_value total_cache_read_input usage.cache_read_input_tokens
+        | _ -> ()));
   let cost =
     if
-      Option.is_some !total_input || Option.is_some !total_output
+      Option.is_some !total_input
+      || Option.is_some !total_output
       || Option.is_some !total_cache_read_input
     then
       Some
@@ -444,10 +430,10 @@ let create_output_schema_file schema =
     let channel = open_out_bin path in
     Fun.protect
       ~finally:(fun () -> close_out_noerr channel)
-      (fun () -> output_string channel (Yojson.Safe.to_string ~std:true schema)) ;
+      (fun () -> output_string channel (Yojson.Safe.to_string ~std:true schema));
     path
   with error ->
-    remove_file_noerr path ;
+    remove_file_noerr path;
     raise error
 
 let with_output_schema_file schema f =
@@ -460,26 +446,19 @@ type backend_invocation = {
   redacted_argv : string list;
 }
 
-let ( let* ) result f = match result with Ok value -> f value | Error _ as e -> e
+let ( let* ) result f =
+  match result with Ok value -> f value | Error _ as e -> e
 
 let invocation_error message = Error ("Codex invocation rejected: " ^ message)
 
-let safe_workspace_relative_path path =
-  let unsafe_segment separator =
-    String.split_on_char separator path
-    |> List.exists (fun segment -> segment = "..")
-  in
-  path <> "" && Filename.is_relative path
-  && not (unsafe_segment '/') && not (unsafe_segment '\\')
-
-let validate_attachment_paths attachments =
-  if
-    List.for_all
-      (fun attachment ->
-        safe_workspace_relative_path attachment.Backend_types.path)
-      attachments
-  then Ok ()
-  else invocation_error "an attachment path is not workspace-relative"
+let staged_path_matches_media_type attachment path =
+  path <> ""
+  && (not (Filename.is_relative path))
+  && (not (String.contains path '\000'))
+  &&
+  match attachment.Backend_types.media_type with
+  | Backend_types.Png -> String.ends_with ~suffix:".png" path
+  | Backend_types.Jpeg -> String.ends_with ~suffix:".jpg" path
 
 let validate_resume_session_id = function
   | None -> Ok ()
@@ -488,47 +467,55 @@ let validate_resume_session_id = function
       | Some _ -> Ok ()
       | None -> invocation_error "the resume session id is invalid")
 
-let validate_capabilities spec =
-  match Backend_registry.find id with
-  | None -> invocation_error "the built-in capability descriptor is unavailable"
-  | Some descriptor -> (
-      match Task_preflight.validate_capabilities ~descriptor spec with
-      | Ok () -> Ok ()
-      | Error error -> invocation_error (Task_preflight.render_error error))
-
 let validate_attachment_delivery attachment_delivery spec =
-  match attachment_delivery, spec.resume_session_id with
+  match (attachment_delivery, spec.resume_session_id) with
   | Reuse_session_attachments, None ->
       invocation_error "session attachment reuse requires a resumed session"
   | (Upload_attachments | Reuse_session_attachments), (None | Some _) -> Ok ()
 
-let validate_transport_request ~attachment_delivery spec =
+let validate_staged_attachment_paths ~attachment_delivery ~attachment_paths spec
+    =
+  match attachment_delivery with
+  | Reuse_session_attachments ->
+      if attachment_paths = [] then Ok ()
+      else
+        invocation_error "session attachment reuse must not carry image paths"
+  | Upload_attachments ->
+      if
+        List.length attachment_paths
+        <> List.length spec.Backend_types.attachments
+        || not
+             (List.for_all2 staged_path_matches_media_type spec.attachments
+                attachment_paths)
+      then invocation_error "the sealed attachment set does not match the task"
+      else Ok ()
+
+let validate_transport_request ~attachment_delivery ~attachment_paths spec =
   let* () = validate_resume_session_id spec.resume_session_id in
-  let* () = validate_attachment_paths spec.attachments in
-  validate_attachment_delivery attachment_delivery spec
+  let* () = validate_attachment_delivery attachment_delivery spec in
+  validate_staged_attachment_paths ~attachment_delivery ~attachment_paths spec
 
 let web_search_mode = function
   | Web_disabled -> "disabled"
   | Web_search -> "cached"
   | Web_search_and_fetch -> "live"
 
-let image_args attachments =
-  List.concat_map
-    (fun attachment -> ["-i"; attachment.Backend_types.path])
-    attachments
+let image_args paths = List.concat_map (fun path -> [ "-i"; path ]) paths
 
-let redacted_image_args attachments =
+let redacted_image_args paths =
   List.mapi
-    (fun index _ -> ["-i"; Printf.sprintf "<attachment-%d>" (index + 1)])
-    attachments
+    (fun index _ -> [ "-i"; Printf.sprintf "<attachment-%d>" (index + 1) ])
+    paths
   |> List.concat
 
-let build_invocation ?schema_path
+let build_invocation ?schema_path ?(attachment_paths = [])
     ?(attachment_delivery = Upload_attachments) ~mcp_config_path:_
     (spec : task_spec) =
-  let* () = validate_transport_request ~attachment_delivery spec in
   let* () =
-    match spec.json_schema, schema_path with
+    validate_transport_request ~attachment_delivery ~attachment_paths spec
+  in
+  let* () =
+    match (spec.json_schema, schema_path) with
     | None, None | Some _, Some _ -> Ok ()
     | Some _, None -> invocation_error "a schema file path is required"
     | None, Some _ ->
@@ -536,16 +523,16 @@ let build_invocation ?schema_path
   in
   let model_args, redacted_model_args =
     match spec.model with
-    | Some model -> (["-m"; model], ["-m"; "<model>"])
+    | Some model -> ([ "-m"; model ], [ "-m"; "<model>" ])
     | None -> ([], [])
   in
   let sandbox_args =
-    if spec.read_only then ["-s"; "read-only"]
-    else ["--full-auto"]
+    if spec.read_only then [ "-s"; "read-only" ] else [ "--full-auto" ]
   in
   let schema_args, redacted_schema_args =
     match schema_path with
-    | Some path -> (["--output-schema"; path], ["--output-schema"; "<schema>"])
+    | Some path ->
+        ([ "--output-schema"; path ], [ "--output-schema"; "<schema>" ])
     | None -> ([], [])
   in
   let shared_options =
@@ -557,33 +544,27 @@ let build_invocation ?schema_path
       Printf.sprintf "web_search=\"%s\"" (web_search_mode spec.web_access);
     ]
   in
-  let attachments =
-    match attachment_delivery with
-    | Upload_attachments -> spec.attachments
-    | Reuse_session_attachments -> []
-  in
-  let images = image_args attachments in
-  let redacted_images = redacted_image_args attachments in
+  let images = image_args attachment_paths in
+  let redacted_images = redacted_image_args attachment_paths in
   let command, redacted_command =
     match spec.resume_session_id with
     | None ->
-        ( ["codex"; "exec"] @ shared_options @ sandbox_args @ model_args
-          @ schema_args @ images @ ["-"],
-          ["codex"; "exec"] @ shared_options @ sandbox_args
-          @ redacted_model_args @ redacted_schema_args @ redacted_images @ ["-"]
-        )
+        ( [ "codex"; "exec" ] @ shared_options @ sandbox_args @ model_args
+          @ schema_args @ images @ [ "-" ],
+          [ "codex"; "exec" ] @ shared_options @ sandbox_args
+          @ redacted_model_args @ redacted_schema_args @ redacted_images
+          @ [ "-" ] )
     | Some session_id ->
-        ( ["codex"; "exec"] @ schema_args @ sandbox_args
-          @ ["resume"; session_id] @ shared_options @ model_args @ images @ ["-"],
-          ["codex"; "exec"] @ redacted_schema_args @ sandbox_args
-          @ ["resume"; "<session-id>"] @ shared_options @ redacted_model_args
-          @ redacted_images @ ["-"] )
+        ( [ "codex"; "exec" ] @ schema_args @ sandbox_args
+          @ [ "resume"; session_id ] @ shared_options @ model_args @ images
+          @ [ "-" ],
+          [ "codex"; "exec" ] @ redacted_schema_args @ sandbox_args
+          @ [ "resume"; "<session-id>" ]
+          @ shared_options @ redacted_model_args @ redacted_images @ [ "-" ] )
   in
   let full_prompt =
     if String.length spec.instructions > 0 then
-      Printf.sprintf
-        "%s\n\n---\nProject Instructions:\n%s"
-        spec.prompt
+      Printf.sprintf "%s\n\n---\nProject Instructions:\n%s" spec.prompt
         spec.instructions
     else spec.prompt
   in
@@ -594,14 +575,11 @@ let build_invocation ?schema_path
       redacted_argv = redacted_command;
     }
 
-let build_command_with_schema_path ?schema_path ?attachment_delivery
-    ~mcp_config_path spec =
+let build_command_with_schema_path ?schema_path ?attachment_paths
+    ?attachment_delivery ~mcp_config_path spec =
   match
-    build_invocation
-      ?schema_path
-      ?attachment_delivery
-      ~mcp_config_path
-      spec
+    build_invocation ?schema_path ?attachment_paths ?attachment_delivery
+      ~mcp_config_path spec
   with
   | Ok invocation ->
       ( invocation.argv,
@@ -610,7 +588,8 @@ let build_command_with_schema_path ?schema_path ?attachment_delivery
 
 let build_command ~mcp_config_path (spec : task_spec) =
   match
-    validate_transport_request ~attachment_delivery:Upload_attachments spec
+    validate_transport_request ~attachment_delivery:Upload_attachments
+      ~attachment_paths:[] spec
   with
   | Error message -> invalid_arg message
   | Ok () -> (
@@ -632,8 +611,7 @@ let parse_public_stdout_text stdout =
   normalized_events_of_stdout stdout
   |> List.fold_left
        (fun last -> function
-         | Task_event.Agent_text_delta text -> text
-         | _ -> last)
+         | Task_event.Agent_text_delta text -> text | _ -> last)
        ""
 
 let parse_public_session_id stdout =
@@ -643,25 +621,60 @@ let parse_public_session_id stdout =
 let failed_result message =
   make_task_result ~status:(Failed message) ~stderr:message ~exit_code:1 ()
 
-let requested_attachment_delivery ?context spec =
-  match context with
+type transport_inputs = {
+  attachment_delivery : Backend_types.attachment_delivery;
+  attachment_paths : string list;
+}
+
+let sensitive_transport_requested spec =
+  spec.Backend_types.attachments <> []
+  || spec.web_access <> Backend_types.Web_disabled
+
+let requested_attachment_delivery context spec =
+  match Task_execution_context.requested_delivery context with
   | None -> Ok Upload_attachments
-  | Some context -> (
-      match Task_execution_context.requested_delivery context with
+  | Some delivery
+    when delivery.attachment_references = spec.Backend_types.attachments
+         && delivery.web_access_policy = spec.web_access ->
+      Ok delivery.attachment_delivery
+  | Some _ ->
+      invocation_error "the execution delivery context does not match the task"
+
+let requested_transport_inputs ?context spec =
+  if not (sensitive_transport_requested spec) then
+    let* attachment_delivery =
+      match context with
       | None -> Ok Upload_attachments
-      | Some delivery
-        when delivery.attachment_references = spec.attachments
-             && delivery.web_access_policy = spec.web_access ->
-          Ok delivery.attachment_delivery
-      | Some _ ->
-          invocation_error "the execution delivery context does not match the task")
+      | Some context -> requested_attachment_delivery context spec
+    in
+    Ok { attachment_delivery; attachment_paths = [] }
+  else
+    match context with
+    | None ->
+        invocation_error "central prepared transport authorization is required"
+    | Some context ->
+        let* attachment_delivery = requested_attachment_delivery context spec in
+        let* authorized_paths =
+          match
+            Task_execution_context.authorized_attachment_paths context
+              ~backend_id:id ~attachment_references:spec.attachments
+              ~web_access_policy:spec.web_access
+          with
+          | Ok paths -> Ok paths
+          | Error message -> invocation_error message
+        in
+        let attachment_paths =
+          match attachment_delivery with
+          | Upload_attachments -> authorized_paths
+          | Reuse_session_attachments -> []
+        in
+        Ok { attachment_delivery; attachment_paths }
 
 let run_invocation ~sw ~env ~spec ?context ?on_raw_line invocation =
-  Diagnostics.debug
-    "backend command: %s"
-    (String.concat " " invocation.redacted_argv) ;
+  Diagnostics.debug "backend command: %s"
+    (String.concat " " invocation.redacted_argv);
   let on_stdout line =
-    Option.iter (fun callback -> callback line) on_raw_line ;
+    Option.iter (fun callback -> callback line) on_raw_line;
     Option.iter
       (fun context ->
         List.iter
@@ -669,19 +682,12 @@ let run_invocation ~sw ~env ~spec ?context ?on_raw_line invocation =
           (normalized_events_of_line line))
       context
   in
-  Option.iter Task_execution_context.claim_structured_text context ;
+  Option.iter Task_execution_context.claim_structured_text context;
   let result =
-    Backend_process.run_process
-      ~sw
-      ~env
-      ~cmd:invocation.argv
-      ~stdin_content:invocation.stdin
-      ~working_dir:spec.working_dir
+    Backend_process.run_process ~sw ~env ~cmd:invocation.argv
+      ~stdin_content:invocation.stdin ~working_dir:spec.working_dir
       ~timeout_seconds:(duration_to_seconds spec.timeout)
-      ?context
-      ~parse_cost:parse_cost_from_stdout
-      ~on_stdout
-      ()
+      ?context ~parse_cost:parse_cost_from_stdout ~on_stdout ()
   in
   let task_result =
     {
@@ -698,66 +704,58 @@ let run_invocation ~sw ~env ~spec ?context ?on_raw_line invocation =
       session_id = parse_public_session_id result.stdout;
     }
   in
-  Option.iter Task_execution_context.mark_final_public_text context ;
+  Option.iter Task_execution_context.mark_final_public_text context;
   task_result
 
 let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
-      match requested_attachment_delivery ?context spec with
+      match requested_transport_inputs ?context spec with
       | Error message -> failed_result message
-      | Ok attachment_delivery -> (
-          match validate_capabilities spec with
+      | Ok transport -> (
+          match
+            validate_transport_request
+              ~attachment_delivery:transport.attachment_delivery
+              ~attachment_paths:transport.attachment_paths spec
+          with
           | Error message -> failed_result message
           | Ok () -> (
-              match validate_transport_request ~attachment_delivery spec with
-              | Error message -> failed_result message
-              | Ok () ->
-                  (* Write project config to .codex/config.toml if absent or
-                     managed. Codex discovers this fixed path automatically. *)
-                  let setup =
-                    Backend_config_writer.setup_artifacts
-                      ~project_dir:spec.working_dir
-                      ~force:false
-                      (project_config_artifacts
-                         ~managed_namespace:spec.managed_namespace
-                         ~mcp_servers:spec.mcp_servers
-                         ~lsp_servers:spec.lsp_servers)
+              (* Write project config to .codex/config.toml if absent or
+                 managed. Codex discovers this fixed path automatically. *)
+              let setup =
+                Backend_config_writer.setup_artifacts
+                  ~project_dir:spec.working_dir ~force:false
+                  (project_config_artifacts
+                     ~managed_namespace:spec.managed_namespace
+                     ~mcp_servers:spec.mcp_servers ~lsp_servers:spec.lsp_servers)
+              in
+              (* AC2/AC4 story #479: Codex has Medium precedence confidence.
+                 Warn according to whether the config was applied. *)
+              (match
+                 Backend_config_writer.precedence_warning_for ~backend_id:id
+                   ~write_outcome:setup.Backend_config_writer.write_outcome
+               with
+              | None -> ()
+              | Some msg -> Diagnostics.user_warning "%s" msg);
+              match mcp_config_error_if_needed setup spec.mcp_servers with
+              | Some msg -> make_task_result ~status:(Failed msg) ()
+              | None -> (
+                  let runtime_spec = { spec with mcp_servers = [] } in
+                  let run ?schema_path () =
+                    match
+                      build_invocation ?schema_path
+                        ~attachment_paths:transport.attachment_paths
+                        ~attachment_delivery:transport.attachment_delivery
+                        ~mcp_config_path:None runtime_spec
+                    with
+                    | Error message -> failed_result message
+                    | Ok invocation ->
+                        run_invocation ~sw ~env ~spec:runtime_spec ?context
+                          ?on_raw_line invocation
                   in
-                  (* AC2/AC4 story #479: Codex has Medium precedence confidence.
-                     Warn according to whether the config was applied. *)
-                  (match
-                     Backend_config_writer.precedence_warning_for
-                       ~backend_id:id
-                       ~write_outcome:setup.Backend_config_writer.write_outcome
-                   with
-                  | None -> ()
-                  | Some msg -> Diagnostics.user_warning "%s" msg) ;
-                  match mcp_config_error_if_needed setup spec.mcp_servers with
-                  | Some msg -> make_task_result ~status:(Failed msg) ()
-                  | None ->
-                      let runtime_spec = {spec with mcp_servers = []} in
-                      let run ?schema_path () =
-                        match
-                          build_invocation
-                            ?schema_path
-                            ~attachment_delivery
-                            ~mcp_config_path:None
-                            runtime_spec
-                        with
-                        | Error message -> failed_result message
-                        | Ok invocation ->
-                            run_invocation
-                              ~sw
-                              ~env
-                              ~spec:runtime_spec
-                              ?context
-                              ?on_raw_line
-                              invocation
-                      in
-                      match runtime_spec.json_schema with
-                      | None -> run ()
-                      | Some schema ->
-                          with_output_schema_file schema (fun schema_path ->
-                              run ~schema_path ()))))
+                  match runtime_spec.json_schema with
+                  | None -> run ()
+                  | Some schema ->
+                      with_output_schema_file schema (fun schema_path ->
+                          run ~schema_path ())))))
