@@ -32,6 +32,27 @@ type error =
       (** Untrusted low-level error. Use {!render_error}, which redacts it,
           rather than displaying this payload directly. *)
 
+(** Central detailed failure. [Dispatch_failure] covers resolution, preflight,
+    version, availability, and protected execution-boundary failures before a
+    backend result completes. [Dispatch_failure_with_execution] is the same
+    sanitized classification after completed progress exists and retains that
+    partial execution. [Execution_failure] retains CBL-05's structured
+    schema-enforcement error and all completed attempts. Neither type derives
+    serialization. *)
+type detailed_error =
+  | Dispatch_failure of error
+  | Dispatch_failure_with_execution of {
+      failure : error;
+      execution : Backend_types.task_execution;
+    }
+      (** Sanitized ordinary central failure after at least one backend result
+          completed. [execution] retains only those committed attempts. *)
+  | Execution_failure of Backend_types.task_execution_error
+
+(** Result of one central detailed invocation. *)
+type detailed_outcome =
+  (Backend_types.task_execution, detailed_error) result
+
 (** [render_error error] produces a sanitized diagnostic. Preflight rendering
     inherits {!Task_preflight.render_error}'s path/digest/byte exclusion;
     low-level schema-enforcement strings are redacted before display. Ordinary
@@ -39,6 +60,12 @@ type error =
     payload in their typed errors. Event callbacks drain asynchronously in
     sequence order and cannot delay handle outcome resolution. *)
 val render_error : error -> string
+
+(** [render_detailed_error error] produces the same sanitized compatibility
+    diagnostic as projecting the detailed outcome through {!run_task}. Complete
+    task results remain available only through the typed value and are not
+    serialized into this string. *)
+val render_detailed_error : detailed_error -> string
 
 (** Immutable dispatch snapshot validated against one resolved registry entry. *)
 type prepared
@@ -63,6 +90,17 @@ val execute_prepared :
   prepared ->
   (Backend_types.task_result, error) result
 
+(** Execute one prepared immutable backend snapshot through
+    {!Json_schema_enforcer.run_task_detailed}. Registry state is not consulted
+    between attempts. *)
+val execute_prepared_detailed :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  ?context:Task_execution_context.t ->
+  ?on_raw_line:(string -> unit) ->
+  prepared ->
+  detailed_outcome
+
 (** Internal handle primitives used by {!Task_runtime}. Hosts should prefer the
     named facade there; this submodule exists to keep the compatibility
     {!run_task} entry point implemented through the same handle state machine. *)
@@ -83,7 +121,15 @@ module Private : sig
 
   val await : task_handle -> (Backend_types.task_result, error) result
 
+  val await_detailed : task_handle -> detailed_outcome
+
   val await_event_delivery : task_handle -> unit
+
+  (** No-context compatibility projection for {!execute_prepared_detailed}.
+      Unlike contextual task handles, a corrective backend Timeout/Cancelled
+      remains a schema-enforcement error. *)
+  val project_prepared_detailed_outcome :
+    detailed_outcome -> (Backend_types.task_result, error) result
 end
 
 (** [run_task ~sw ~env ~limits ~backend_id spec] performs central resolution,
@@ -119,3 +165,24 @@ val run_task :
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->
   (Backend_types.task_result, error) result
+
+(** [run_task_detailed] is the central structured counterpart of {!run_task}.
+    It uses the same cancellable owner, one absolute deadline, normalized event
+    sink, validated preflight and version/availability ordering, and one prepared
+    immutable entry snapshot for every CBL-05 attempt. Every returned backend
+    result is committed together with its attempt-finished event inside a narrow
+    cancellation-protected section. An outer timeout or cancellation therefore
+    produces a synthetic final status while retaining all fully completed
+    attempts, their aggregate cost, last nonblank session, and monotonic total
+    elapsed time. An interrupted call is never fabricated as an attempt. Event
+    delivery remains asynchronous; callers that need callback completion should
+    use a {!Task_runtime} handle and {!Task_runtime.await_event_delivery}. *)
+val run_task_detailed :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  Backend_types.task_spec ->
+  detailed_outcome

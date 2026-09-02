@@ -113,6 +113,30 @@ val run_task_detailed :
   task_spec ->
   (task_execution, task_execution_error) result
 
+(** Internal cancellation-safe attempt progress used by central dispatch. *)
+module Private : sig
+  type progress
+
+  val create_progress : unit -> progress
+
+  (** Immutable snapshot of every backend result committed so far, in
+      invocation order. An in-flight call is never included. *)
+  val completed_attempts : progress -> task_attempt list
+
+  (** Detailed execution with caller-owned progress. Every returned backend
+      result is paired with its attempt-finished event and committed to
+      [progress] inside one narrow cancellation-protected section. *)
+  val run_task_detailed :
+    sw:Eio.Switch.t ->
+    env:Eio_unix.Stdenv.base ->
+    ?context:Task_execution_context.t ->
+    ?on_raw_line:(string -> unit) ->
+    progress:progress ->
+    backend:Agentic_backend.t ->
+    task_spec ->
+    (task_execution, task_execution_error) result
+end
+
 (** [run_task ~sw ~env ?context ?on_raw_line ~backend spec] executes [spec] with
     optional JSON schema enforcement.
 

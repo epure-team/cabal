@@ -263,6 +263,40 @@ type web_access =
   | Web_search_and_fetch  (** Search and result-page fetching are allowed. *)
 [@@deriving show, eq, yojson]
 
+(** Stable host-facing completion request.
+
+    This DTO is the completion-oriented subset of {!task_spec}; its field types
+    and meanings are identical to the corresponding task fields. The completer
+    owns prompt composition, working-directory/backend configuration, expected
+    outputs, and read-only policy, so a host need not construct a [task_spec].
+    Attachment values remain workspace-relative references and are validated by
+    central preflight before execution.
+
+    Adding a field to an OCaml record is source-breaking for callers that build
+    exhaustive record literals or patterns. Hosts should therefore treat
+    {!make_completion_request} as the canonical forward-compatible construction
+    path and reserve direct literals for code intentionally pinned to this exact
+    record version. *)
+type completion_request = {
+  system_prompt : string;
+      (** System instructions. Omitted from the composed backend prompt when
+          [resume_session_id] is present because the resumed session already
+          carries them. *)
+  prompt : string;  (** User request for this completion turn. *)
+  json_schema : Yojson.Safe.t option;
+      (** Optional inline schema, with the same enforcement semantics as
+          [task_spec.json_schema]. *)
+  resume_session_id : string option;
+      (** Optional backend session to resume. *)
+  attachments : media_attachment list;
+      (** Workspace-relative media references; defaults to [[]]. *)
+  web_access : web_access;
+      (** Requested web policy; defaults to [Web_disabled]. *)
+  timeout : duration;
+      (** One absolute whole-task budget; defaults to the legacy [max_float]. *)
+  max_turns : int option;  (** Optional backend agent-turn limit. *)
+}
+
 (** Expected output specification. *)
 type output_spec =
   | Files_changed  (** Expect file modifications (detected via git diff) *)
@@ -506,6 +540,27 @@ type 'ctxt task_response = {
 }
 
 (** {1 Constructors} *)
+
+(** [make_completion_request ~system_prompt ~prompt ()] constructs the stable
+    completion DTO. [json_schema], [resume_session_id], and [max_turns] default
+    to [None], [attachments] to [[]], [web_access] to [Web_disabled], and
+    [timeout] to [max_float], preserving the existing completer/task defaults.
+    The constructor performs no I/O or capability checks; those belong to
+    central dispatch when the request is submitted. This constructor is the
+    canonical host construction path: future optional request fields can be
+    added as optional labelled arguments without forcing exhaustive record
+    literals to change. *)
+val make_completion_request :
+  system_prompt:string ->
+  prompt:string ->
+  ?json_schema:Yojson.Safe.t ->
+  ?resume_session_id:string ->
+  ?attachments:media_attachment list ->
+  ?web_access:web_access ->
+  ?timeout:duration ->
+  ?max_turns:int ->
+  unit ->
+  completion_request
 
 (** [make_task_spec ~prompt ~working_dir ()] creates a task specification
     with sensible defaults. The legacy default timeout is [max_float], treated

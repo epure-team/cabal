@@ -925,6 +925,61 @@ let test_dispatch_normalizes_cancellation () =
         "cancellation was converted to %s"
         (Runtime_dispatch.render_error error)
 
+let test_prepared_no_context_detailed_projection_matches_legacy () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let id = "dispatch-prepared-no-context" in
+  let calls = ref 0 in
+  let backend =
+    make_backend ~id ~calls (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+        if !calls mod 2 = 1 then success ~text:"not-json" ()
+        else Backend_types.make_task_result ~status:Backend_types.Timeout ())
+  in
+  register_pair
+    ~id
+    ~version_policy:Runtime_entry.No_version_gate
+    backend ;
+  let task =
+    spec ~json_schema:(`Assoc [("type", `String "object")]) ()
+  in
+  let prepared =
+    match Runtime_dispatch.prepare ~sw ~env ~limits ~backend_id:id task with
+    | Ok prepared -> prepared
+    | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+  in
+  let detailed = Runtime_dispatch.execute_prepared_detailed ~sw ~env prepared in
+  let projected =
+    Runtime_dispatch.Private.project_prepared_detailed_outcome detailed
+  in
+  let legacy = Runtime_dispatch.execute_prepared ~sw ~env prepared in
+  Alcotest.(check int) "both executions make two calls" 4 !calls ;
+  Alcotest.(check bool)
+    "detailed result records completed timeout retry"
+    true
+    (match detailed with
+    | Error
+        (Runtime_dispatch.Execution_failure
+          (Backend_types.Schema_retry_failed {execution; _})) ->
+        List.length execution.attempts = 2
+        && execution.final_result.status = Backend_types.Timeout
+    | Error
+        (Runtime_dispatch.Dispatch_failure _
+        | Runtime_dispatch.Dispatch_failure_with_execution _)
+    | Error
+        (Runtime_dispatch.Execution_failure
+          (Backend_types.Native_backend_failure_with_schema _))
+    | Ok _ ->
+        false) ;
+  Alcotest.(check bool)
+    "no-context projection remains an error"
+    true
+    (Result.is_error projected) ;
+  Alcotest.(check bool)
+    "prepared detailed projection matches legacy"
+    true
+    (projected = legacy)
+
 let test_validator_wrapper_dispatches_read_only_task () =
   with_registry @@ fun () ->
   Eio_posix.run @@ fun env ->
@@ -1032,6 +1087,10 @@ let () =
             "cancellation is normalized"
             `Quick
             test_dispatch_normalizes_cancellation;
+          Alcotest.test_case
+            "prepared no-context projection"
+            `Quick
+            test_prepared_no_context_detailed_projection_matches_legacy;
           Alcotest.test_case
             "validator wrapper dispatches read-only"
             `Quick

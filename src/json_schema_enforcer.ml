@@ -108,10 +108,59 @@ let seconds_of_span span = Mtime.Span.to_float_ns span /. 1_000_000_000.0
 let elapsed_since clock started_at =
   seconds_of_span (Mtime.span started_at (Eio.Time.Mono.now clock))
 
-let run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec =
+type progress = Backend_types.task_attempt list Atomic.t
+
+let create_progress () = Atomic.make []
+
+let completed_attempts progress = Atomic.get progress
+
+let make_attempt ~number ~kind ~delivery ~result ~attempt_elapsed
+    ?schema_validation_error () =
+  {
+    Backend_types.number;
+    kind;
+    result;
+    attempt_elapsed;
+    schema_validation_error;
+    delivery;
+  }
+
+let record_completed_attempt progress attempt =
+  let attempts = Atomic.get progress in
+  assert (attempt.Backend_types.number = List.length attempts + 1) ;
+  Atomic.set progress (attempts @ [attempt])
+
+let replace_completed_attempt progress replacement =
+  let replaced = ref false in
+  let attempts =
+    List.map
+      (fun (attempt : Backend_types.task_attempt) ->
+        if attempt.number = replacement.Backend_types.number then begin
+          replaced := true ;
+          replacement
+        end
+        else attempt)
+      (Atomic.get progress)
+  in
+  assert !replaced ;
+  Atomic.set progress attempts
+
+let retain_schema_validation_error progress attempt error =
+  let attempt =
+    {attempt with Backend_types.schema_validation_error = Some error}
+  in
+  Eio.Cancel.protect (fun () -> replace_completed_attempt progress attempt) ;
+  attempt
+
+let finish_interrupted_attempt context outcome error =
+  Eio.Cancel.protect (fun () -> finish_attempt context outcome) ;
+  raise error
+
+let run_backend ~sw ~env ~clock ~progress ~number ~kind ~delivery ?context
+    ?on_raw_line backend spec =
   let started_at = Eio.Time.Mono.now clock in
-  try
-    let result =
+  let result =
+    try
       match context with
       | None -> Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec
       | Some context ->
@@ -122,25 +171,36 @@ let run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec =
             ?on_raw_line
             backend
             spec
-    in
-    finish_attempt context (attempt_outcome_of_status result.Backend_types.status) ;
-    (result, elapsed_since clock started_at)
-  with
-  | Eio.Cancel.Cancelled _ as cancellation ->
-      let outcome =
-        match context with
-        | Some value when Task_execution_context.deadline_expired value ->
-            Task_event.Attempt_timed_out
-        | Some _ | None -> Task_event.Attempt_cancelled
+    with
+    | Eio.Cancel.Cancelled _ as cancellation ->
+        let outcome =
+          match context with
+          | Some value when Task_execution_context.deadline_expired value ->
+              Task_event.Attempt_timed_out
+          | Some _ | None -> Task_event.Attempt_cancelled
+        in
+        finish_interrupted_attempt context outcome cancellation
+    | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
+        finish_interrupted_attempt context Task_event.Attempt_failed fatal
+    | error ->
+        finish_interrupted_attempt context Task_event.Attempt_failed error
+  in
+  (* A callback may request cancellation as soon as it observes the finish
+     event. Keep that event and the completed-result snapshot indivisible from
+     cancellation's point of view; the backend call itself remains cancellable. *)
+  Eio.Cancel.protect (fun () ->
+      let attempt =
+        make_attempt
+          ~number
+          ~kind
+          ~delivery
+          ~result
+          ~attempt_elapsed:(elapsed_since clock started_at)
+          ()
       in
-      finish_attempt context outcome ;
-      raise cancellation
-  | (Out_of_memory | Stack_overflow | Sys.Break) as fatal ->
-      finish_attempt context Task_event.Attempt_failed ;
-      raise fatal
-  | error ->
-      finish_attempt context Task_event.Attempt_failed ;
-      raise error
+      finish_attempt context (attempt_outcome_of_status result.status) ;
+      record_completed_attempt progress attempt ;
+      attempt)
 
 let delivery_for kind spec =
   let attachment_delivery =
@@ -163,17 +223,6 @@ let prepare_delivery context kind spec =
       Task_execution_context.Private.set_requested_delivery value delivery)
     context ;
   delivery
-
-let make_attempt ~number ~kind ~delivery ~result ~attempt_elapsed
-    ?schema_validation_error () =
-  {
-    Backend_types.number;
-    kind;
-    result;
-    attempt_elapsed;
-    schema_validation_error;
-    delivery;
-  }
 
 let nonblank_session_id = function
   | Some session_id -> (
@@ -235,7 +284,8 @@ let is_resume_failure backend result =
       warn_resume_classifier_failure () ;
       false
 
-let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
+let run_task_detailed_with_progress ~sw ~env ?context ?on_raw_line ~progress
+    ~backend spec =
   let clock = Eio.Stdenv.mono_clock env in
   let started_at = Eio.Time.Mono.now clock in
   Option.iter
@@ -247,18 +297,21 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
       let delivery =
         prepare_delivery context Backend_types.Initial_attempt spec
       in
-      let result, attempt_elapsed =
-        run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec
-      in
       let attempt =
-        make_attempt
+        run_backend
+          ~sw
+          ~env
+          ~clock
+          ~progress
           ~number:1
           ~kind:Backend_types.Initial_attempt
           ~delivery
-          ~result
-          ~attempt_elapsed
-          ()
+          ?context
+          ?on_raw_line
+          backend
+          spec
       in
+      let result = attempt.Backend_types.result in
       Ok
         (make_execution
            ~clock
@@ -278,18 +331,21 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
         let delivery =
           prepare_delivery context Backend_types.Initial_attempt spec
         in
-        let result, attempt_elapsed =
-          run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec
-        in
         let attempt =
-          make_attempt
+          run_backend
+            ~sw
+            ~env
+            ~clock
+            ~progress
             ~number:1
             ~kind:Backend_types.Initial_attempt
             ~delivery
-            ~result
-            ~attempt_elapsed
-            ()
+            ?context
+            ?on_raw_line
+            backend
+            spec
         in
+        let result = attempt.Backend_types.result in
         let execution =
           make_execution
             ~clock
@@ -313,24 +369,27 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
         let delivery1 =
           prepare_delivery context Backend_types.Initial_attempt spec
         in
-        let result1, attempt_elapsed1 =
-          run_backend ~sw ~env ~clock ?context ?on_raw_line backend spec
+        let attempt1 =
+          run_backend
+            ~sw
+            ~env
+            ~clock
+            ~progress
+            ~number:1
+            ~kind:Backend_types.Initial_attempt
+            ~delivery:delivery1
+            ?context
+            ?on_raw_line
+            backend
+            spec
         in
+        let result1 = attempt1.Backend_types.result in
         (* Schema validation only makes sense for successful invocations.
            Propagate Failed/Timeout/Cancelled results directly so callers see
            the real backend error rather than a spurious "not valid JSON"
            schema-compliance failure. *)
         match result1.Backend_types.status with
         | Failed _ | Timeout | Cancelled ->
-            let attempt1 =
-              make_attempt
-                ~number:1
-                ~kind:Backend_types.Initial_attempt
-                ~delivery:delivery1
-                ~result:result1
-                ~attempt_elapsed:attempt_elapsed1
-                ()
-            in
             Ok
               (make_execution
                  ~clock
@@ -343,15 +402,6 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
               Json_schema_validator.validate ~schema ~document:agent_text1
             with
             | Ok () ->
-                let attempt1 =
-                  make_attempt
-                    ~number:1
-                    ~kind:Backend_types.Initial_attempt
-                    ~delivery:delivery1
-                    ~result:result1
-                    ~attempt_elapsed:attempt_elapsed1
-                    ()
-                in
                 Ok
                   (make_execution
                      ~clock
@@ -360,14 +410,7 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                      ~final_result:result1)
             | Error err1 -> (
                 let attempt1 =
-                  make_attempt
-                    ~number:1
-                    ~kind:Backend_types.Initial_attempt
-                    ~delivery:delivery1
-                    ~result:result1
-                    ~attempt_elapsed:attempt_elapsed1
-                    ~schema_validation_error:err1
-                    ()
+                  retain_schema_validation_error progress attempt1 err1
                 in
                 let retry_spec, retry_kind, attempt_kind =
                   if Agentic_backend.supports_session_resume backend then
@@ -407,30 +450,25 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                     let delivery2 =
                       prepare_delivery context attempt_kind retry_spec
                     in
-                    let result2, attempt_elapsed2 =
+                    let attempt2 =
                       run_backend
                         ~sw
                         ~env
                         ~clock
+                        ~progress
+                        ~number:2
+                        ~kind:attempt_kind
+                        ~delivery:delivery2
                         ?context
                         ?on_raw_line
                         backend
                         retry_spec
                     in
-                    let attempt2 ?schema_validation_error () =
-                      make_attempt
-                        ~number:2
-                        ~kind:attempt_kind
-                        ~delivery:delivery2
-                        ~result:result2
-                        ~attempt_elapsed:attempt_elapsed2
-                        ?schema_validation_error
-                        ()
-                    in
+                    let result2 = attempt2.Backend_types.result in
                     match result2.Backend_types.status with
                     | Backend_types.Failed _ | Backend_types.Timeout
                     | Backend_types.Cancelled ->
-                        let attempts = [attempt1; attempt2 ()] in
+                        let attempts = [attempt1; attempt2] in
                         let attempt_2_failure =
                           if
                             attempt_kind = Backend_types.Resumed_attempt
@@ -460,7 +498,7 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                             ~document:agent_text2
                         with
                         | Ok () ->
-                            let attempts = [attempt1; attempt2 ()] in
+                            let attempts = [attempt1; attempt2] in
                             Ok
                               (make_execution
                                  ~clock
@@ -468,12 +506,13 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                                  ~attempts
                                  ~final_result:result2)
                         | Error err2 ->
-                            let attempts =
-                              [
-                                attempt1;
-                                attempt2 ~schema_validation_error:err2 ();
-                              ]
+                            let attempt2 =
+                              retain_schema_validation_error
+                                progress
+                                attempt2
+                                err2
                             in
+                            let attempts = [attempt1; attempt2] in
                             let execution =
                               make_execution
                                 ~clock
@@ -489,7 +528,28 @@ let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
                                    attempt_2_failure =
                                      Backend_types.Schema_validation_failure
                                        err2;
-                                 })))))
+                                  })))))
+
+let run_task_detailed ~sw ~env ?context ?on_raw_line ~backend spec =
+  let progress = create_progress () in
+  run_task_detailed_with_progress
+    ~sw
+    ~env
+    ?context
+    ?on_raw_line
+    ~progress
+    ~backend
+    spec
+
+module Private = struct
+  type nonrec progress = progress
+
+  let create_progress = create_progress
+
+  let completed_attempts = completed_attempts
+
+  let run_task_detailed = run_task_detailed_with_progress
+end
 
 let run_task ~sw ~env ?context ?on_raw_line ~backend spec =
   match
