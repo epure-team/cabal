@@ -610,6 +610,82 @@ let test_validate_backend_rejects_id_and_capability_mismatches () =
     | Error Runtime_bootstrap.Invalid_descriptor_baseline_version -> true
     | _ -> false)
 
+let test_hardened_codex_positive_capabilities_are_exactly_trusted () =
+  with_empty_registry @@ fun () ->
+  expect_ok
+    (Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins
+       ()) ;
+  let entry = validated_entry "codex" in
+  let descriptor = entry.effective_descriptor in
+  Alcotest.(check string)
+    "Codex enforces the authenticated transport baseline"
+    "0.131.0"
+    descriptor.baseline_version ;
+  Alcotest.(check bool)
+    "Codex trusts exactly PNG and JPEG"
+    true
+    (descriptor.capabilities.media_support.media_types
+    = [Backend_types.Png; Backend_types.Jpeg]) ;
+  Alcotest.(check bool)
+    "Codex trusts no hierarchical web level"
+    true
+    (descriptor.capabilities.web_support.maximum
+    = Backend_types.Web_disabled
+    && descriptor.capabilities.web_support.evidence = None) ;
+  Alcotest.(check bool)
+    "independent runtime snapshot exactly matches positive catalog claims"
+    true
+    (entry.runtime_capabilities = descriptor.capabilities) ;
+  Alcotest.(check bool)
+    "native schema evidence remains independently trusted"
+    true
+    (descriptor.capabilities.native_json_schema_output
+    && Option.is_some
+         descriptor.capabilities.native_json_schema_output_evidence)
+
+let test_codex_positive_capability_mismatch_fails_closed () =
+  let descriptor =
+    match Backend_registry.find "codex" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Codex descriptor missing"
+  in
+  Alcotest.(check bool)
+    "test precondition has positive media and disabled web"
+    true
+    (descriptor.capabilities.media_support.media_types <> []
+    && descriptor.capabilities.web_support.maximum = Backend_types.Web_disabled) ;
+  let mismatches =
+    [
+      {
+        descriptor.capabilities with
+        media_support = {media_types = []; evidence = None};
+      };
+      {
+        descriptor.capabilities with
+        web_support =
+          {
+            maximum = Backend_types.Web_search;
+            evidence = descriptor.capabilities.media_support.evidence;
+          };
+      };
+    ]
+  in
+  List.iter
+    (fun runtime_capabilities ->
+      Alcotest.(check bool)
+        "catalog/runtime positive capability drift is rejected"
+        true
+        (match
+           Runtime_bootstrap.validate_backend_capabilities
+             ~runtime_capabilities
+             ~descriptor
+             ~backend:(module Codex_cli : Agentic_backend.S)
+         with
+        | Error Runtime_bootstrap.Runtime_capabilities_mismatch -> true
+        | _ -> false))
+    mismatches
+
 let test_custom_registration_is_atomic () =
   with_empty_registry @@ fun () ->
   let success_id = "custom-atomic-success" in
@@ -776,6 +852,10 @@ let () =
             `Quick
             test_hardened_registers_exact_approved_runtime;
           Alcotest.test_case
+            "trusts exact positive Codex media and web capabilities"
+            `Quick
+            test_hardened_codex_positive_capabilities_are_exactly_trusted;
+          Alcotest.test_case
             "ignores HOME and project adapters"
             `Quick
             test_hardened_ignores_home_and_project_adapters;
@@ -809,6 +889,10 @@ let () =
             "rejects id and represented capability mismatches"
             `Quick
             test_validate_backend_rejects_id_and_capability_mismatches;
+          Alcotest.test_case
+            "rejects Codex positive catalog/runtime drift"
+            `Quick
+            test_codex_positive_capability_mismatch_fails_closed;
           Alcotest.test_case
             "custom pair registration is atomic"
             `Quick

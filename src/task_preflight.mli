@@ -19,10 +19,7 @@ type limits = {
 }
 
 (** Limit field identifying an invalid negative value. *)
-type limit_name =
-  | Max_attachments
-  | Max_file_size_bytes
-  | Max_total_size_bytes
+type limit_name = Max_attachments | Max_file_size_bytes | Max_total_size_bytes
 
 (** Typed input-validation failure. Attachment identifiers may be carried for
     programmatic remediation, but {!render_error} never includes them, paths,
@@ -30,7 +27,7 @@ type limit_name =
 type input_error =
   | Negative_limit of limit_name
   | Incoherent_limits
-  | Too_many_attachments of {maximum : int; actual : int}
+  | Too_many_attachments of { maximum : int; actual : int }
   | Empty_attachment_id
   | Duplicate_attachment_id of string
   | Absolute_attachment_path of string
@@ -40,6 +37,8 @@ type input_error =
   | Attachment_not_regular of string
   | Attachment_unreadable of string
   | Attachment_changed_during_validation of string
+  | Attachment_staging_failed
+  | Attachment_cleanup_failed
   | Attachment_size_mismatch of {
       attachment_id : string;
       declared : int;
@@ -50,7 +49,7 @@ type input_error =
       maximum : int;
       actual : int;
     }
-  | Total_size_too_large of {maximum : int; actual : int}
+  | Total_size_too_large of { maximum : int; actual : int }
   | Malformed_sha256 of string
   | Digest_mismatch of string
   | Media_type_mismatch of {
@@ -83,6 +82,9 @@ type capability_error =
 (** Preflight failure category. *)
 type error = Input of input_error | Capability of capability_error
 
+(** Opaque task-scoped transport copy of validated attachment bytes. *)
+type prepared_inputs
+
 (** [render_error error] returns an actionable diagnostic without embedding
     attachment paths, identifiers, digests, or file bytes.
 
@@ -96,17 +98,21 @@ type error = Input of input_error | Capability of capability_error
     {b Violates.} None. *)
 val render_error : error -> string
 
-(** [validate_inputs ~limits spec] validates attachment metadata and files in
-    [spec.working_dir]. The workspace is opened first, and relative attachment
-    paths are opened relative to that exact directory descriptor. Relative and
-    absolute symlinks are accepted only when the opened attachment descriptor
-    resolves to a readable regular file inside the resolved opened workspace.
-    No content is read before this descriptor-based authorization. Size limits
-    are enforced while streaming; mutation checks, observed size, SHA-256, and
-    PNG/JPEG magic bytes all use that same opened file descriptor. The opened
-    workspace and attachment paths are re-resolved after streaming and must
-    remain exactly the authorized, separator-safely contained paths. Platforms
-    that cannot resolve opened descriptor paths fail closed.
+(** [validate_inputs ~limits spec] is the compatibility validator for attachment
+    metadata and files in [spec.working_dir]. The workspace is opened first, and
+    relative attachment paths are opened relative to that exact directory
+    descriptor. Relative and absolute symlinks are accepted only when the opened
+    attachment descriptor resolves to a readable regular file inside the
+    resolved opened workspace. No content is read before this descriptor-based
+    authorization. Size limits are enforced while streaming; mutation checks,
+    observed size, SHA-256, and PNG/JPEG magic bytes all use that same opened
+    file descriptor. The opened workspace and attachment paths are re-resolved
+    after streaming and must remain exactly the authorized, separator-safely
+    contained paths. The exact streamed bytes are sealed into private transport
+    files and immediately removed before this compatibility call returns. Call
+    {!prepare_inputs} when those same validated bytes must survive through
+    backend execution. Platforms that cannot resolve opened descriptor paths
+    fail closed.
 
     {b Preconditions.} [limits] is caller-owned policy; no library defaults are
     implied.
@@ -120,6 +126,23 @@ val render_error : error -> string
     {b Violates.} None. *)
 val validate_inputs :
   limits:limits -> Backend_types.task_spec -> (unit, error) result
+
+(** [prepare_inputs ~limits spec] validates inputs and, for every attachment,
+    streams the exact bytes read for size, digest, and magic validation into a
+    private task-scoped transport file outside the opened workspace. Staged
+    paths are opaque to hosts and retain the declared PNG/JPEG extension.
+
+    The caller owns the returned value and must call {!release_inputs} after the
+    complete backend/retry lifetime. *)
+val prepare_inputs :
+  limits:limits -> Backend_types.task_spec -> (prepared_inputs, error) result
+
+(** [release_inputs prepared] atomically and permanently revokes transport
+    access before its first deletion attempt, then idempotently removes every
+    sealed file and its private directory. Cleanup failures are returned as
+    sanitized typed errors and physical deletion may be retried by calling this
+    function again; a failed deletion never reauthorizes transport access. *)
+val release_inputs : prepared_inputs -> (unit, error) result
 
 (** [validate_descriptor descriptor] validates capability-evidence invariants
     without inspecting a task or performing I/O. Positive native-schema, media,
@@ -135,8 +158,7 @@ val validate_inputs :
     {b Violators.} None.
 
     {b Violates.} None. *)
-val validate_descriptor :
-  Backend_registry.descriptor -> (unit, error) result
+val validate_descriptor : Backend_registry.descriptor -> (unit, error) result
 
 (** [validate_capabilities ~descriptor spec] verifies descriptor proof
     invariants and checks that [descriptor] supports every requested media type,
@@ -159,3 +181,25 @@ val validate_capabilities :
   descriptor:Backend_registry.descriptor ->
   Backend_types.task_spec ->
   (unit, error) result
+
+(** Internal transport bridge. Hosts should treat staged paths as sensitive and
+    must not log or serialize them. *)
+module Private : sig
+  (** Deterministic failure-injection seam for staging tests. Production code
+      must use {!prepare_inputs}. *)
+  val prepare_inputs_with_hooks :
+    ?on_staging_directory:(string -> unit) ->
+    ?on_staged_file:(string -> Unix.file_descr -> unit) ->
+    ?on_cleanup_attempt:(unit -> unit) ->
+    limits:limits ->
+    Backend_types.task_spec ->
+    (prepared_inputs, error) result
+
+  val staged_attachments :
+    prepared_inputs -> (Backend_types.media_attachment * string) list
+
+  val staging_directory : prepared_inputs -> string option
+  (** [active prepared] is false permanently once release has started,
+      independently of whether physical cleanup succeeds or is retried. *)
+  val active : prepared_inputs -> bool
+end

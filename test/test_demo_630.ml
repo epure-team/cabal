@@ -18,7 +18,7 @@
 
     Covers:
     - AC1: Investigation note exists at the canonical path, cites
-           baseline_version 0.122.0, and records at least one source URL.
+           baseline_version 0.131.0, and records at least one source URL.
     - AC2(a): codex descriptor has native_json_schema_output = true
               (NFR-R1 pinning test).
     - AC2(a): codex has capability_evidence = Some _.
@@ -92,7 +92,7 @@ let test_investigation_note_exists () =
     true
     (Sys.file_exists path)
 
-(** AC1: The investigation note must cite the baseline_version (0.122.0) so
+(** AC1: The investigation note must cite the baseline_version (0.131.0) so
     that the version range consulted is pinned to the descriptor. *)
 let test_investigation_note_cites_baseline_version () =
   let path = investigation_note_path () in
@@ -101,9 +101,9 @@ let test_investigation_note_cites_baseline_version () =
   else begin
     let content = read_file path in
     Alcotest.(check bool)
-      "investigation note cites baseline_version 0.122.0"
+      "investigation note cites baseline_version 0.131.0"
       true
-      (contains_substring content "0.122.0")
+      (contains_substring content "0.131.0")
   end
 
 (** AC1: The investigation note must cite at least one authoritative source URL
@@ -213,7 +213,7 @@ let () =
             `Quick
             test_investigation_note_exists;
           Alcotest.test_case
-            "investigation note cites baseline_version 0.122.0"
+            "investigation note cites baseline_version 0.131.0"
             `Quick
             test_investigation_note_cites_baseline_version;
           Alcotest.test_case

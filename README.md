@@ -114,8 +114,8 @@ on `PATH` (or set
   whole-task deadlines.
 - `src/task_event.*` — sequenced backend-neutral lifecycle and public-output
   events.
-- `src/task_preflight.*` — attachment integrity/workspace checks and requested
-  capability validation.
+- `src/task_preflight.*` — attachment integrity/workspace checks, sealed
+  transport staging, and requested capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
   validator-safe backend routing.
 - `src/backend_process.*`, `src/process_group.*`, and `src/backend_version.*`
@@ -427,19 +427,80 @@ Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec
 
 Preflight is host-neutral and does not choose limits. Render dispatch failures
 with `Runtime_dispatch.render_error`; its diagnostics exclude attachment paths,
-digests, bytes, and exception payloads. Invalid limits, inputs, or capabilities
-fail before any version process or availability side effect. After preflight,
+digests, bytes, and exception payloads. Descriptor proof plus requested media,
+web, read-only, resume, and native-schema/runtime consistency gates run before
+staging allocation or attachment reads. Invalid limits and inputs also fail
+before any version process or availability side effect. For attachments, one
+opened descriptor/read establishes containment, regular-file status, size,
+SHA-256, media magic, and the exact staged bytes. Those bytes are written to
+unpredictably named `0o600` PNG/JPEG files in a private `0o700` task directory
+outside the workspace. Unsupported staging platforms or workspace descriptor
+layouts fail closed rather than falling back to reopening caller paths.
+
+The staging threat model protects the backend transport from workspace path
+replacement after validation and limits accidental or cross-user reads through
+private permissions. It does not claim protection from a hostile process running
+as the same OS user, a privileged user, or a compromised operating system.
+
+The central execution context carries the opaque sealed set and immutable
+media/web authorization across all attempts; fresh retries reuse it, while
+resumed-session reuse emits no duplicate image flags. A
+`Runtime_dispatch.prepared` value is one-shot even with no attachments:
+`execute_prepared` and `execute_prepared_detailed` share one atomic claim, and
+secondary concurrent or sequential calls fail before backend/process effects.
+Pending abandonment and active execution have distinct cleanup ownership, so a
+switch release cannot remove an executing backend's inputs. Cleanup retries at
+most three times, emits only a fixed sanitized warning on persistent failure,
+and precedes outcome delivery or fatal propagation. Transport authorization is
+atomically and permanently revoked before the first deletion attempt; both
+sealed accessors reject after release even when physical deletion fails and is
+retried. Detailed results expose
+`cleanup_status`; cleanup failure does not replace a non-success backend result,
+structured schema failure, or the identity of a propagating fatal exception.
+The `cleanup_status` field addition is intentionally source-breaking for direct
+`task_execution` record literals and exhaustive patterns. Prefer
+`Backend_types.make_task_execution`, whose cleanup default is
+`Cleanup_not_required`; pinned literals must add
+`cleanup_status = Backend_types.Cleanup_not_required`. Consumers that inspect
+central cleanup must handle `Cleanup_not_required`, `Cleanup_succeeded`, and
+`Cleanup_failed`; patterns that deliberately ignore cleanup should end in `_`.
+After preflight,
 dispatch runs one bounded version command, rejects parseable versions below the
 descriptor baseline, and checks runtime availability before execution. Missing
 or unparseable version output keeps the compatibility skip policy; availability
 must still pass. Eio cancellation is normalized to `Cancelled` only after
 task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
-All built-in descriptors currently declare no media support and `Web_disabled`
-pending backend-specific transport evidence. Existing call sites invoking
-`Agentic_backend.run_task` and `Json_schema_enforcer.run_task` remain compatible
-low-level paths but intentionally bypass these central guarantees; modules that
-implement `Agentic_backend.S` must perform the migration described above.
+Codex is the only built-in currently advertising media transport: at the
+enforced `0.131.0` baseline it accepts exactly PNG/JPEG, backed by the
+reproducible `tools/probe_codex_media_web.py` probe. Every built-in, including
+Codex, advertises `Web_disabled`. The final authenticated cached-mode probe
+reported `search=yes`, `fetch=no`, and `official-page=no`, but repeatedly failed
+its content-dependent official-result assertion. Live fetch behavior cannot
+establish the lower search-only level in a hierarchical gate, so Cabal makes no
+Codex web claim. Direct low-level Codex calls remain compatible only for no
+attachments plus `Web_disabled`; sensitive media/web calls fail before config
+I/O or spawn unless central dispatch installed the matching sealed authorization.
+The adapter never consults mutable global registry state for that decision.
+
+For authenticated media verification, install and authenticate exactly
+`codex-cli 0.131.0`, then run
+`./tools/probe_codex_media_web.py media-initial resume-upload resume-reuse`. The
+media modes assert blue-PNG/red-JPEG recognition, a newly uploaded green image,
+and session-only recall with no `-i`. The retained `web-cached` and `web-live`
+modes are investigation probes, not positive descriptor evidence; the default
+all-mode run remains red while cached search cannot pass its content assertion.
+Schemas constrain structure without embedding the expected color or page text.
+The probe has bounded subprocess deadlines, creates private `0o700` input storage
+outside its working directory, passes absolute `0o600` fixture paths, suppresses
+raw JSONL and stderr, and reports only sanitized `PASS <mode>` / `FAIL` lines.
+`--self-test` runs all mode validators, including search-plus-fetch rejection for
+cached mode, without Codex or credentials. Invalid arguments, malformed records,
+timeouts, and interruption return fixed diagnostics without argparse usage,
+tracebacks, supplied values, or paths. `--debug-public` prints only fixed
+search/fetch/official-page booleans. The probe
+never prints fixture, workspace, authentication, session, tool-argument, or raw
+backend data.
 
 ### Redaction contract for hosts logging backend output
 

@@ -62,6 +62,17 @@ type unsupported_capability_note = {
 
 type descriptor_registration_error = Descriptor_id_already_registered
 
+let codex_media_evidence : Backend_types.feature_evidence =
+  {
+    tested_at_version = "0.131.0";
+    test_method = Backend_types.E2e_test;
+    notes =
+      "Reproducible authenticated probe: tools/probe_codex_media_web.py media-initial resume-upload resume-reuse. It creates deterministic PNG/JPEG/schema fixtures, exercises initial upload, resume upload, and session reuse, and validates only public JSONL. See docs/native-json-schema-investigation/codex.md.";
+    evidence_url =
+      Some
+        "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
+  }
+
 let builtin_backends =
   [
     {
@@ -97,7 +108,7 @@ let builtin_backends =
       id = "codex";
       display_name = "Codex CLI";
       binary_name = "codex";
-      baseline_version = "0.122.0";
+      baseline_version = "0.131.0";
       capabilities =
         {
           structured_output = true;
@@ -109,7 +120,11 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = false;
           file_reading = false;
-          media_support = {media_types = []; evidence = None};
+          media_support =
+            {
+              media_types = [Backend_types.Png; Backend_types.Jpeg];
+              evidence = Some codex_media_evidence;
+            };
           web_support =
             {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = true;
@@ -224,6 +239,18 @@ let builtin_backends =
 
 let unsupported_capability_notes_data =
   [
+    {
+      backend_id = "codex";
+      feature = "web_support";
+      evidence_url =
+        "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/tests/suite/web_search.rs";
+      note =
+        "The authenticated 0.131.0 cached-mode probe emitted a complete search \
+         lifecycle without fetch/open-page actions, but repeatedly failed its \
+         content-dependent official-result assertion. Live fetch evidence does \
+         not imply the stricter search-only level, so the hierarchical \
+         capability remains disabled.";
+    };
     {
       backend_id = "codex";
       feature = "streaming_output";

@@ -244,9 +244,9 @@ type media_type = Png | Jpeg [@@deriving show, eq, yojson]
 
 (** Caller-declared metadata for one workspace-relative media file.
 
-    The file itself is not serialized into the task. Hosts should validate the
-    metadata and workspace confinement with [Task_preflight.validate_inputs]
-    before invoking a backend. *)
+    The file itself is not serialized into the task. Hosts should invoke through
+    [Runtime_dispatch], which validates metadata/workspace confinement and seals
+    the exact authorized bytes with [Task_preflight.prepare_inputs]. *)
 type media_attachment = {
   id : string;  (** Opaque, non-empty identifier unique within the task. *)
   path : string;  (** Workspace-relative file path. *)
@@ -470,13 +470,31 @@ type task_attempt = {
       (** Requested media/web intent exposed to the backend before this call. *)
 }
 
+(** Sanitized central sealed-input cleanup telemetry. [Cleanup_not_required]
+    means no sealed artifact needed removal (for example, direct use of
+    {!Json_schema_enforcer} or an attachment-free central invocation).
+    [Cleanup_succeeded] and [Cleanup_failed] report the bounded central cleanup
+    outcome without paths or exception details. *)
+type cleanup_status =
+  | Cleanup_not_required
+  | Cleanup_succeeded
+  | Cleanup_failed
+
 (** Detailed result of one schema-enforcer invocation.
 
     [attempts] contains every completed backend call in order. [total_elapsed]
     is measured once around the complete enforcer invocation and is not a sum of
     backend- or attempt-reported durations. [total_cost] aggregates each optional
     cost/token field independently across attempts. [final_session_id] is the
-    last non-empty session id returned by any completed attempt. *)
+    last non-empty session id returned by any completed attempt.
+
+    Adding [cleanup_status] was intentionally source-breaking for exhaustive
+    direct record literals and patterns. Downstream literals pinned to this API
+    must add [cleanup_status = Cleanup_not_required] when no central sealed-input
+    cleanup occurred. Prefer {!make_task_execution} for construction. Consumers
+    that inspect cleanup must handle [Cleanup_not_required],
+    [Cleanup_succeeded], and [Cleanup_failed]; consumers that intentionally
+    ignore future fields should use a record pattern ending in [_]. *)
 type task_execution = {
   final_result : task_result;
       (** Final projected result. On retry success this is the complete
@@ -486,6 +504,8 @@ type task_execution = {
   total_cost : cost option;  (** Field-wise aggregate over attempt costs. *)
   final_session_id : string option;
       (** Last non-empty session id across [attempts]. *)
+  cleanup_status : cleanup_status;
+      (** Final sanitized cleanup status for central prepared inputs. *)
 }
 
 (** Classified failure of the invoked corrective attempt.
@@ -598,6 +618,26 @@ val make_task_spec :
   ?json_schema:Yojson.Safe.t ->
   unit ->
   task_spec
+
+(** [make_task_execution ~final_result ()] is the canonical constructor for
+    direct, mock, and adapter-produced detailed executions. [attempts] defaults
+    to [[]]; elapsed, cost, and final session default from [final_result]; and
+    [cleanup_status] defaults to [Cleanup_not_required]. Central dispatch must
+    pass its actual bounded cleanup outcome instead of relying on that default.
+
+    This constructor is the forward-compatible alternative to exhaustive
+    [task_execution] record literals. Pattern consumers should either match all
+    three {!cleanup_status} constructors or use [{ final_result; _ }] when the
+    cleanup outcome is deliberately irrelevant. *)
+val make_task_execution :
+  final_result:task_result ->
+  ?attempts:task_attempt list ->
+  ?total_elapsed:duration ->
+  ?total_cost:cost ->
+  ?final_session_id:string ->
+  ?cleanup_status:cleanup_status ->
+  unit ->
+  task_execution
 
 (** [make_resume_task_spec ~base ~resume_session_id ()] creates a minimal,
     role-neutral task specification for resuming an interrupted backend

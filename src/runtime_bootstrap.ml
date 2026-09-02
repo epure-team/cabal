@@ -102,6 +102,17 @@ let native_schema_evidence tested_at_version =
       test_method = Backend_types.E2e_test;
     }
 
+let codex_media_evidence : Backend_types.feature_evidence =
+  {
+    tested_at_version = "0.131.0";
+    test_method = Backend_types.E2e_test;
+    notes =
+      "Reproducible authenticated probe: tools/probe_codex_media_web.py media-initial resume-upload resume-reuse. It creates deterministic PNG/JPEG/schema fixtures, exercises initial upload, resume upload, and session reuse, and validates only public JSONL. See docs/native-json-schema-investigation/codex.md.";
+    evidence_url =
+      Some
+        "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
+  }
+
 (* This mapping is intentionally independent of [Backend_registry]. It is the
    bootstrap-owned runtime contract for the exact approved implementations.
    Entry construction requires exact equality with the catalog descriptor, so a
@@ -140,7 +151,11 @@ let approved_runtime_capabilities = function
             precedence_confidence = Medium;
             generated_lsp_config = false;
             file_reading = false;
-            media_support = no_media;
+            media_support =
+              {
+                media_types = [Backend_types.Png; Backend_types.Jpeg];
+                evidence = Some codex_media_evidence;
+              };
             web_support = no_web;
             native_json_schema_output = true;
             native_json_schema_output_evidence =

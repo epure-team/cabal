@@ -242,12 +242,18 @@ type task_attempt = {
   delivery : attempt_delivery;
 }
 
+type cleanup_status =
+  | Cleanup_not_required
+  | Cleanup_succeeded
+  | Cleanup_failed
+
 type task_execution = {
   final_result : task_result;
   attempts : task_attempt list;
   total_elapsed : duration;
   total_cost : cost option;
   final_session_id : string option;
+  cleanup_status : cleanup_status;
 }
 
 type retry_failure =
@@ -410,6 +416,28 @@ let aggregate_costs costs =
             sum_optional_int
               (List.map (fun cost -> cost.cache_read_input_tokens) costs);
         }
+
+let make_task_execution ~final_result ?(attempts = [])
+    ?(total_elapsed = final_result.elapsed) ?total_cost ?final_session_id
+    ?(cleanup_status = Cleanup_not_required) () =
+  let total_cost =
+    match total_cost with
+    | Some total_cost -> Some total_cost
+    | None -> final_result.cost
+  in
+  let final_session_id =
+    match final_session_id with
+    | Some final_session_id -> Some final_session_id
+    | None -> final_result.session_id
+  in
+  {
+    final_result;
+    attempts;
+    total_elapsed;
+    total_cost;
+    final_session_id;
+    cleanup_status;
+  }
 
 let make_task_result ~status ?(files_changed = []) ?report ?(elapsed = 0.0)
     ?cost ?(stdout = "") ?(agent_text = "") ?(stderr = "") ?(exit_code = 0)

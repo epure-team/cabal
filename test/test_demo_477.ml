@@ -9,7 +9,7 @@
 
     Covers:
     - AC #650: Version parsing exists for Claude Code, Codex, OpenCode, Gemini CLI, Copilot CLI
-    - AC #651: Baselines are Claude 2.1.117, Codex 0.122.0, OpenCode 1.14.20, Gemini 0.38.2, Copilot 1.0.34
+    - AC #651: Baselines are Claude 2.1.117, Codex 0.131.0, OpenCode 1.14.20, Gemini 0.38.2, Copilot 1.0.34
     - AC #652: Gate blocks below-baseline with actionable message including --force-backend
     - AC #653: Each backend's version format and comparison behavior are covered *)
 
@@ -101,8 +101,8 @@ let test_baseline_codex () =
   let d = find_desc "codex" in
   Alcotest.check
     result_semver
-    "codex baseline is 0.122.0"
-    (ok 0 122 0)
+    "codex baseline is 0.131.0"
+    (ok 0 131 0)
     (Backend_version.of_string d.Backend_registry.baseline_version)
 
 let test_baseline_opencode () =
@@ -146,14 +146,14 @@ let test_gate_blocks_claude_code_below_baseline () =
 let test_gate_blocks_codex_below_baseline () =
   let d = find_desc "codex" in
   let below =
-    {Backend_version.major = 0; minor = 121; patch = 9; prerelease = None}
+    {Backend_version.major = 0; minor = 130; patch = 9; prerelease = None}
   in
   match Backend_version.check_gate ~descriptor:d ~installed:below with
   | Error msg ->
       Alcotest.(check bool)
-        "mentions 0.122.0"
+        "mentions 0.131.0"
         true
-        (contains_string msg "0.122.0")
+        (contains_string msg "0.131.0")
   | Ok () -> Alcotest.fail "expected block"
 
 let test_gate_passes_at_baseline_gemini_cli () =
@@ -289,7 +289,7 @@ let () =
             "claude-code 2.1.117"
             `Quick
             test_baseline_claude_code;
-          Alcotest.test_case "codex 0.122.0" `Quick test_baseline_codex;
+          Alcotest.test_case "codex 0.131.0" `Quick test_baseline_codex;
           Alcotest.test_case "opencode 1.14.20" `Quick test_baseline_opencode;
           Alcotest.test_case "gemini-cli 0.38.2" `Quick test_baseline_gemini_cli;
           Alcotest.test_case
@@ -304,7 +304,7 @@ let () =
             `Quick
             test_gate_blocks_claude_code_below_baseline;
           Alcotest.test_case
-            "blocks codex 0.121.9"
+            "blocks codex 0.130.9"
             `Quick
             test_gate_blocks_codex_below_baseline;
           Alcotest.test_case

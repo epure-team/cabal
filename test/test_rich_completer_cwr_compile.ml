@@ -9,6 +9,31 @@ open Cabal
 
 (* A future workflow runner can submit the complete DTO and consume structured
    execution without constructing [task_spec] or knowing a CLI output format. *)
+let consume_cleanup_status = function
+  | Backend_types.Cleanup_not_required -> Backend_types.Cleanup_not_required
+  | Backend_types.Cleanup_succeeded -> Backend_types.Cleanup_succeeded
+  | Backend_types.Cleanup_failed -> Backend_types.Cleanup_failed
+
+let consume_execution
+    ({
+       Backend_types.final_result;
+       attempts;
+       final_session_id;
+       total_cost;
+       cleanup_status;
+       _;
+     } : Backend_types.task_execution) =
+  ( final_result.status,
+    attempts,
+    final_session_id,
+    total_cost,
+    consume_cleanup_status cleanup_status )
+
+let default_execution () =
+  Backend_types.make_task_execution
+    ~final_result:(Backend_types.make_task_result ~status:Backend_types.Success ())
+    ()
+
 let run_step (complete : Backend_completer.rich_completer) attachment =
   let request =
     Backend_completer.make_completion_request
@@ -25,11 +50,15 @@ let run_step (complete : Backend_completer.rich_completer) attachment =
   match complete request with
   | Ok response ->
       let execution = response.Backend_completer.execution in
+      let status, attempts, session_id, cost, cleanup_status =
+        consume_execution execution
+      in
       ( response.text,
-        execution.Backend_types.final_result.status,
-        execution.attempts,
-        execution.final_session_id,
-        execution.total_cost,
+        status,
+        attempts,
+        session_id,
+        cost,
+        cleanup_status,
         response.event_trace.events,
         response.event_trace.omitted_events )
   | Error error ->
@@ -39,7 +68,11 @@ let run_step (complete : Backend_completer.rich_completer) attachment =
         [],
         None,
         None,
+        Backend_types.Cleanup_not_required,
         error.event_trace.events,
         error.event_trace.omitted_events )
 
-let () = ignore run_step
+let () =
+  let execution = default_execution () in
+  assert (execution.cleanup_status = Backend_types.Cleanup_not_required);
+  ignore run_step
