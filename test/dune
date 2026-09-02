@@ -163,6 +163,16 @@
  (modules test_backend_completer_json_schema))
 
 (test
+ (name test_rich_completer)
+ (libraries cabal alcotest digestif eio eio_posix yojson unix)
+ (modules test_rich_completer))
+
+(test
+ (name test_rich_completer_cwr_compile)
+ (libraries cabal)
+ (modules test_rich_completer_cwr_compile))
+
+(test
  (name test_validated_namespace)
  (libraries cabal alcotest)
  (modules test_validated_namespace))
