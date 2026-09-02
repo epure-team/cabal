@@ -964,7 +964,7 @@ let native_e2e_source () =
   e2e_harness_source "libs/cabal/test/test_native_json_schema_backends.ml"
     "test/test_native_json_schema_backends.ml"
 
-let test_authenticated_media_web_probe_artifact_is_reproducible () =
+let test_media_web_probe_offline_self_test () =
   let path =
     Filename.concat (project_root ()) "tools/probe_codex_media_web.py"
   in
@@ -973,28 +973,10 @@ let test_authenticated_media_web_probe_artifact_is_reproducible () =
   Alcotest.(check bool)
     "probe artifact is executable" true
     (permissions land 0o111 <> 0);
-  let source = read_file path in
-  List.iter
-    (fun expected ->
-      Alcotest.(check bool)
-        ("probe artifact covers " ^ expected)
-        true
-        (contains_substring source expected))
-    [
-      "codex-cli 0.131.0";
-      "media-initial";
-      "resume-upload";
-      "resume-reuse";
-      "web-cached";
-      "web-live";
-      "--output-schema";
-      "thread.started";
-      "agent_message";
-      "web_search";
-      "input=prompt";
-      "str(image.resolve())";
-      "cabal-codex-probe-inputs-";
-    ]
+  let command = Printf.sprintf "%s --self-test" (Filename.quote path) in
+  Alcotest.(check int)
+    "offline self-test executes mode-specific validators" 0
+    (Sys.command command)
 
 let test_e2e_harness_removes_shared_model_env_var () =
   List.iter
@@ -1074,9 +1056,9 @@ let test_e2e_harness_uses_test_managed_namespace () =
 
 let e2e_harness_model_contract_tests =
   [
-    ( "authenticated media/web probe artifact is reproducible",
+    ( "media/web probe offline self-test",
       `Quick,
-      test_authenticated_media_web_probe_artifact_is_reproducible );
+      test_media_web_probe_offline_self_test );
     ( "E2E harness removes shared model env var",
       `Quick,
       test_e2e_harness_removes_shared_model_env_var );
