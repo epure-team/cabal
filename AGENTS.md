@@ -77,15 +77,24 @@ standalone OCaml library and as the backend abstraction layer vendored under
 
 - `task_spec.attachments` defaults to `[]`, `task_spec.web_access` defaults to
   `Web_disabled`, and legacy Yojson documents must retain those defaults.
-- Attachment paths are workspace-relative. `Task_preflight.validate_inputs`
+- Attachment paths are workspace-relative. `Task_preflight.prepare_inputs`
   opens the workspace first, opens attachments relative to that exact directory
   descriptor, and authorizes the opened attachment descriptor with
   separator-safe containment before reading. Relative and absolute symlinks are
   accepted only when that descriptor resolves to a readable regular file inside
   the opened workspace.
-- Attachment size, SHA-256, and magic bytes come from one opened file. SHA-256
-  is canonical lowercase hex and computed in process with `digestif`; do not
-  replace this with a subprocess or add base64 before a transport needs it.
+- Attachment size, SHA-256, magic bytes, and sealed transport bytes come from one
+  opened descriptor/read. SHA-256 is canonical lowercase hex and computed in
+  process with `digestif`; do not replace this with a subprocess or add base64.
+- Prepared inputs use an unpredictable private `0o700` task directory outside
+  the workspace and atomically created `0o600` files with the declared PNG/JPEG
+  extension. Never validate and then reopen/copy the caller path.
+- `Runtime_dispatch` owns prepared inputs through the complete retry/process
+  lifetime and carries their immutable backend/media/web authorization in
+  `Task_execution_context.t`. Fresh retries reuse one staged set; resume reuse
+  retains references but emits no image paths. Cleanup must cover success,
+  failure, timeout, cancellation, fatal exceptions, abandoned prepared values,
+  and staging/cleanup failures.
 - Rendered preflight errors must never include raw attachment paths, digests, or
   bytes. Callers provide count/per-file/total limits; Cabal owns no product
   defaults.
@@ -94,11 +103,14 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Positive `media_support` and `web_support` claims require versioned
   `feature_evidence`. `E2e_test` evidence names its reproducible test in
   `notes`; `Manual_probe` stores the exact command in its payload.
-- All built-in descriptors remain media-disabled and `Web_disabled` until a
-  backend transport and reproducible evidence land together. Native JSON schema
-  evidence remains independently mandatory and must not be weakened.
-- CBL-01 exposes validation only. Central runtime wiring belongs to CBL-03 and
-  backend media/web transports belong to CBL-07.
+- Codex is the only built-in with positive media/web claims: exactly PNG/JPEG and
+  maximum `Web_search_and_fetch` at baseline `0.131.0`. All other built-ins remain
+  media-disabled and `Web_disabled`. Native JSON schema evidence remains
+  independently mandatory and must not be weakened.
+- Codex uploads only centrally sealed absolute paths and never original
+  workspace paths. Sensitive low-level Codex calls without matching central
+  authorization fail before config I/O/spawn; no-attachment `Web_disabled`
+  compatibility may remain. The adapter must not re-read `Backend_registry`.
 
 ## Json_schema_validator — Story #623
 

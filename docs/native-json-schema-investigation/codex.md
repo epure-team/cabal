@@ -76,24 +76,26 @@ raw Codex JSONL or stderr. Run all evidence modes with:
 
 Individual evidence paths are named `media-initial`, `resume-upload`,
 `resume-reuse`, `web-cached`, and `web-live`. An authenticated rerun on
-2026-09-02 passed all five modes against `codex-cli 0.131.0`.
+2026-09-02 passed all five modes against `codex-cli 0.131.0`. After moving the
+fixtures to private absolute paths outside the process workspace, targeted
+authenticated reruns of `media-initial` and `resume-reuse` also passed.
 
-### Initial workspace-relative image plus native schema
+### Initial sealed absolute image plus native schema
 
-Sanitized exact argv (the process current directory contained the image):
+Sanitized runtime argv:
 
 ```text
 codex exec --json --skip-git-repo-check --ignore-user-config \
   -c 'web_search="disabled"' -s read-only \
   --output-schema '<task-schema-file>' \
-  -i 'image with spaces.png' -
+  -i '<sealed-task-input.png>' -
 ```
 
 Outcome at `0.131.0`: exit 0; `thread.started`, `turn.started`,
 `item.completed(agent_message)`, and `turn.completed(usage)` were emitted. The
-schema-conforming public result was `{"media_seen":true}`. This proves that a
-workspace-relative PNG path containing spaces composes with native schema and
-strict JSONL.
+schema-conforming public result was `{"media_seen":true}`. The checked-in probe
+now supplies private absolute PNG/JPEG fixture paths outside the process working
+directory, matching Cabal's sealed runtime invocation shape.
 
 ### Multiple PNG/JPEG images plus native schema
 
@@ -103,7 +105,7 @@ Sanitized exact argv:
 codex exec --json --skip-git-repo-check --ignore-user-config \
   -c 'web_search="disabled"' -s read-only \
   --output-schema '<task-schema-file>' \
-  -i '<workspace-image-1.png>' -i '<workspace-image-2.jpg>' \
+  -i '<sealed-image-1.png>' -i '<sealed-image-2.jpg>' \
   -
 ```
 
@@ -120,7 +122,7 @@ public `thread.started.thread_id`, the corrected sanitized argv was:
 codex exec --output-schema '<task-schema-file>' -s read-only \
   resume "$THREAD_ID" --json --skip-git-repo-check \
   --ignore-user-config -c 'web_search="disabled"' \
-  -i '<workspace-image-1.png>' -i '<workspace-image-2.jpg>' -
+  -i '<sealed-image-1.png>' -i '<sealed-image-2.jpg>' -
 ```
 
 Outcome: exit 0; a public session id, agent message, and usage were emitted; the
@@ -167,8 +169,9 @@ The `web-cached` evidence mode runs the corresponding generated argv with
 
 - Actual argv is a string list passed directly to the process launcher; no
   shell interpolation or host-provided config fragment is accepted.
-- Attachments remain validated workspace-relative paths. Codex receives paths,
-  not bytes or base64; the adapter does not reread media.
+- Public attachment references remain workspace-relative. Preflight streams the
+  authorized descriptor once for size, digest, magic, and an exact sealed copy;
+  Codex receives only the sealed absolute path and never reopens the caller path.
 - `Upload_attachments` emits one `-i` pair per attachment.
   `Reuse_session_attachments` requires resume and emits none.
 - Web policy maps to fixed values only:
@@ -194,22 +197,31 @@ The `web-cached` evidence mode runs the corresponding generated argv with
   integers. Zero is preserved, invalid sibling fields are ignored independently,
   and multi-turn totals saturate at `max_int` instead of wrapping.
 
-## Pending sealed attachment handoff
+## Sealed attachment handoff
 
-CBL-07A still passes the original validated workspace-relative attachment path
-to Codex, whose process opens that path later. This leaves a path-reopen TOCTOU
-window between preflight and backend consumption. The branch does **not** claim
-that original-path reopen is a sealed or race-free handoff. Integrating a sealed
-descriptor/copy handoff is intentionally deferred to the next sequential phase;
-final security review remains blocked on that work.
+`Task_preflight.prepare_inputs` creates one private task-scoped staging directory
+outside the opened workspace. Each `0o600` PNG/JPEG file receives exactly the
+bytes used by the same opened-descriptor validation stream; no post-validation
+source reopen occurs. Runtime dispatch installs the opaque set and the resolved
+entry's media/web authorization in the task execution context before version or
+availability work. Codex fails closed for sensitive low-level calls without that
+authorization and no longer reads `Backend_registry` during execution.
+
+Fresh schema retries reuse the same staged paths. Resume reuse retains the public
+attachment references/digests but emits no `-i`. Cleanup runs after all attempts
+and backend process cleanup, including timeout, cancellation, fatal exception,
+staging failure, cleanup retry, and abandoned-prepared-value paths. Deterministic
+tests replace/symlink and delete caller paths after `Preflight_completed`; the
+fake Codex process still observes only the originally validated staged bytes,
+and the staged paths are gone when dispatch returns.
 
 ## Capability outcome and shared gate
 
 | Capability | Transport proof | Advertised by the Codex descriptor in this branch |
 |---|---:|---:|
 | Native JSON schema | yes | yes (unchanged, independent evidence) |
-| PNG path media | yes | yes |
-| JPEG path media | yes | yes |
+| Sealed PNG media | yes | yes |
+| Sealed JPEG media | yes | yes |
 | Resume media upload | yes | yes |
 | Session media reuse (no duplicate `-i`) | deterministic adapter test | yes |
 | Web disabled override | source + deterministic argv | yes |
@@ -234,13 +246,13 @@ inputs still fail before config I/O, version probing, or backend process spawn.
 
 `test/test_codex_cli.ml` pins:
 
-- zero/one/multiple image argv, including spaces;
+- zero/one/multiple sealed absolute image argv;
 - initial and resume upload versus session reuse;
 - exact initial/resume image plus schema option scoping and ordering;
 - canonical UUID-only session parsing and fail-before-config/spawn caller checks;
 - disabled/cached/live web settings;
 - redacted argv;
-- fail-before-spawn behavior for malformed or unsupported inputs;
+- fail-before-spawn behavior for malformed, unsupported, or unauthorized inputs;
 - non-negative/zero token parsing and saturating aggregation;
 - positive public JSONL agent/session/tool/usage records; and
 - negative privacy fixtures for reasoning, errors, malformed input, raw
@@ -251,5 +263,6 @@ claim/evidence agreement and descriptor evidence validity, and pins the exact
 Codex claims. `test/test_runtime_bootstrap.ml` verifies that the independent
 snapshot matches and that drift fails closed. `test/test_task_preflight.ml` and
 `test/test_runtime_dispatch.ml` cover positive PNG/JPEG/web acceptance, exact
-adapter delivery intent, the `0.131.0` version gate, and rejected-input
-no-side-effect behavior.
+adapter delivery intent, post-preflight namespace replacement/deletion, staged
+byte identity, retry reuse, lifecycle cleanup, the `0.131.0` version gate, and
+rejected-input no-side-effect behavior.

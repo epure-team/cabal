@@ -9,6 +9,17 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Sealed Codex media/web transport (CBL-07A).** Codex 0.131.0 now carries
+  evidence-backed PNG/JPEG upload and search/fetch capabilities. Central
+  preflight opens each workspace-relative attachment once and streams the same
+  bytes through size, digest, magic, and a private task-scoped transport copy;
+  Codex receives only those sealed absolute paths. One sealed set survives fresh
+  schema retries, resume reuse sends no duplicate image argv, and cleanup covers
+  success, backend failure/timeout, cancellation, fatal exceptions, abandoned
+  prepared calls, staging failure, and retryable cleanup failure. Sensitive
+  low-level Codex calls without matching immutable central authorization fail
+  before config I/O or process spawn. The public-only authenticated probe covers
+  initial media and resumed session reuse with fixtures outside its workspace.
 - **Stable rich completer and central detailed dispatch (CBL-06).**
   `Backend_types.completion_request` and its constructor expose system/user
   prompts, schema, resume session, attachments, web policy, timeout, and maximum

@@ -114,8 +114,8 @@ on `PATH` (or set
   whole-task deadlines.
 - `src/task_event.*` — sequenced backend-neutral lifecycle and public-output
   events.
-- `src/task_preflight.*` — attachment integrity/workspace checks and requested
-  capability validation.
+- `src/task_preflight.*` — attachment integrity/workspace checks, sealed
+  transport staging, and requested capability validation.
 - `src/backend_completer.*` — construction helpers for task completers and
   validator-safe backend routing.
 - `src/backend_process.*`, `src/process_group.*`, and `src/backend_version.*`
@@ -428,18 +428,38 @@ Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id:"claude-code" spec
 Preflight is host-neutral and does not choose limits. Render dispatch failures
 with `Runtime_dispatch.render_error`; its diagnostics exclude attachment paths,
 digests, bytes, and exception payloads. Invalid limits, inputs, or capabilities
-fail before any version process or availability side effect. After preflight,
+fail before any version process or availability side effect. For attachments,
+one opened descriptor/read establishes containment, regular-file status, size,
+SHA-256, media magic, and the exact staged bytes. Those bytes are written to
+unpredictably named `0o600` PNG/JPEG files in a private `0o700` task directory
+outside the workspace. The central execution context carries that opaque sealed
+set and immutable media/web authorization across all attempts; fresh retries
+reuse it, while resumed-session reuse emits no duplicate image flags. Cleanup
+precedes outcome delivery on success, failure, timeout, cancellation, and fatal
+exception paths. After preflight,
 dispatch runs one bounded version command, rejects parseable versions below the
 descriptor baseline, and checks runtime availability before execution. Missing
 or unparseable version output keeps the compatibility skip policy; availability
 must still pass. Eio cancellation is normalized to `Cancelled` only after
 task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
-All built-in descriptors currently declare no media support and `Web_disabled`
-pending backend-specific transport evidence. Existing call sites invoking
-`Agentic_backend.run_task` and `Json_schema_enforcer.run_task` remain compatible
-low-level paths but intentionally bypass these central guarantees; modules that
-implement `Agentic_backend.S` must perform the migration described above.
+Codex is the only built-in currently advertising media/web transport: at the
+enforced `0.131.0` baseline it accepts exactly PNG/JPEG and up to
+`Web_search_and_fetch`, backed by the reproducible
+`tools/probe_codex_media_web.py` probe. Other built-ins remain media-disabled and
+`Web_disabled`. Direct low-level Codex calls remain compatible only for no
+attachments plus `Web_disabled`; sensitive media/web calls fail before config
+I/O or spawn unless central dispatch installed the matching sealed authorization.
+The adapter never consults mutable global registry state for that decision.
+
+For authenticated manual verification, install and authenticate exactly
+`codex-cli 0.131.0`, then run
+`./tools/probe_codex_media_web.py media-initial resume-reuse` (or omit modes for
+all five checks). The probe creates private `0o700` input storage outside its
+working directory, passes absolute `0o600` fixture paths, suppresses raw JSONL
+and stderr, and reports only sanitized `PASS <mode>` / `FAIL` lines. It requires
+no Cabal-specific credential environment variable and never prints fixture,
+workspace, or authentication paths.
 
 ### Redaction contract for hosts logging backend output
 
