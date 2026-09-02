@@ -64,15 +64,29 @@ and stderr were captured in memory and filtered; only public agent/session/tool/
 usage records were reported. Reasoning, error payloads, raw tool arguments, and
 credentials were neither displayed nor stored.
 
+`tools/probe_codex_media_web.py` is the checked-in executable reproduction
+artifact. It requires exactly `codex-cli 0.131.0`, creates and removes its own
+deterministic PNG, JPEG, and draft-2020-12 schema fixtures, passes every prompt
+on stdin, and prints only `PASS <mode>` or a sanitized failure. It never prints
+raw Codex JSONL or stderr. Run all evidence modes with:
+
+```text
+./tools/probe_codex_media_web.py
+```
+
+Individual evidence paths are named `media-initial`, `resume-upload`,
+`resume-reuse`, `web-cached`, and `web-live`. An authenticated rerun on
+2026-09-02 passed all five modes against `codex-cli 0.131.0`.
+
 ### Initial workspace-relative image plus native schema
 
 Sanitized exact argv (the process current directory contained the image):
 
 ```text
 codex exec --json --skip-git-repo-check --ignore-user-config \
-  -s read-only -c 'web_search="disabled"' \
-  -i 'image with spaces.png' \
-  --output-schema '<task-schema-file>' -
+  -c 'web_search="disabled"' -s read-only \
+  --output-schema '<task-schema-file>' \
+  -i 'image with spaces.png' -
 ```
 
 Outcome at `0.131.0`: exit 0; `thread.started`, `turn.started`,
@@ -87,31 +101,46 @@ Sanitized exact argv:
 
 ```text
 codex exec --json --skip-git-repo-check --ignore-user-config \
-  -s read-only -c 'web_search="disabled"' \
+  -c 'web_search="disabled"' -s read-only \
+  --output-schema '<task-schema-file>' \
   -i '<workspace-image-1.png>' -i '<workspace-image-2.jpg>' \
-  --output-schema '<task-schema-file>' -
+  -
 ```
 
 Outcome: exit 0 with the same public protocol record classes and the
 schema-conforming result `{"image_count":2}`. PNG, JPEG, repeated flags, and
 image/schema composition were all exercised in one invocation.
 
-### Resume image upload plus native schema
+### Resume PNG/JPEG upload plus native schema
 
-After a probe-owned initial session, the corrected sanitized argv was:
+After a probe-owned initial session emitted a canonical lowercase UUID in its
+public `thread.started.thread_id`, the corrected sanitized argv was:
 
 ```text
 codex exec --output-schema '<task-schema-file>' -s read-only \
-  resume '<session-id>' --json --skip-git-repo-check \
+  resume "$THREAD_ID" --json --skip-git-repo-check \
   --ignore-user-config -c 'web_search="disabled"' \
-  -i '<workspace-image-1>' -
+  -i '<workspace-image-1.png>' -i '<workspace-image-2.jpg>' -
 ```
 
 Outcome: exit 0; a public session id, agent message, and usage were emitted; the
-schema-conforming result was `{"media_seen":true}`. Cabal therefore has a
-proven resume-upload syntax. For `Reuse_session_attachments`, Cabal deliberately
-emits no `-i` flags, so a schema retry does not upload the already-fed media a
-second time.
+schema-conforming result was `{"media_seen":true}`. The schema and sandbox are
+root `exec` options before `resume`; JSON/config and repeated image options are
+resume options after the UUID.
+
+### Resume media reuse plus native schema
+
+The `resume-reuse` evidence mode uses the same exact scoping but deliberately
+emits no image options:
+
+```text
+codex exec --output-schema '<task-schema-file>' -s read-only \
+  resume "$THREAD_ID" --json --skip-git-repo-check \
+  --ignore-user-config -c 'web_search="disabled"' -
+```
+
+This proves that a schema-bearing retry can resume the already-fed session
+without duplicating `-i` uploads.
 
 ### Live web search and page fetch
 
@@ -119,7 +148,8 @@ Sanitized exact argv:
 
 ```text
 codex exec --json --skip-git-repo-check --ignore-user-config \
-  -s read-only -c 'web_search="live"' -
+  -c 'web_search="live"' -s read-only \
+  --output-schema '<task-schema-file>' -
 ```
 
 The public prompt required live search and opening an official OpenAI Codex
@@ -130,6 +160,8 @@ proves the `live` search-and-fetch setting. The tagged schema/source separately
 pins `cached` as search without external live access and `disabled` as no web
 tool; CLI `-c` overrides are the highest-precedence ordinary config layer, and
 the upstream test pins explicit `web_search` precedence over legacy web flags.
+The `web-cached` evidence mode runs the corresponding generated argv with
+`-c 'web_search="cached"'` and requires the same public `web_search` lifecycle.
 
 ## Adapter design and privacy
 
@@ -154,6 +186,22 @@ the upstream test pins explicit `web_search` precedence over legacy web flags.
   completed agent messages, thread ids, fixed-name tool lifecycle records, and
   completed-turn usage (including `cached_input_tokens`). There is no
   malformed/raw/reasoning/error fallback.
+- Caller-supplied resume IDs and parsed `thread.started.thread_id` values must be
+  canonical lowercase UUID strings (`8-4-4-4-12` hexadecimal form). Blank,
+  option-like, control-containing, malformed, uppercase, and overlong values are
+  rejected; caller rejection occurs before config I/O or process spawn.
+- Token input/output/cache fields are accepted only as non-negative JSON
+  integers. Zero is preserved, invalid sibling fields are ignored independently,
+  and multi-turn totals saturate at `max_int` instead of wrapping.
+
+## Pending sealed attachment handoff
+
+CBL-07A still passes the original validated workspace-relative attachment path
+to Codex, whose process opens that path later. This leaves a path-reopen TOCTOU
+window between preflight and backend consumption. The branch does **not** claim
+that original-path reopen is a sealed or race-free handoff. Integrating a sealed
+descriptor/copy handoff is intentionally deferred to the next sequential phase;
+final security review remains blocked on that work.
 
 ## Capability outcome and shared gate
 
@@ -188,10 +236,12 @@ inputs still fail before config I/O, version probing, or backend process spawn.
 
 - zero/one/multiple image argv, including spaces;
 - initial and resume upload versus session reuse;
-- image plus schema ordering;
+- exact initial/resume image plus schema option scoping and ordering;
+- canonical UUID-only session parsing and fail-before-config/spawn caller checks;
 - disabled/cached/live web settings;
 - redacted argv;
 - fail-before-spawn behavior for malformed or unsupported inputs;
+- non-negative/zero token parsing and saturating aggregation;
 - positive public JSONL agent/session/tool/usage records; and
 - negative privacy fixtures for reasoning, errors, malformed input, raw
   fallback, tool arguments/results, and unsafe identifiers.

@@ -286,14 +286,19 @@ let test_codex_media_and_web_capabilities_are_evidence_backed () =
         "0.131.0"
         evidence.tested_at_version ;
       Alcotest.(check bool)
-        "media evidence is the authenticated manual probe"
+        "media evidence names the executable authenticated probe"
         true
         (match evidence.test_method with
-        | Backend_types.Manual_probe command ->
-            contains_substring command "<workspace-image-1.png>"
-            && contains_substring command "<workspace-image-2.jpg>"
-            && contains_substring command "--output-schema"
-        | Backend_types.E2e_test -> false) ;
+        | Backend_types.E2e_test ->
+            List.for_all
+              (contains_substring evidence.notes)
+              [
+                "tools/probe_codex_media_web.py";
+                "media-initial";
+                "resume-upload";
+                "resume-reuse";
+              ]
+        | Backend_types.Manual_probe _ -> false) ;
       Alcotest.(check bool)
         "media evidence references the investigation"
         true
@@ -311,12 +316,18 @@ let test_codex_media_and_web_capabilities_are_evidence_backed () =
         "0.131.0"
         evidence.tested_at_version ;
       Alcotest.(check bool)
-        "web evidence is the authenticated live probe"
+        "web evidence names cached and live authenticated probes"
         true
         (match evidence.test_method with
-        | Backend_types.Manual_probe command ->
-            contains_substring command {|web_search="live"|}
-        | Backend_types.E2e_test -> false) ;
+        | Backend_types.E2e_test ->
+            List.for_all
+              (contains_substring evidence.notes)
+              [
+                "tools/probe_codex_media_web.py";
+                "web-cached";
+                "web-live";
+              ]
+        | Backend_types.Manual_probe _ -> false) ;
       Alcotest.(check bool)
         "web evidence references the investigation"
         true

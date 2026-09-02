@@ -105,11 +105,9 @@ let native_schema_evidence tested_at_version =
 let codex_media_evidence : Backend_types.feature_evidence =
   {
     tested_at_version = "0.131.0";
-    test_method =
-      Backend_types.Manual_probe
-        "codex exec --json --skip-git-repo-check --ignore-user-config -s read-only -c 'web_search=\"disabled\"' -i '<workspace-image-1.png>' -i '<workspace-image-2.jpg>' --output-schema '<task-schema-file>' -";
+    test_method = Backend_types.E2e_test;
     notes =
-      "Authenticated PNG/JPEG upload, native schema composition, and resume probes are recorded in docs/native-json-schema-investigation/codex.md.";
+      "Reproducible authenticated probe: tools/probe_codex_media_web.py media-initial resume-upload resume-reuse. It creates deterministic PNG/JPEG/schema fixtures, exercises initial upload, resume upload, and session reuse, and validates only public JSONL. See docs/native-json-schema-investigation/codex.md.";
     evidence_url =
       Some
         "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
@@ -118,11 +116,9 @@ let codex_media_evidence : Backend_types.feature_evidence =
 let codex_web_evidence : Backend_types.feature_evidence =
   {
     tested_at_version = "0.131.0";
-    test_method =
-      Backend_types.Manual_probe
-        "codex exec --json --skip-git-repo-check --ignore-user-config -s read-only -c 'web_search=\"live\"' -";
+    test_method = Backend_types.E2e_test;
     notes =
-      "Authenticated live web search returned paired web_search records and fetched an official public page; see docs/native-json-schema-investigation/codex.md.";
+      "Reproducible authenticated probe: tools/probe_codex_media_web.py web-cached web-live. It exercises cached search and live search/fetch and validates only public JSONL web_search lifecycle and schema-conforming agent output. See docs/native-json-schema-investigation/codex.md.";
     evidence_url =
       Some
         "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/core/tests/suite/web_search.rs";
