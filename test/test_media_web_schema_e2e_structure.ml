@@ -517,8 +517,10 @@ let result_cost : Backend_types.cost =
 let event seq attempt payload : Task_event.t =
   {seq; attempt; timestamp = Float.of_int seq; payload}
 
-let expect_invalid_tool_lifecycle label events =
-  match Media_web_schema_e2e_support.validate_tool_lifecycle events with
+let expect_invalid_tool_lifecycle ?(attempt_numbers = [1]) label events =
+  match
+    Media_web_schema_e2e_support.validate_tool_lifecycle ~attempt_numbers events
+  with
   | Error Media_web_schema_e2e_support.Tool_lifecycle_disagreement -> ()
   | Error _ -> Alcotest.fail (label ^ " produced the wrong trace error")
   | Ok _ -> Alcotest.fail (label ^ " tool lifecycle was accepted")
@@ -530,36 +532,52 @@ let test_tool_lifecycle_identity_pairing () =
   let finished ?id ?name seq attempt =
     event seq attempt (Task_event.Tool_finished {id; name})
   in
-  let valid =
-    [
-      started ~id:"stable-a" 1 1 "read";
-      finished ~id:"stable-a" ~name:"renamed-but-id-is-stable" 2 1;
-      started 3 1 "fallback-name";
-      finished ~name:"fallback-name" 4 1;
-    ]
+  let bounded events =
+    event 0 1 (Attempt_started Initial_attempt)
+    :: events @ [event 99 1 (Attempt_finished Attempt_succeeded)]
   in
-  (match Media_web_schema_e2e_support.validate_tool_lifecycle valid with
+  let valid =
+    bounded
+      [
+        started ~id:"stable-a" 1 1 "read";
+        finished ~id:"stable-a" ~name:"renamed-but-id-is-stable" 2 1;
+        started 3 1 "fallback-name";
+        finished ~name:"fallback-name" 4 1;
+      ]
+  in
+  (match
+     Media_web_schema_e2e_support.validate_tool_lifecycle ~attempt_numbers:[1]
+       valid
+   with
   | Ok 2 -> ()
   | Ok _ -> Alcotest.fail "valid tool lifecycle returned the wrong start count"
   | Error _ -> Alcotest.fail "valid stable-id/name fallback pairing was rejected") ;
   expect_invalid_tool_lifecycle "mismatched stable id"
-    [
-      started ~id:"stable-a" 1 1 "read";
-      finished ~id:"stable-b" ~name:"read" 2 1;
-    ] ;
+    (bounded
+       [
+         started ~id:"stable-a" 1 1 "read";
+         finished ~id:"stable-b" ~name:"read" 2 1;
+       ]) ;
   expect_invalid_tool_lifecycle "mismatched fallback name"
-    [started 1 1 "read"; finished ~name:"write" 2 1] ;
+    (bounded [started 1 1 "read"; finished ~name:"write" 2 1]) ;
   expect_invalid_tool_lifecycle "finish before start"
-    [finished ~id:"stable-a" ~name:"read" 1 1] ;
-  expect_invalid_tool_lifecycle "cross-attempt finish"
+    (bounded [finished ~id:"stable-a" ~name:"read" 1 1]) ;
+  expect_invalid_tool_lifecycle ~attempt_numbers:[1; 2] "cross-attempt finish"
     [
-      started ~id:"stable-a" 1 1 "read";
-      finished ~id:"stable-a" ~name:"read" 2 2;
+      event 0 1 (Attempt_started Initial_attempt);
+      event 1 2 (Attempt_started Fresh_attempt);
+      started ~id:"stable-a" 2 1 "read";
+      finished ~id:"stable-a" ~name:"read" 3 2;
     ] ;
   expect_invalid_tool_lifecycle "duplicate active start"
-    [started ~id:"stable-a" 1 1 "read"; started ~id:"stable-a" 2 1 "read"] ;
+    (bounded
+       [started ~id:"stable-a" 1 1 "read"; started ~id:"stable-a" 2 1 "read"]) ;
   expect_invalid_tool_lifecycle "dangling active tool at terminal"
-    [started ~id:"stable-a" 1 1 "read"; event 2 1 (Terminal Succeeded)]
+    [
+      event 0 1 (Attempt_started Initial_attempt);
+      started ~id:"stable-a" 1 1 "read";
+      event 2 1 (Terminal Succeeded);
+    ]
 
 let test_attempt_numbering_and_native_contract () =
   let attachments =
@@ -717,6 +735,156 @@ let test_event_trace_contract () =
   | Error _ -> ()
   | Ok () -> Alcotest.fail "attempt start/finish disagreement was accepted"
 
+let test_tool_events_respect_attempt_boundaries () =
+  let text = {|{"result":"ok"}|} in
+  let result = Backend_types.make_task_result ~status:Success ~agent_text:text () in
+  let attempt : Backend_types.task_attempt =
+    {
+      number = 1;
+      kind = Initial_attempt;
+      result;
+      attempt_elapsed = 1.0;
+      schema_validation_error = None;
+      delivery =
+        {
+          attachment_references = [];
+          attachment_delivery = Upload_attachments;
+          web_access_policy = Web_disabled;
+        };
+    }
+  in
+  let execution =
+    Backend_types.make_task_execution ~final_result:result ~attempts:[attempt]
+      ~cleanup_status:Cleanup_succeeded ()
+  in
+  let requirements =
+    Media_web_schema_e2e_support.protocol_requirements_for_backend "generic"
+  in
+  let started seq attempt =
+    event seq attempt (Task_event.Tool_started {id = Some "tool-a"; name = "read"})
+  in
+  let finished seq attempt =
+    event seq attempt
+      (Task_event.Tool_finished {id = Some "tool-a"; name = Some "read"})
+  in
+  let expect_rejected label events =
+    match
+      Media_web_schema_e2e_support.validate_event_trace ~requirements execution
+        events
+    with
+    | Error Media_web_schema_e2e_support.Tool_lifecycle_disagreement -> ()
+    | Error _ -> Alcotest.fail (label ^ " produced the wrong trace error")
+    | Ok () -> Alcotest.fail (label ^ " tool events were accepted")
+  in
+  expect_rejected "tool before attempt start"
+    [
+      event 0 0 Task_started;
+      started 1 1;
+      finished 2 1;
+      event 3 1 (Attempt_started Initial_attempt);
+      event 4 1 (Agent_text_delta text);
+      event 5 1 (Attempt_finished Attempt_succeeded);
+      event 6 1 (Terminal Succeeded);
+    ] ;
+  expect_rejected "tool after attempt finish"
+    [
+      event 0 0 Task_started;
+      event 1 1 (Attempt_started Initial_attempt);
+      event 2 1 (Agent_text_delta text);
+      event 3 1 (Attempt_finished Attempt_succeeded);
+      started 4 1;
+      finished 5 1;
+      event 6 1 (Terminal Succeeded);
+    ] ;
+  expect_rejected "tool on nonexistent attempt"
+    [
+      event 0 0 Task_started;
+      event 1 1 (Attempt_started Initial_attempt);
+      started 2 2;
+      finished 3 2;
+      event 4 1 (Agent_text_delta text);
+      event 5 1 (Attempt_finished Attempt_succeeded);
+      event 6 1 (Terminal Succeeded);
+    ]
+
+let test_multi_attempt_tool_trace () =
+  let first_result =
+    Backend_types.make_task_result ~status:Success ~agent_text:"first" ()
+  in
+  let final_text = {|{"result":"final"}|} in
+  let final_result =
+    Backend_types.make_task_result ~status:Success ~agent_text:final_text ()
+  in
+  let delivery : Backend_types.attempt_delivery =
+    {
+      attachment_references = [];
+      attachment_delivery = Upload_attachments;
+      web_access_policy = Web_disabled;
+    }
+  in
+  let first : Backend_types.task_attempt =
+    {
+      number = 1;
+      kind = Initial_attempt;
+      result = first_result;
+      attempt_elapsed = 1.0;
+      schema_validation_error = Some "sanitized";
+      delivery;
+    }
+  in
+  let second : Backend_types.task_attempt =
+    {
+      number = 2;
+      kind = Fresh_attempt;
+      result = final_result;
+      attempt_elapsed = 1.0;
+      schema_validation_error = None;
+      delivery;
+    }
+  in
+  let execution =
+    Backend_types.make_task_execution ~final_result ~attempts:[first; second]
+      ~cleanup_status:Cleanup_succeeded ()
+  in
+  Alcotest.(check bool)
+    "generic two-attempt helper accepts contiguous attempts"
+    true
+    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments:[]
+       execution) ;
+  let tool_started seq attempt =
+    event seq attempt
+      (Task_event.Tool_started {id = Some "reused-id"; name = "read"})
+  in
+  let tool_finished seq attempt =
+    event seq attempt
+      (Task_event.Tool_finished {id = Some "reused-id"; name = Some "read"})
+  in
+  let events =
+    [
+      event 0 0 Task_started;
+      event 1 1 (Attempt_started Initial_attempt);
+      tool_started 2 1;
+      tool_finished 3 1;
+      event 4 1 (Agent_text_delta "first");
+      event 5 1 (Attempt_finished Attempt_succeeded);
+      event 6 2 (Attempt_started Fresh_attempt);
+      tool_started 7 2;
+      tool_finished 8 2;
+      event 9 2 (Agent_text_delta final_text);
+      event 10 2 (Attempt_finished Attempt_succeeded);
+      event 11 2 (Terminal Succeeded);
+    ]
+  in
+  let requirements =
+    Media_web_schema_e2e_support.protocol_requirements_for_backend "generic"
+  in
+  match
+    Media_web_schema_e2e_support.validate_event_trace ~requirements execution
+      events
+  with
+  | Ok () -> ()
+  | Error _ -> Alcotest.fail "valid two-attempt tool trace was rejected"
+
 let test_e2e_binary_is_credential_gated_and_sequential () =
   let dune = read_test_file "dune" in
   let source = read_test_file "test_media_web_schema_backends.ml" in
@@ -821,6 +989,10 @@ let () =
         [
           Alcotest.test_case "terminal and attempts are consistent" `Quick
             test_event_trace_contract;
+          Alcotest.test_case "tools stay within attempt boundaries" `Quick
+            test_tool_events_respect_attempt_boundaries;
+          Alcotest.test_case "multi-attempt tools remain isolated" `Quick
+            test_multi_attempt_tool_trace;
           Alcotest.test_case "tool identity lifecycle is paired" `Quick
             test_tool_lifecycle_identity_pairing;
           Alcotest.test_case "attempt numbering and native contract" `Quick

@@ -169,9 +169,11 @@ standalone OCaml library and as the backend abstraction layer vendored under
   event, exact attempt start/finish agreement, and final public agent output.
   Codex's public JSONL protocol additionally guarantees session and usage events;
   a tool event is not mandatory for this image-only prompt, but any emitted tool
-  lifecycle must be paired within its attempt by stable id or, only without an
-  id, by name. Reject finish-before-start, duplicates, mismatches, cross-attempt
-  finishes, and tools left active at terminal.
+  lifecycle is valid only after that exact attempt starts and before it finishes,
+  and must pair within the attempt by stable id or, only without an id, by name.
+  Reject tools on unknown/pending/finished attempts, finish-before-start,
+  duplicates, identity mismatches, cross-attempt finishes, and tools left active
+  at attempt finish or terminal.
 - The schema intentionally permits a small color vocabulary; exact blue/red
   semantic validation is separate so a constant schema-shaped response cannot
   pass. Inspect PNG dimensions and decoded pixels in-process. Pin the no-decoder

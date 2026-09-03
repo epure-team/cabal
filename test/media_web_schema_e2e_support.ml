@@ -175,6 +175,7 @@ let has_usage events =
     events
 
 type tool_identity = Stable_id of string | Fallback_name of string
+type attempt_tool_state = Attempt_pending | Attempt_active | Attempt_finished
 
 let nonempty value = String.trim value <> ""
 
@@ -201,31 +202,83 @@ let remove_active key active =
   in
   loop [] active
 
-let validate_tool_lifecycle events =
-  let rec loop active started = function
-    | [] -> if active = [] then Ok started else Error Tool_lifecycle_disagreement
+let transition_attempt attempt expected replacement states =
+  let rec loop reversed = function
+    | [] -> None
+    | (number, state) :: rest when number = attempt ->
+        if state = expected then
+          Some (List.rev_append reversed ((number, replacement) :: rest))
+        else None
+    | state :: rest -> loop (state :: reversed) rest
+  in
+  loop [] states
+
+let attempt_is_active attempt states =
+  List.assoc_opt attempt states = Some Attempt_active
+
+let attempt_has_active_tool attempt active_tools =
+  List.exists (fun (active_attempt, _) -> active_attempt = attempt) active_tools
+
+let all_attempts_finished states =
+  List.for_all (fun (_, state) -> state = Attempt_finished) states
+
+let validate_tool_lifecycle ~attempt_numbers events =
+  let attempt_states =
+    List.map (fun number -> (number, Attempt_pending)) attempt_numbers
+  in
+  let rec loop attempt_states active_tools started = function
+    | [] ->
+        if active_tools = [] && all_attempts_finished attempt_states then Ok started
+        else Error Tool_lifecycle_disagreement
     | event :: rest -> (
         match event.Task_event.payload with
+        | Task_event.Attempt_started _ -> (
+            match
+              transition_attempt event.attempt Attempt_pending Attempt_active
+                attempt_states
+            with
+            | None -> Error Tool_lifecycle_disagreement
+            | Some states -> loop states active_tools started rest)
+        | Task_event.Attempt_finished _ ->
+            if attempt_has_active_tool event.attempt active_tools then
+              Error Tool_lifecycle_disagreement
+            else (
+              match
+                transition_attempt event.attempt Attempt_active Attempt_finished
+                  attempt_states
+              with
+              | None -> Error Tool_lifecycle_disagreement
+              | Some states -> loop states active_tools started rest)
         | Task_event.Tool_started tool -> (
-            match started_tool_identity tool with
-            | None -> Error Tool_lifecycle_disagreement
-            | Some identity ->
+            match
+              ( attempt_is_active event.attempt attempt_states,
+                started_tool_identity tool )
+            with
+            | false, _ | true, None -> Error Tool_lifecycle_disagreement
+            | true, Some identity ->
                 let key = (event.attempt, identity) in
-                if event.attempt < 1 || List.mem key active then
-                  Error Tool_lifecycle_disagreement
-                else loop (key :: active) (started + 1) rest)
+                if List.mem key active_tools then Error Tool_lifecycle_disagreement
+                else
+                  loop attempt_states (key :: active_tools) (started + 1) rest)
         | Task_event.Tool_finished {id; name} -> (
-            match finished_tool_identity id name with
-            | None -> Error Tool_lifecycle_disagreement
-            | Some identity -> (
-                match remove_active (event.attempt, identity) active with
+            match
+              ( attempt_is_active event.attempt attempt_states,
+                finished_tool_identity id name )
+            with
+            | false, _ | true, None -> Error Tool_lifecycle_disagreement
+            | true, Some identity -> (
+                match remove_active (event.attempt, identity) active_tools with
                 | None -> Error Tool_lifecycle_disagreement
-                | Some remaining -> loop remaining started rest))
-        | Task_event.Terminal _ when active <> [] ->
-            Error Tool_lifecycle_disagreement
-        | _ -> loop active started rest)
+                | Some remaining ->
+                    loop attempt_states remaining started rest))
+        | Task_event.Terminal _ ->
+            if
+              active_tools <> [] || not (all_attempts_finished attempt_states)
+            then Error Tool_lifecycle_disagreement
+            else loop attempt_states active_tools started rest
+        | _ -> loop attempt_states active_tools started rest)
   in
-  loop [] 0 events
+  loop attempt_states [] 0 events
 
 let expected_attachment_delivery = function
   | Backend_types.Initial_attempt | Backend_types.Fresh_attempt ->
@@ -295,7 +348,12 @@ let validate_event_trace ~requirements execution events =
         else if requirements.usage && not (has_usage events) then
           Error Required_usage_missing
         else
-          match validate_tool_lifecycle events with
+          let attempt_numbers =
+            List.map
+              (fun (attempt : Backend_types.task_attempt) -> attempt.number)
+              execution.Backend_types.attempts
+          in
+          match validate_tool_lifecycle ~attempt_numbers events with
           | Error _ as error -> error
           | Ok tools_started ->
               if requirements.tool && tools_started = 0 then

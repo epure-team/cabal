@@ -18,7 +18,8 @@ by the date a change merged to `main`.
   binding, enforced baseline, explicit limits, sealed upload intent, exactly one
   successful initial native attempt numbered 1, successful cleanup, public
   normalized output, session/usage protocol events, exactly one terminal, and
-  attempt/tool lifecycle pairing by attempt and stable identity. It selects only
+  attempt/tool lifecycle pairing by attempt and stable identity, with tool events
+  confined between the exact attempt's start and finish. It selects only
   positive-media descriptors with valid native draft 2020-12 evidence, skips
   genuine absent binaries only, and fails other lookup or installed
   probe/authentication errors. Credential-free PNG pixel inspection and fixed

@@ -516,8 +516,9 @@ provenance; corrupted and wrong-color fixtures are negative-tested.
 Hardened bootstrap, explicit attachment limits, sealed staging, requested upload
 delivery, exactly one successful native initial attempt numbered 1, normalized
 public events, and successful central cleanup are all asserted. Tool starts and
-finishes are paired by attempt plus stable id, falling back to name only when no
-id exists. The live harness emits only fixed PASS/SKIP/FAIL
+finishes are accepted only between that exact attempt's start and finish, and are
+paired by attempt plus stable id, falling back to name only when no id exists.
+The live harness emits only fixed PASS/SKIP/FAIL
 diagnostics and never prints prompts, fixture bytes or paths, raw backend output,
 credentials, or session identifiers.
 
