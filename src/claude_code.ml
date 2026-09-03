@@ -164,25 +164,18 @@ let is_resume_failure (result : task_result) =
       || is_resume_failure_text result.stderr
   | Success | Timeout | Cancelled -> false
 
-let status_text = function
+let status_label = function
   | Success -> "success"
-  | Failed msg -> msg
+  | Failed _ -> "failed"
   | Timeout -> "timed out"
   | Cancelled -> "cancelled"
 
-let invalid_process_result cmd (result : Backend_process.process_result) =
+let invalid_process_result _cmd (result : Backend_process.process_result) =
   Agentic_backend.Config_invalid
     (Printf.sprintf
-       "native config validation failed: %s\n\
-        status: %s\n\
-        stdout:\n\
-        %s\n\
-        stderr:\n\
-        %s"
-       (String.concat " " cmd)
-       (status_text result.status)
-       result.stdout
-       result.stderr)
+       "native config validation failed: claude --settings <settings> \
+        --init-only\nstatus: %s\nbackend output omitted"
+       (status_label result.status))
 
 let check_project_config ~sw ~env ~project_dir ~setup_result =
   match setup_result.Backend_config_writer.project_config_path with
@@ -193,9 +186,7 @@ let check_project_config ~sw ~env ~project_dir ~setup_result =
   | Some settings_path -> (
       if not (Sys.file_exists settings_path) then
         Agentic_backend.Config_invalid
-          (Printf.sprintf
-             "generated Claude Code settings file does not exist: %s"
-             settings_path)
+          "generated Claude Code settings file does not exist: <settings>"
       else if not (available ~sw ~env) then
         Agentic_backend.Config_check_unsupported
           "Claude Code CLI is not available on PATH; cannot run native \
@@ -215,11 +206,9 @@ let check_project_config ~sw ~env ~project_dir ~setup_result =
           match result.status with
           | Success -> Agentic_backend.Config_valid
           | Failed _ | Timeout | Cancelled -> invalid_process_result cmd result
-        with e ->
+        with _ ->
           Agentic_backend.Config_check_unsupported
-            (Printf.sprintf
-               "Claude Code native config validation could not run: %s"
-               (Printexc.to_string e)))
+            "Claude Code native config validation could not run")
 
 (* Write MCP server configuration to a JSON file *)
 let write_mcp_config = Backend_process.write_mcp_config
@@ -270,6 +259,20 @@ let parse_json_output json =
   in
   (result_text, cost)
 
+let canonical_session_id value =
+  let lowercase_hex = function '0' .. '9' | 'a' .. 'f' -> true | _ -> false in
+  let rec valid_from index =
+    if index = 36 then true
+    else
+      let valid_character =
+        match index with
+        | 8 | 13 | 18 | 23 -> value.[index] = '-'
+        | _ -> lowercase_hex value.[index]
+      in
+      valid_character && valid_from (index + 1)
+  in
+  if String.length value = 36 && valid_from 0 then Some value else None
+
 (* Extract session_id from Claude Code JSON stdout.
    Handles both single JSON (--output-format json) and JSONL
    (--output-format stream-json) by scanning each line. The session_id
@@ -278,7 +281,21 @@ let parse_session_id_from_stdout stdout =
   let try_line line =
     try
       let json = Yojson.Safe.from_string line in
-      Yojson.Safe.Util.(json |> member "session_id" |> to_string_option)
+      let open Yojson.Safe.Util in
+      let is_public_record =
+        match json |> member "type" |> to_string_option with
+        | Some "system" ->
+            json |> member "subtype" |> to_string_option = Some "init"
+        | Some "result" ->
+            json |> member "subtype" |> to_string_option = Some "success"
+            && json |> member "is_error" |> to_bool_option = Some false
+        | Some _ | None -> false
+      in
+      if is_public_record then
+        Option.bind
+          (json |> member "session_id" |> to_string_option)
+          canonical_session_id
+      else None
     with _ -> None
   in
   let lines = String.split_on_char '\n' stdout in
@@ -321,188 +338,258 @@ let strip_meta_schema (schema : Yojson.Safe.t) : Yojson.Safe.t =
   | `Assoc fields -> `Assoc (List.filter (fun (k, _) -> k <> "$schema") fields)
   | other -> other
 
-let build_command ?(streaming = false) ?(project_config_path = None)
-    ~mcp_config_path (spec : task_spec) =
-  let output_format = if streaming then "stream-json" else "json" in
-  let resume_args =
-    match spec.resume_session_id with
-    | Some sid -> ["--resume"; sid]
-    | None -> []
-  in
-  (* Read-only agents (validators) cannot compile, patch, or run tests.
-     They may still read files and search code.  Use --disallowedTools to
-     block write/execute tools while keeping read tools available.
+type backend_invocation = {
+  argv : string list;
+  stdin : string;
+  redacted_argv : string list;
+  redacted_stdin : string;
+}
 
-     Note: --disallowedTools must NOT be combined with --allowedTools — the
-     combination causes silent empty output in claude 2.1.70+.  Read-only
-     mode therefore uses only --disallowedTools; builder mode uses only
-     --allowedTools. *)
+let ( let* ) result f =
+  match result with Ok value -> f value | Error _ as error -> error
+
+let invocation_error message =
+  Error ("Claude Code invocation rejected: " ^ message)
+
+let canonical_resume_session_id value =
+  Option.is_some (canonical_session_id value)
+
+let validate_resume_session_id = function
+  | None -> Ok ()
+  | Some id when canonical_resume_session_id id -> Ok ()
+  | Some _ -> invocation_error "the resume session id is invalid"
+
+let validate_transport_request ~attachment_delivery ~attachment_paths
+    (spec : task_spec) =
+  let* () = validate_resume_session_id spec.resume_session_id in
+  let* () =
+    match (attachment_delivery, spec.resume_session_id) with
+    | Reuse_session_attachments, None ->
+        invocation_error "session attachment reuse requires a resumed session"
+    | (Upload_attachments | Reuse_session_attachments), (None | Some _) -> Ok ()
+  in
+  if spec.attachments <> [] || attachment_paths <> [] then
+    invocation_error
+      "media transport is not enabled without authenticated proof at the \
+       pinned baseline"
+  else if spec.web_access <> Web_disabled then
+    invocation_error "web transport is not enabled without authenticated proof"
+  else Ok ()
+
+let task_prompt (spec : task_spec) =
+  if String.length spec.instructions > 0 then
+    Printf.sprintf
+      "%s\n\n---\nProject Instructions:\n%s"
+      spec.prompt
+      spec.instructions
+  else spec.prompt
+
+(* Exact static provenance: @anthropic-ai/claude-agent-sdk 0.2.117 declares
+   parity with Claude Code 2.1.117 and constructs this SDKUserMessage envelope
+   for string prompts before writing one JSON value per stdin line. *)
+let stream_json_input spec =
+  `Assoc
+    [
+      ("type", `String "user");
+      ( "message",
+        `Assoc
+          [
+            ("role", `String "user");
+            ( "content",
+              `List
+                [
+                  `Assoc
+                    [("type", `String "text"); ("text", `String (task_prompt spec))];
+                ] );
+          ] );
+      ("parent_tool_use_id", `Null);
+      ("session_id", `String "");
+    ]
+  |> Yojson.Safe.to_string ~std:true
+  |> fun json -> json ^ "\n"
+
+let fixed_tools read_only =
+  if read_only then ["Read"; "Glob"; "Grep"]
+  else ["Read"; "Glob"; "Grep"; "Bash"; "Edit"; "Write"; "Task"]
+
+let build_invocation ?(attachment_paths = [])
+    ?(attachment_delivery = Upload_attachments)
+    ?(project_config_path = None) ~mcp_config_path (spec : task_spec) =
+  let* () =
+    validate_transport_request ~attachment_delivery ~attachment_paths spec
+  in
+  let tools = String.concat "," (fixed_tools spec.read_only) in
+  let resume_args, redacted_resume_args =
+    match spec.resume_session_id with
+    | Some id -> (["--resume"; id], ["--resume"; "<session-id>"])
+    | None -> ([], [])
+  in
+  (* [--tools] fixes the built-in availability set, so permissions loaded from
+     user settings cannot restore WebSearch/WebFetch. Keep the historical
+     read-only deny list as defense in depth and do not combine it with
+     [--allowedTools], which is known to produce empty output in 2.1.70+. *)
   let tool_args =
     if spec.read_only then
       [
         "--dangerously-skip-permissions";
+        "--tools";
+        tools;
         "--disallowedTools";
-        "Bash,Edit,Write,NotebookEdit";
+        "Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch";
       ]
     else
       [
         "--dangerously-skip-permissions";
+        "--tools";
+        tools;
         "--allowedTools";
-        "WebSearch,WebFetch,Read,Glob,Grep,Bash,Edit,Write,Task";
+        tools;
       ]
   in
   let base =
-    ["claude"; "--print"; "--output-format"; output_format]
-    @ (if streaming then ["--verbose"] else [])
-    @ resume_args @ tool_args
-    @ [
-        (* Skip project CLAUDE.md/AGENTS.md - only load user settings *)
-        "--setting-sources";
-        "user";
-        (* Read prompt from stdin *)
-        "-p";
-        "-";
-      ]
+    [
+      "claude";
+      "--print";
+      "--input-format";
+      "stream-json";
+      "--output-format";
+      "stream-json";
+      "--verbose";
+    ]
+    @ resume_args @ tool_args @ ["--setting-sources"; "user"]
   in
-  let mcp_args =
+  let redacted_base =
+    [
+      "claude";
+      "--print";
+      "--input-format";
+      "stream-json";
+      "--output-format";
+      "stream-json";
+      "--verbose";
+    ]
+    @ redacted_resume_args @ tool_args @ ["--setting-sources"; "user"]
+  in
+  let mcp_args, redacted_mcp_args =
     match mcp_config_path with
-    | Some path -> ["--mcp-config"; path]
-    | None -> []
+    | Some path ->
+        (["--mcp-config"; path; "--strict-mcp-config"],
+         ["--mcp-config"; "<mcp-config>"; "--strict-mcp-config"])
+    | None -> (["--strict-mcp-config"], ["--strict-mcp-config"])
   in
-  (* Épure-owned project settings.json passed via --settings (AC5 story #478).
-     The flag injects permissions/settings without relying on user-global
-     discovery; placed after --setting-sources so it can complement it. *)
-  let config_args =
+  let config_args, redacted_config_args =
     match project_config_path with
-    | Some path -> ["--settings"; path]
-    | None -> []
+    | Some path -> (["--settings"; path], ["--settings"; "<settings>"])
+    | None -> ([], [])
   in
-  let model_args =
-    match spec.model with Some m -> ["--model"; m] | None -> []
+  let model_args, redacted_model_args =
+    match spec.model with
+    | Some model -> (["--model"; model], ["--model"; "<model>"])
+    | None -> ([], [])
   in
   let max_turns_args =
     match spec.max_turns with
-    | Some n -> ["--max-turns"; string_of_int n]
+    | Some turns -> ["--max-turns"; string_of_int turns]
     | None -> []
   in
-  (* Native JSON Schema constraint — passed when spec.json_schema is set.
-     The CLI validates the schema at invocation; unsupported keywords cause a
-     non-zero exit which the enforcer surfaces as a native backend failure while
-     a schema is in force (D-5). *)
-  let schema_args =
+  let schema_args, redacted_schema_args =
     match spec.json_schema with
-    | Some s ->
-        ["--json-schema"; Yojson.Safe.to_string ~std:true (strip_meta_schema s)]
-    | None -> []
+    | Some schema ->
+        ( [
+            "--json-schema";
+            Yojson.Safe.to_string ~std:true (strip_meta_schema schema);
+          ],
+          ["--json-schema"; "<schema>"] )
+    | None -> ([], [])
   in
-  (* Combine prompt and instructions into a single task description *)
-  let full_prompt =
-    if String.length spec.instructions > 0 then
-      Printf.sprintf
-        "%s\n\n---\nProject Instructions:\n%s"
-        spec.prompt
-        spec.instructions
-    else spec.prompt
-  in
-  (* Return command args and prompt separately - prompt goes via stdin *)
-  ( base @ mcp_args @ config_args @ model_args @ max_turns_args @ schema_args,
-    full_prompt )
+  Ok
+    {
+      argv =
+        base @ mcp_args @ config_args @ model_args @ max_turns_args @ schema_args;
+      stdin = stream_json_input spec;
+      redacted_argv =
+        redacted_base @ redacted_mcp_args @ redacted_config_args
+        @ redacted_model_args @ max_turns_args @ redacted_schema_args;
+      redacted_stdin = "<stream-json-input:text-only>";
+    }
 
-(** Parse a stream-json event line and extract displayable content. Returns Some
-    text if there's something to display, None otherwise. *)
-let parse_stream_event line =
-  try
-    let json = Yojson.Safe.from_string line in
-    let open Yojson.Safe.Util in
-    let event_type = json |> member "type" |> to_string_option in
-    match event_type with
-    | Some "assistant" -> (
-        (* Assistant message with content blocks *)
-        let message = json |> member "message" in
-        let content = message |> member "content" |> to_list in
-        let texts =
-          List.filter_map
-            (fun block ->
-              let block_type = block |> member "type" |> to_string_option in
-              match block_type with
-              | Some "text" -> block |> member "text" |> to_string_option
-              | Some "tool_use" ->
-                  let name =
-                    block |> member "name" |> to_string_option
-                    |> Option.value ~default:"tool"
-                  in
-                  (* Extract file path from input for common tools *)
-                  let input = block |> member "input" in
-                  let arg =
-                    match name with
-                    | "Edit" | "Write" | "Read" ->
-                        input |> member "file_path" |> to_string_option
-                    | "Bash" ->
-                        input |> member "command" |> to_string_option
-                        |> Option.map (fun c ->
-                            if String.length c > 60 then
-                              String.sub c 0 57 ^ "..."
-                            else c)
-                    | "Glob" -> input |> member "pattern" |> to_string_option
-                    | "Grep" -> input |> member "pattern" |> to_string_option
-                    | _ -> None
-                  in
-                  let suffix =
-                    match arg with Some a -> " " ^ a | None -> ""
-                  in
-                  Some (Printf.sprintf "\xe2\x86\x92 %s%s" name suffix)
-              | _ -> None)
-            content
-        in
-        match texts with [] -> None | _ -> Some (String.concat "\n" texts))
-    | Some "user" -> (
-        (* User message — keep text blocks, skip tool_result blocks *)
-        let message = json |> member "message" in
-        let content = message |> member "content" |> to_list in
-        let texts =
-          List.filter_map
-            (fun block ->
-              let block_type = block |> member "type" |> to_string_option in
-              match block_type with
-              | Some "text" -> block |> member "text" |> to_string_option
-              | _ -> None)
-            content
-        in
-        match texts with [] -> None | _ -> Some (String.concat "\n" texts))
-    | Some "result" ->
-        (* Final result *)
-        let subtype = json |> member "subtype" |> to_string_option in
-        let is_error =
-          json |> member "is_error" |> to_bool_option
-          |> Option.value ~default:false
-        in
-        let status = if is_error then "error" else "success" in
+let build_command ?streaming:_ ?(project_config_path = None) ~mcp_config_path
+    spec =
+  match build_invocation ~project_config_path ~mcp_config_path spec with
+  | Ok invocation -> (invocation.argv, invocation.stdin)
+  | Error message -> invalid_arg message
+
+let safe_protocol_identifier value =
+  let safe_character = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' | '.' | ':' -> true
+    | _ -> false
+  in
+  if
+    value <> ""
+    && String.length value <= 128
+    && String.for_all safe_character value
+  then Some value
+  else None
+
+let nonnegative_int_member name json =
+  match Yojson.Safe.Util.member name json with
+  | `Int value when value >= 0 -> Some value
+  | _ -> None
+
+let nonnegative_float_member name json =
+  match Yojson.Safe.Util.member name json with
+  | `Float value when Float.is_finite value && value >= 0.0 -> Some value
+  | `Int value when value >= 0 -> Some (float_of_int value)
+  | _ -> None
+
+let public_usage json =
+  let usage = Yojson.Safe.Util.member "usage" json in
+  match usage with
+  | `Assoc _ ->
+      let tokens_input = nonnegative_int_member "input_tokens" usage in
+      let tokens_output = nonnegative_int_member "output_tokens" usage in
+      let cache_creation_input_tokens =
+        nonnegative_int_member "cache_creation_input_tokens" usage
+      in
+      let cache_read_input_tokens =
+        nonnegative_int_member "cache_read_input_tokens" usage
+      in
+      let cost_usd = nonnegative_float_member "total_cost_usd" json in
+      if
+        Option.is_none tokens_input
+        && Option.is_none tokens_output
+        && Option.is_none cache_creation_input_tokens
+        && Option.is_none cache_read_input_tokens
+        && Option.is_none cost_usd
+      then None
+      else
         Some
-          (Printf.sprintf
-             "[Build %s: %s]"
-             status
-             (Option.value subtype ~default:"done"))
-    | Some "system" -> (
-        let subtype = json |> member "subtype" |> to_string_option in
-        match subtype with
-        | Some "init" ->
-            (* Init event: extract session ID, skip raw JSON dump *)
-            let sid =
-              json |> member "session_id" |> to_string_option
-              |> Option.value ~default:"unknown"
-            in
-            let short_id =
-              if String.length sid > 12 then String.sub sid 0 12 ^ "..."
-              else sid
-            in
-            Some (Printf.sprintf "[Session: %s]" short_id)
-        | _ ->
-            (* Other system messages *)
-            let message = json |> member "message" in
-            let content = message |> member "content" |> to_string_option in
-            Option.map (fun c -> Printf.sprintf "[System: %s]" c) content)
-    | _ -> None
-  with _ -> None
+          {
+            tokens_input;
+            tokens_output;
+            cost_usd;
+            cache_creation_input_tokens;
+            cache_read_input_tokens;
+          }
+  | _ -> None
+
+let public_success_subtype json =
+  match Yojson.Safe.Util.(json |> member "subtype" |> to_string_option) with
+  | None | Some "success" -> true
+  | Some _ -> false
+
+let public_result_text json =
+  let open Yojson.Safe.Util in
+  match json |> member "type" |> to_string_option with
+  | Some "result"
+    when public_success_subtype json
+         && json |> member "is_error" |> to_bool_option = Some false
+    ->
+      let structured = json |> member "structured_output" in
+      if structured <> `Null then
+        Some (Yojson.Safe.to_string ~std:true structured)
+      else json |> member "result" |> to_string_option
+  | Some _ | None -> None
 
 let normalized_events_of_stream_line line =
   try
@@ -511,7 +598,9 @@ let normalized_events_of_stream_line line =
     match json |> member "type" |> to_string_option with
     | Some "assistant"
       when json |> member "message" |> member "role" |> to_string_option
-           = Some "assistant" ->
+           = Some "assistant"
+           && json |> member "error" = `Null
+           && json |> member "message" |> member "error" = `Null ->
         json |> member "message" |> member "content" |> to_list
         |> List.filter_map (fun block ->
             match block |> member "type" |> to_string_option with
@@ -519,45 +608,50 @@ let normalized_events_of_stream_line line =
                 Option.map
                   (fun text -> Task_event.Agent_text_delta text)
                   (block |> member "text" |> to_string_option)
-            | Some "tool_use" ->
-                Option.map
-                  (fun name ->
-                    let id = block |> member "id" |> to_string_option in
-                    Task_event.Tool_started {id; name})
-                  (block |> member "name" |> to_string_option)
-            | _ -> None)
+            | Some "tool_use" -> (
+                match
+                  ( Option.bind
+                      (block |> member "id" |> to_string_option)
+                      safe_protocol_identifier,
+                    Option.bind
+                      (block |> member "name" |> to_string_option)
+                      safe_protocol_identifier )
+                with
+                | Some id, Some name ->
+                    Some (Task_event.Tool_started {id = Some id; name})
+                | (None | Some _), (None | Some _) -> None)
+            | Some _ | None -> None)
     | Some "system"
       when json |> member "subtype" |> to_string_option = Some "init" ->
         Option.to_list
           (Option.map
              (fun id -> Task_event.Session_id id)
-             (json |> member "session_id" |> to_string_option))
+             (Option.bind
+                (json |> member "session_id" |> to_string_option)
+                canonical_session_id))
     | Some "result"
-      when json |> member "is_error" |> to_bool_option = Some false ->
+      when public_success_subtype json
+           && json |> member "is_error" |> to_bool_option = Some false ->
         let text =
-          let public_text =
-            let structured = json |> member "structured_output" in
-            if structured <> `Null then
-              Some (Yojson.Safe.to_string ~std:true structured)
-            else json |> member "result" |> to_string_option
-          in
           Option.to_list
             (Option.map
                (fun text -> Task_event.Agent_text_delta text)
-               public_text)
+               (public_result_text json))
         in
         let session =
           Option.to_list
             (Option.map
                (fun id -> Task_event.Session_id id)
-               (json |> member "session_id" |> to_string_option))
+               (Option.bind
+                  (json |> member "session_id" |> to_string_option)
+                  canonical_session_id))
         in
         let usage =
-          let _, cost = parse_json_output json in
-          Option.to_list (Option.map (fun cost -> Task_event.Token_usage cost) cost)
+          Option.to_list
+            (Option.map (fun cost -> Task_event.Token_usage cost) (public_usage json))
         in
         text @ session @ usage
-    | _ -> []
+    | Some _ | None -> []
   with _ -> []
 
 let normalized_events_of_stdout stdout =
@@ -565,13 +659,21 @@ let normalized_events_of_stdout stdout =
   |> List.concat_map normalized_events_of_stream_line
 
 let parse_public_stdout_text stdout =
-  let texts =
-    normalized_events_of_stdout stdout
-    |> List.filter_map (function
-         | Task_event.Agent_text_delta text -> Some text
-         | _ -> None)
+  let lines = String.split_on_char '\n' stdout in
+  let result_text =
+    List.rev lines
+    |> List.find_map (fun line ->
+        try public_result_text (Yojson.Safe.from_string line) with _ -> None)
   in
-  String.concat "" texts
+  match result_text with
+  | Some text -> text
+  | None ->
+      lines
+      |> List.concat_map normalized_events_of_stream_line
+      |> List.filter_map (function
+           | Task_event.Agent_text_delta text -> Some text
+           | _ -> None)
+      |> String.concat ""
 
 let parse_public_session_id stdout =
   normalized_events_of_stdout stdout
@@ -581,6 +683,18 @@ let parse_public_cost stdout =
   normalized_events_of_stdout stdout
   |> List.find_map (function Task_event.Token_usage cost -> Some cost | _ -> None)
 
+(** Parse one stream event into display-safe public text. *)
+let parse_stream_event line =
+  let rendered =
+    normalized_events_of_stream_line line
+    |> List.filter_map (function
+         | Task_event.Agent_text_delta text -> Some text
+         | Task_event.Tool_started {name; _} -> Some ("\xe2\x86\x92 " ^ name)
+         | Task_event.Session_id _ -> Some "[Session started]"
+         | _ -> None)
+  in
+  match rendered with [] -> None | _ -> Some (String.concat "\n" rendered)
+
 (* Extract response text from Claude Code JSON stdout *)
 let parse_stdout_text stdout =
   try
@@ -589,102 +703,114 @@ let parse_stdout_text stdout =
     text
   with _ -> stdout
 
-let run_task ~sw ~env ?context ?on_raw_line spec =
+let failed_result message =
+  make_task_result ~status:(Failed message) ~stderr:message ~exit_code:1 ()
+
+let requested_attachment_delivery ?context spec =
+  match context with
+  | None -> Ok Upload_attachments
+  | Some context -> (
+      match Task_execution_context.requested_delivery context with
+      | None -> Ok Upload_attachments
+      | Some delivery
+        when delivery.attachment_references = spec.attachments
+             && delivery.web_access_policy = spec.web_access ->
+          Ok delivery.attachment_delivery
+      | Some _ ->
+          invocation_error "the execution delivery context does not match the task")
+
+let run_invocation ~sw ~env ~spec ?context ?on_raw_line ?on_display invocation =
+  Diagnostics.debug "backend command: %s stdin=%s"
+    (String.concat " " invocation.redacted_argv)
+    invocation.redacted_stdin ;
+  let on_stdout line =
+    Option.iter (fun callback -> callback line) on_raw_line ;
+    Option.iter
+      (fun context ->
+        List.iter
+          (Task_execution_context.emit context)
+          (normalized_events_of_stream_line line))
+      context ;
+    Option.iter
+      (fun display -> Option.iter display (parse_stream_event line))
+      on_display
+  in
+  Option.iter Task_execution_context.claim_structured_text context ;
+  let result =
+    Backend_process.run_process
+      ~sw
+      ~env
+      ~cmd:invocation.argv
+      ~stdin_content:(Some invocation.stdin)
+      ~working_dir:spec.working_dir
+      ~timeout_seconds:(duration_to_seconds spec.timeout)
+      ?context
+      ~parse_cost:parse_public_cost
+      ~on_stdout
+      ()
+  in
+  let task_result =
+    {
+      status = result.status;
+      files_changed =
+        Backend_process.get_git_diff ~sw ~env ~working_dir:spec.working_dir;
+      report = None;
+      elapsed = result.elapsed;
+      cost = result.cost;
+      stdout = result.stdout;
+      agent_text = parse_public_stdout_text result.stdout;
+      stderr = result.stderr;
+      exit_code = result.exit_code;
+      session_id = parse_public_session_id result.stdout;
+    }
+  in
+  Option.iter Task_execution_context.mark_final_public_text context ;
+  task_result
+
+let run_task_common ~sw ~env ?context ?on_raw_line ?on_display spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
-  | None ->
-      (* Generate and write Épure-owned project settings.json; pass the path
-     explicitly via --settings so project config takes precedence over any
-     user-global discovery (AC5 story #478). *)
-      let project_config_path =
-        let setup =
-          Backend_config_writer.setup_artifacts
-            ~project_dir:spec.working_dir
-            ~force:false
-            (project_config_artifacts
-               ~managed_namespace:spec.managed_namespace
-               ~mcp_servers:[]
-               ~lsp_servers:spec.lsp_servers)
-        in
-        setup.project_config_path
-      in
-      let build_cmd ~mcp_config_path s =
-        build_command ~project_config_path ~mcp_config_path s
-      in
-      let on_stdout line =
-        Option.iter (fun callback -> callback line) on_raw_line ;
-        Option.iter
-          (fun context ->
-            List.iter
-              (Task_execution_context.emit context)
-              (normalized_events_of_stream_line line))
-          context
-      in
-      Option.iter Task_execution_context.claim_structured_text context ;
-      let result =
-        Backend_process.run_task_with
-          ~sw
-          ~env
-          ~spec
-          ~build_command:build_cmd
-          ?context
-          ~parse_cost:parse_public_cost
-          ~parse_stdout:parse_public_stdout_text
-          ~parse_session_id:parse_public_session_id
-          ~on_stdout
-          ()
-      in
-      Option.iter Task_execution_context.mark_final_public_text context ;
-      result
+  | None -> (
+      match requested_attachment_delivery ?context spec with
+      | Error message -> failed_result message
+      | Ok attachment_delivery -> (
+          match
+            validate_transport_request ~attachment_delivery ~attachment_paths:[]
+              spec
+          with
+          | Error message -> failed_result message
+          | Ok () ->
+              (* Sensitive inputs and caller-controlled resume values have been
+                 rejected before any config I/O. *)
+              let project_config_path =
+                let setup =
+                  Backend_config_writer.setup_artifacts
+                    ~project_dir:spec.working_dir
+                    ~force:false
+                    (project_config_artifacts
+                       ~managed_namespace:spec.managed_namespace
+                       ~mcp_servers:[]
+                       ~lsp_servers:spec.lsp_servers)
+                in
+                setup.project_config_path
+              in
+              let mcp_config_path = Backend_process.setup_mcp_config ~env spec in
+              Fun.protect
+                ~finally:(fun () ->
+                  Option.iter (Backend_process.cleanup_mcp_config ~env)
+                    mcp_config_path)
+                (fun () ->
+                  match
+                    build_invocation ~attachment_delivery ~project_config_path
+                      ~mcp_config_path spec
+                  with
+                  | Error message -> failed_result message
+                  | Ok invocation ->
+                      run_invocation ~sw ~env ~spec ?context ?on_raw_line
+                        ?on_display invocation)))
+
+let run_task ~sw ~env ?context ?on_raw_line spec =
+  run_task_common ~sw ~env ?context ?on_raw_line spec
 
 let run_task_streaming ~sw ~env ~on_stdout ?context ?on_raw_line spec =
-  match Backend_process.validate_task_namespace spec with
-  | Some result -> result
-  | None ->
-      (* Generate and write Épure-owned project settings.json (AC5 story #478). *)
-      let project_config_path =
-        let setup =
-          Backend_config_writer.setup_artifacts
-            ~project_dir:spec.working_dir
-            ~force:false
-            (project_config_artifacts
-               ~managed_namespace:spec.managed_namespace
-               ~mcp_servers:[]
-               ~lsp_servers:spec.lsp_servers)
-        in
-        setup.project_config_path
-      in
-      (* Wrap the callback to parse stream-json events and only show relevant
-         content.  Each raw line is forwarded to [on_raw_line] before parsing so
-         callers can capture the full backend-native event stream (Story #466). *)
-      let on_stdout_parsed line =
-        Option.iter (fun cb -> cb line) on_raw_line ;
-        Option.iter
-          (fun context ->
-            List.iter
-              (Task_execution_context.emit context)
-              (normalized_events_of_stream_line line))
-          context ;
-        match parse_stream_event line with
-        | Some text -> on_stdout text
-        | None -> ()
-      in
-      Option.iter Task_execution_context.claim_structured_text context ;
-      let build_cmd ~mcp_config_path s =
-        build_command ~streaming:true ~project_config_path ~mcp_config_path s
-      in
-      let result =
-        Backend_process.run_task_with
-          ~sw
-          ~env
-          ~spec
-          ~build_command:build_cmd
-          ?context
-          ~parse_cost:parse_public_cost
-          ~parse_stdout:parse_public_stdout_text
-          ~parse_session_id:parse_public_session_id
-          ~on_stdout:on_stdout_parsed
-          ()
-      in
-      Option.iter Task_execution_context.mark_final_public_text context ;
-      result
+  run_task_common ~sw ~env ?context ?on_raw_line ~on_display:on_stdout spec
