@@ -465,14 +465,6 @@ let find_substring_from text ~start needle =
   in
   if start < 0 || start > text_length then None else loop start
 
-let find_last_substring text needle =
-  let rec loop start selected =
-    match find_substring_from text ~start needle with
-    | None -> selected
-    | Some index -> loop (index + 1) (Some index)
-  in
-  loop 0 None
-
 let replace_all text ~needle ~replacement =
   let buffer = Buffer.create (String.length text) in
   let rec loop start =
@@ -491,34 +483,52 @@ let encode_known_schema_ats schema text =
   let encoded = encode_json_ats schema_json in
   replace_all text ~needle:schema_json ~replacement:encoded
 
+let encode_json_candidate schema_json =
+  let encoded = encode_json_ats schema_json in
+  try
+    let original = Yojson.Safe.from_string schema_json in
+    if Yojson.Safe.from_string encoded = original then Some encoded else None
+  with Yojson.Json_error _ -> None
+
 (* Non-native retries append one compact JSON schema between these pinned
    enforcer markers. At-signs inside that JSON must use JSON's Unicode escape,
    not Gemini's backslash-at path escape, which would make the schema invalid.
-   Selecting the last header handles an original prompt that mentions the same
-   heading. The parsed-value equality check keeps this transformation semantic. *)
+   Scan every delimiter-bounded candidate rather than selecting a last header:
+   validation errors are model-influenced and may contain the header verbatim.
+   Only candidates that parse as JSON and reparse identically after encoding are
+   transformed, so the real schema is handled independently of later text. *)
 let encode_retry_schema_ats text =
   let header = "## Required output schema\n\n" in
   let compliance =
     "\n\nYour previous response did not conform to the required JSON schema.\n"
   in
-  match find_last_substring text header with
-  | None -> text
-  | Some header_index ->
-      let schema_start = header_index + String.length header in
-      (match find_substring_from text ~start:schema_start compliance with
-      | None -> text
-      | Some schema_end ->
-          let schema_json =
-            String.sub text schema_start (schema_end - schema_start)
-          in
-          let encoded = encode_json_ats schema_json in
-          (try
-             let original = Yojson.Safe.from_string schema_json in
-             if Yojson.Safe.from_string encoded <> original then text
-             else
-               String.sub text 0 schema_start ^ encoded
-               ^ String.sub text schema_end (String.length text - schema_end)
-           with Yojson.Json_error _ -> text))
+  let rec candidates search_start selected =
+    match find_substring_from text ~start:search_start header with
+    | None -> List.rev selected
+    | Some header_index ->
+        let schema_start = header_index + String.length header in
+        (match find_substring_from text ~start:schema_start compliance with
+        | None -> List.rev selected
+        | Some schema_end ->
+            let schema_json =
+              String.sub text schema_start (schema_end - schema_start)
+            in
+            (match encode_json_candidate schema_json with
+            | Some encoded ->
+                candidates schema_end ((schema_start, schema_end, encoded) :: selected)
+            | None -> candidates (header_index + 1) selected))
+  in
+  let spans = candidates 0 [] in
+  let buffer = Buffer.create (String.length text) in
+  let rec render cursor = function
+    | [] -> Buffer.add_substring buffer text cursor (String.length text - cursor)
+    | (schema_start, schema_end, encoded) :: rest ->
+        Buffer.add_substring buffer text cursor (schema_start - cursor);
+        Buffer.add_string buffer encoded;
+        render schema_end rest
+  in
+  render 0 spans;
+  Buffer.contents buffer
 
 let neutralize_ats ?schema text =
   let text =
