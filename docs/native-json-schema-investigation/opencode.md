@@ -6,6 +6,7 @@
 **Outcome:** AC2(b) — documented non-support
 **Story:** #631
 **Date:** 2026-05-25
+**Media/web addendum:** CBL-07C / #29, 2026-09-03
 
 ---
 
@@ -154,3 +155,77 @@ https://github.com/sst/opencode/issues/2802 (accessed 2026-05-25).
 This issue discusses JSON schema surfaces in OpenCode and is the closest upstream
 thread at the investigated baseline while no dedicated `opencode run` output-schema
 issue exists yet.
+
+---
+
+## 7. CBL-07C Media and Web Transport Addendum
+
+This addendum does not change the native JSON Schema conclusion above. It records
+the separate content-dependent investigation of file delivery and per-invocation
+web policy at the pinned `1.14.20` baseline.
+
+### 7a. Reproducible evidence
+
+- Baseline release: OpenCode `v1.14.20`, source commit
+  `3175a3c61853e4666acb24fa435783826596665d`.
+- Probe: `tools/probe_opencode_media_web.py`.
+- Default authenticated model: `openai/gpt-5.4-mini` (overridable with
+  `CABAL_E2E_MODEL_OPENCODE`).
+- Baseline invocation used during the investigation:
+
+  ```sh
+  PATH="/tmp/cabal-cbl07c-opencode:$PATH" \
+    ./tools/probe_opencode_media_web.py
+  ```
+
+The probe first requires the exact version and verifies that `opencode run
+--help` still exposes `--format`, repeated `--file`, `--session`, `--model`, and
+`--agent`. It then creates deterministic PNG/JPEG fixtures, including filenames
+with spaces, and checks content rather than process exit alone.
+
+| Probe mode | Content-dependent assertion at `1.14.20` | Result |
+|------------|------------------------------------------|--------|
+| `structured-output` | Public completed text is the exact requested JSON and public token usage is present. | PASS |
+| `media-initial` | One repeated `--file` pair per PNG/JPEG; answer identifies blue PNG and red JPEG. | PASS |
+| `resume-upload` | `--session` plus a new green PNG preserves the public session and identifies green. | PASS |
+| `resume-reuse` | A later call without `--file` recalls the previously uploaded green image. | PASS |
+| `schema-retry-media` | An intentionally non-JSON first response is retried in a fresh session with both images uploaded again; the second response matches the schema. | PASS |
+| `web-disabled` | Fixed deny policy defeats hostile project allow rules; neither `websearch` nor `webfetch` completes and a local HTTP marker receives zero requests. | PASS |
+| `web-search` | Search is allowed, fetch denied; completed `websearch` lifecycle yields the official CLI documentation URL without `webfetch`. | PASS |
+| `web-search-fetch` | Both tools complete and the fetched official page yields its visible `CLI` heading. | PASS |
+
+The same matrix was also run successfully as a forward-compatibility advisory
+against installed OpenCode `1.18.25` (tag commit
+`cb7d8b2f5e44876ef98b661dc10590c915af3a9f`). This does not replace the pinned
+baseline evidence.
+
+`./tools/probe_opencode_media_web.py --self-test` exercises the public JSONL,
+fixed-policy, argv, timeout, and diagnostic-sanitization validators without
+credentials or network access.
+
+### 7b. Adapter contract resulting from the proof
+
+- Initial and fresh-retry media delivery uses repeated direct argv pairs
+  `--file <sealed-absolute-path>`. Paths come only from
+  `Task_execution_context.sealed_attachment_delivery`; workspace-relative
+  attachment references never enter argv.
+- Any attachment or enabled web request without matching central authorization
+  fails before project config I/O and before process spawn.
+- `Web_disabled`, `Web_search`, and `Web_search_and_fetch` map to fixed
+  `websearch`/`webfetch` allow-or-deny documents supplied through
+  `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT`. The adapter invokes
+  `env` directly (no shell), uses `--pure --agent build`, disables automatic
+  sharing/update/LSP download, and never interpolates host config fragments.
+- JSONL normalization admits only canonical session IDs, completed assistant
+  text, sanitized completed tool lifecycle, and bounded non-negative usage.
+  Reasoning, user text, error payloads, tool inputs/results, malformed records,
+  and raw-output fallback remain private.
+- The validate-and-retry path remains fresh-call only and hard-capped by
+  `Json_schema_enforcer`; every fresh attempt receives the same authorized
+  sealed image set.
+
+Although the probe proves upstream `--session` upload and attachment reuse,
+OpenCode's current Cabal descriptor advertises no session resume capability.
+Low-level resume/reuse requests therefore fail closed. CBL-07C deliberately
+does not alter shared capability descriptors, runtime snapshots, preflight,
+dispatch, or the native JSON Schema evidence recorded above.
