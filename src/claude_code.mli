@@ -14,8 +14,10 @@
     {b Configuration:}
     Claude Code is expected to be installed and accessible in the PATH.
     The backend uses Claude's newline-delimited stream JSON input/output
-    protocol for non-interactive output. Media and positive web transport remain
-    disabled until authenticated baseline evidence is available.
+    protocol for non-interactive output. Exit zero becomes task success only
+    when stdout ends in the documented [result]/[success]/[is_error=false]
+    terminal record. Media and positive web transport remain disabled until
+    authenticated baseline evidence is available.
 
     {b MCP Integration:}
     The backend generates a temporary MCP configuration file that points to
@@ -163,17 +165,19 @@ type backend_invocation = {
 }
 
 (** [build_invocation ... spec] constructs an attachment-free,
-    [Web_disabled] Claude stream-JSON invocation. It validates resume IDs and
-    emits them using the parity SDK's [--resume <uuid>] shape. Native
-    [--json-schema] composition is preserved.
+    [Web_disabled] Claude stream-JSON invocation. Here [Web_disabled] removes
+    Claude's native [WebSearch]/[WebFetch] tools; it is not a total network-egress
+    guarantee because caller-authorized Bash or MCP tools can have independent
+    network access. The invocation validates resume IDs and emits them using the
+    parity SDK's [--resume <uuid>] shape. Native [--json-schema] composition is
+    preserved.
 
     Attachment-bearing and positive-web requests are rejected with sanitized
-    errors. [attachment_paths] is accepted only to make this fail-closed
-    boundary explicit; paths are never opened or reflected. A future media
-    encoder must consume central sealed delivery and use the matching
-    preflight-validated attachment references as its size and MIME bounds. *)
+    errors. No raw attachment-path helper is exposed while media remains
+    dormant. A future media encoder must consume opaque central sealed delivery
+    and use the matching preflight-validated attachment references as its size
+    and MIME bounds. *)
 val build_invocation :
-  ?attachment_paths:string list ->
   ?attachment_delivery:Backend_types.attachment_delivery ->
   ?project_config_path:string option ->
   mcp_config_path:string option ->
@@ -208,8 +212,9 @@ val build_command :
   string list * string
 
 (** [parse_session_id_from_stdout stdout] extracts a canonical lowercase UUID
-    [session_id] from a public Claude [system/init] or successful [result]
-    record. Returns [None] for other shapes or invalid identifiers.
+    [session_id] from exact public Claude [system/init] and successful [result]
+    records. Every identifier present in those records must be canonical and
+    all identifiers must agree; otherwise resume is suppressed with [None].
 
     {pre}
     (none)
@@ -247,7 +252,7 @@ val parse_stdout_text : string -> string
 val parse_public_stdout_text : string -> string
 
 (** Strict session parser accepting only documented init or successful result
-    records. *)
+    records whose present identifiers are canonical and mutually consistent. *)
 val parse_public_session_id : string -> string option
 
 (** Strict usage parser accepting only successful result records. *)

@@ -49,6 +49,19 @@ let write_file path content =
     ~finally:(fun () -> close_out_noerr oc)
     (fun () -> output_string oc content)
 
+let read_file path =
+  let channel = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in_noerr channel)
+    (fun () -> really_input_string channel (in_channel_length channel))
+
+let with_env name value f =
+  let previous = Sys.getenv_opt name in
+  Unix.putenv name value ;
+  Fun.protect
+    ~finally:(fun () -> Unix.putenv name (Option.value ~default:"" previous))
+    f
+
 (* --- load_string tests ----------------------------------------------------- *)
 
 let test_valid_yaml () =
@@ -330,6 +343,149 @@ let test_builtin_adapters_registered () =
       | Some _ -> ())
     expected
 
+let rec flag_value flag = function
+  | candidate :: value :: _ when candidate = flag -> Some value
+  | _ :: rest -> flag_value flag rest
+  | [] -> None
+
+let test_builtin_claude_yaml_caps_native_web_tools () =
+  let backends =
+    match Adapter_loader.embedded_backends () with
+    | Ok backends -> backends
+    | Error message -> Alcotest.fail message
+  in
+  let backend =
+    match
+      List.find_opt
+        (fun backend -> Agentic_backend.id backend = "claude-code")
+        backends
+    with
+    | Some backend -> backend
+    | None -> Alcotest.fail "embedded Claude YAML backend missing"
+  in
+  let config =
+    match Yaml_adapter.config_of backend with
+    | Some config -> config
+    | None -> Alcotest.fail "embedded Claude backend lost YAML config"
+  in
+  let argv =
+    String.split_on_char ' ' (String.trim config.invocation_command)
+    |> List.filter (fun value -> value <> "")
+  in
+  let fixed_native_tools = "Read,Glob,Grep,Bash,Edit,Write,Task" in
+  Alcotest.(check (option string))
+    "--tools is the global-config-proof availability ceiling"
+    (Some fixed_native_tools)
+    (flag_value "--tools" argv) ;
+  Alcotest.(check (option string))
+    "allowed tools cannot widen the native ceiling"
+    (Some fixed_native_tools)
+    (flag_value "--allowedTools" argv) ;
+  Alcotest.(check (option string))
+    "project settings are not a setting source"
+    (Some "user")
+    (flag_value "--setting-sources" argv) ;
+  Alcotest.(check bool)
+    "unrelated MCP discovery is disabled" true
+    (List.mem "--strict-mcp-config" argv) ;
+  Alcotest.(check bool)
+    "native WebSearch is unavailable" false
+    (List.exists
+       (fun value -> List.mem "WebSearch" (String.split_on_char ',' value))
+       argv) ;
+  Alcotest.(check bool)
+    "native WebFetch is unavailable" false
+    (List.exists
+       (fun value -> List.mem "WebFetch" (String.split_on_char ',' value))
+       argv) ;
+  Alcotest.(check bool)
+    "Bash remains available; native web policy is not a total-egress promise"
+    true
+    (String.split_on_char ',' fixed_native_tools |> List.mem "Bash")
+
+let test_extensible_claude_invocation_caps_config_web_tools () =
+  Process_test_helper.install_launcher () ;
+  with_temp_dir @@ fun root ->
+  let home = Filename.concat root "home" in
+  let working_dir = Filename.concat root "workspace" in
+  let bin_dir = Filename.concat root "bin" in
+  List.iter (fun path -> Unix.mkdir path 0o700) [home; working_dir; bin_dir] ;
+  let permissive_settings =
+    {|{"permissions":{"allow":["WebSearch","WebFetch"]}}|}
+  in
+  write_file
+    (Filename.concat home ".claude/settings.json")
+    permissive_settings ;
+  write_file
+    (Filename.concat working_dir ".claude/settings.json")
+    permissive_settings ;
+  let args_path = Filename.concat root "claude-args" in
+  let script =
+    String.concat ""
+      [
+        "#!/bin/sh\nset -eu\n";
+        Printf.sprintf
+          "for arg in \"$@\"; do printf '%%s\\n' \"$arg\"; done > %s\n"
+          (Filename.quote args_path);
+        "cat >/dev/null\n";
+        "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}'\n";
+      ]
+  in
+  let claude = Filename.concat bin_dir "claude" in
+  write_file claude script ;
+  Unix.chmod claude 0o700 ;
+  let path =
+    match Sys.getenv_opt "PATH" with
+    | Some current when current <> "" -> bin_dir ^ ":" ^ current
+    | Some _ | None -> bin_dir
+  in
+  with_env "HOME" home @@ fun () ->
+  with_env "PATH" path @@ fun () ->
+  Registry.clear () ;
+  (match
+     Runtime_bootstrap.register_runtime ~project_dir:working_dir
+       ~profile:Runtime_bootstrap.Extensible ()
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
+  let backend =
+    match Registry.get "claude-code" with
+    | Some backend -> backend
+    | None -> Alcotest.fail "Extensible Claude backend missing"
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let spec = Backend_types.make_task_spec ~prompt:"test" ~working_dir () in
+  let result = Agentic_backend.run_task ~sw ~env backend spec in
+  Alcotest.(check bool)
+    "fake Extensible Claude succeeds" true
+    (result.Backend_types.status = Backend_types.Success) ;
+  let argv =
+    read_file args_path |> String.split_on_char '\n'
+    |> List.filter (fun value -> value <> "")
+  in
+  let fixed_native_tools = "Read,Glob,Grep,Bash,Edit,Write,Task" in
+  Alcotest.(check (option string))
+    "global permissions cannot widen --tools"
+    (Some fixed_native_tools)
+    (flag_value "--tools" argv) ;
+  Alcotest.(check (option string))
+    "project permissions cannot widen --allowedTools"
+    (Some fixed_native_tools)
+    (flag_value "--allowedTools" argv) ;
+  Alcotest.(check (option string))
+    "project settings remain excluded"
+    (Some "user")
+    (flag_value "--setting-sources" argv) ;
+  Alcotest.(check bool)
+    "native web tools absent despite permissive configs" false
+    (List.exists
+       (fun value ->
+         let tools = String.split_on_char ',' value in
+         List.mem "WebSearch" tools || List.mem "WebFetch" tools)
+       argv) ;
+  Registry.clear ()
+
 (* --- validate tests -------------------------------------------------------- *)
 
 let test_validate_ok () =
@@ -547,6 +703,14 @@ let () =
             "builtins registered"
             `Quick
             test_builtin_adapters_registered;
+          Alcotest.test_case
+            "built-in Claude caps native web tools"
+            `Quick
+            test_builtin_claude_yaml_caps_native_web_tools;
+          Alcotest.test_case
+            "Extensible Claude caps permissive config web tools"
+            `Quick
+            test_extensible_claude_invocation_caps_config_web_tools;
           Alcotest.test_case
             "project-local override"
             `Quick

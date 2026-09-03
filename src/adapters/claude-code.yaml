@@ -1,6 +1,6 @@
 name: claude-code
 display_name: Claude Code
-invocation_command: "claude --print --output-format json --dangerously-skip-permissions --allowedTools WebSearch,WebFetch,Read,Glob,Grep,Bash,Edit,Write,Task --setting-sources user -p -"
+invocation_command: "claude --print --output-format stream-json --verbose --dangerously-skip-permissions --tools Read,Glob,Grep,Bash,Edit,Write,Task --allowedTools Read,Glob,Grep,Bash,Edit,Write,Task --setting-sources user --strict-mcp-config"
 template_set: default
 timeout_seconds: 600.0
 models:

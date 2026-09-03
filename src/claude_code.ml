@@ -273,38 +273,64 @@ let canonical_session_id value =
   in
   if String.length value = 36 && valid_from 0 then Some value else None
 
+let exact_success_result_record json =
+  let open Yojson.Safe.Util in
+  json |> member "type" |> to_string_option = Some "result"
+  && json |> member "subtype" |> to_string_option = Some "success"
+  && json |> member "is_error" |> to_bool_option = Some false
+
+let exact_public_session_record json =
+  let open Yojson.Safe.Util in
+  match json |> member "type" |> to_string_option with
+  | Some "system" ->
+      json |> member "subtype" |> to_string_option = Some "init"
+  | Some "result" -> exact_success_result_record json
+  | Some _ | None -> false
+
+type session_observation =
+  | No_session
+  | Consistent_session of string
+  | Conflicting_sessions
+
+let observe_session_id observation id =
+  match observation with
+  | No_session -> Consistent_session id
+  | Consistent_session existing when existing = id -> observation
+  | Consistent_session _ | Conflicting_sessions -> Conflicting_sessions
+
+let session_observation_of_records records =
+  List.fold_left
+    (fun observation json ->
+      if exact_public_session_record json then
+        match Yojson.Safe.Util.member "session_id" json with
+        | `Null -> observation
+        | `String value -> (
+            match canonical_session_id value with
+            | Some id -> observe_session_id observation id
+            | None -> Conflicting_sessions)
+        | _ -> Conflicting_sessions
+      else observation)
+    No_session records
+
+let lenient_public_records stdout =
+  String.split_on_char '\n' stdout
+  |> List.filter_map (fun line ->
+      if String.trim line = "" then None
+      else
+        try
+          match Yojson.Safe.from_string line with
+          | `Assoc _ as json -> Some json
+          | _ -> None
+        with _ -> None)
+
 (* Extract session_id from Claude Code JSON stdout.
    Handles both single JSON (--output-format json) and JSONL
    (--output-format stream-json) by scanning each line. The session_id
    typically appears in the first "init" event. *)
 let parse_session_id_from_stdout stdout =
-  let try_line line =
-    try
-      let json = Yojson.Safe.from_string line in
-      let open Yojson.Safe.Util in
-      let is_public_record =
-        match json |> member "type" |> to_string_option with
-        | Some "system" ->
-            json |> member "subtype" |> to_string_option = Some "init"
-        | Some "result" ->
-            json |> member "subtype" |> to_string_option = Some "success"
-            && json |> member "is_error" |> to_bool_option = Some false
-        | Some _ | None -> false
-      in
-      if is_public_record then
-        Option.bind
-          (json |> member "session_id" |> to_string_option)
-          canonical_session_id
-      else None
-    with _ -> None
-  in
-  let lines = String.split_on_char '\n' stdout in
-  let rec find = function
-    | [] -> None
-    | line :: rest -> (
-        match try_line line with Some _ as sid -> sid | None -> find rest)
-  in
-  find lines
+  match session_observation_of_records (lenient_public_records stdout) with
+  | Consistent_session id -> Some id
+  | No_session | Conflicting_sessions -> None
 
 (* Get list of changed files via git diff *)
 let get_git_diff = Backend_process.get_git_diff
@@ -359,8 +385,7 @@ let validate_resume_session_id = function
   | Some id when canonical_resume_session_id id -> Ok ()
   | Some _ -> invocation_error "the resume session id is invalid"
 
-let validate_transport_request ~attachment_delivery ~attachment_paths
-    (spec : task_spec) =
+let validate_transport_request ~attachment_delivery (spec : task_spec) =
   let* () = validate_resume_session_id spec.resume_session_id in
   let* () =
     match (attachment_delivery, spec.resume_session_id) with
@@ -368,7 +393,7 @@ let validate_transport_request ~attachment_delivery ~attachment_paths
         invocation_error "session attachment reuse requires a resumed session"
     | (Upload_attachments | Reuse_session_attachments), (None | Some _) -> Ok ()
   in
-  if spec.attachments <> [] || attachment_paths <> [] then
+  if spec.attachments <> [] then
     invocation_error
       "media transport is not enabled without authenticated proof at the \
        pinned baseline"
@@ -412,12 +437,9 @@ let fixed_tools read_only =
   if read_only then ["Read"; "Glob"; "Grep"]
   else ["Read"; "Glob"; "Grep"; "Bash"; "Edit"; "Write"; "Task"]
 
-let build_invocation ?(attachment_paths = [])
-    ?(attachment_delivery = Upload_attachments)
+let build_invocation ?(attachment_delivery = Upload_attachments)
     ?(project_config_path = None) ~mcp_config_path (spec : task_spec) =
-  let* () =
-    validate_transport_request ~attachment_delivery ~attachment_paths spec
-  in
+  let* () = validate_transport_request ~attachment_delivery spec in
   let tools = String.concat "," (fixed_tools spec.read_only) in
   let resume_args, redacted_resume_args =
     match spec.resume_session_id with
@@ -575,8 +597,8 @@ let public_usage json =
 
 let public_success_subtype json =
   match Yojson.Safe.Util.(json |> member "subtype" |> to_string_option) with
-  | None | Some "success" -> true
-  | Some _ -> false
+  | Some "success" -> true
+  | None | Some _ -> false
 
 let public_result_text json =
   let open Yojson.Safe.Util in
@@ -590,6 +612,63 @@ let public_result_text json =
         Some (Yojson.Safe.to_string ~std:true structured)
       else json |> member "result" |> to_string_option
   | Some _ | None -> None
+
+let protocol_failure_message =
+  "Claude Code protocol failure: missing or invalid terminal result"
+
+let session_conflict_message =
+  "Claude Code protocol failure: invalid or conflicting session identifiers"
+
+let strict_stream_records stdout =
+  let rec parse parsed = function
+    | [] -> Ok (List.rev parsed)
+    | line :: rest when String.trim line = "" -> parse parsed rest
+    | line :: rest -> (
+        try
+          match Yojson.Safe.from_string line with
+          | `Assoc _ as json -> parse (json :: parsed) rest
+          | _ -> Error protocol_failure_message
+        with _ -> Error protocol_failure_message)
+  in
+  parse [] (String.split_on_char '\n' stdout)
+
+let terminal_result_of_records records =
+  let result_count =
+    List.fold_left
+      (fun count json ->
+        if
+          Yojson.Safe.Util.(json |> member "type" |> to_string_option)
+          = Some "result"
+        then count + 1
+        else count)
+      0 records
+  in
+  match List.rev records with
+  | terminal :: _
+    when result_count = 1
+         && exact_success_result_record terminal
+         && Option.is_some (public_result_text terminal) ->
+      Ok terminal
+  | [] | _ -> Error protocol_failure_message
+
+type verified_terminal = {
+  text : string;
+  session_id : string option;
+  cost : cost option;
+}
+
+let verify_terminal_stdout stdout =
+  let* records = strict_stream_records stdout in
+  let* terminal = terminal_result_of_records records in
+  let* session_id =
+    match session_observation_of_records records with
+    | No_session -> Ok None
+    | Consistent_session id -> Ok (Some id)
+    | Conflicting_sessions -> Error session_conflict_message
+  in
+  match public_result_text terminal with
+  | Some text -> Ok {text; session_id; cost = public_usage terminal}
+  | None -> Error protocol_failure_message
 
 let normalized_events_of_stream_line line =
   try
@@ -639,12 +718,14 @@ let normalized_events_of_stream_line line =
                (public_result_text json))
         in
         let session =
-          Option.to_list
-            (Option.map
-               (fun id -> Task_event.Session_id id)
-               (Option.bind
-                  (json |> member "session_id" |> to_string_option)
-                  canonical_session_id))
+          if exact_success_result_record json then
+            Option.to_list
+              (Option.map
+                 (fun id -> Task_event.Session_id id)
+                 (Option.bind
+                    (json |> member "session_id" |> to_string_option)
+                    canonical_session_id))
+          else []
         in
         let usage =
           Option.to_list
@@ -676,24 +757,27 @@ let parse_public_stdout_text stdout =
       |> String.concat ""
 
 let parse_public_session_id stdout =
-  normalized_events_of_stdout stdout
-  |> List.find_map (function Task_event.Session_id id -> Some id | _ -> None)
+  parse_session_id_from_stdout stdout
 
 let parse_public_cost stdout =
   normalized_events_of_stdout stdout
   |> List.find_map (function Task_event.Token_usage cost -> Some cost | _ -> None)
 
-(** Parse one stream event into display-safe public text. *)
-let parse_stream_event line =
+let display_text_of_events events =
   let rendered =
-    normalized_events_of_stream_line line
-    |> List.filter_map (function
+    List.filter_map
+      (function
          | Task_event.Agent_text_delta text -> Some text
          | Task_event.Tool_started {name; _} -> Some ("\xe2\x86\x92 " ^ name)
          | Task_event.Session_id _ -> Some "[Session started]"
          | _ -> None)
+      events
   in
   match rendered with [] -> None | _ -> Some (String.concat "\n" rendered)
+
+(** Parse one stream event into display-safe public text. *)
+let parse_stream_event line =
+  display_text_of_events (normalized_events_of_stream_line line)
 
 (* Extract response text from Claude Code JSON stdout *)
 let parse_stdout_text stdout =
@@ -719,20 +803,41 @@ let requested_attachment_delivery ?context spec =
       | Some _ ->
           invocation_error "the execution delivery context does not match the task")
 
+let stream_events_before_terminal line =
+  let is_result =
+    try
+      Yojson.Safe.Util.(
+        Yojson.Safe.from_string line |> member "type" |> to_string_option)
+      = Some "result"
+    with _ -> false
+  in
+  if is_result then []
+  else
+    normalized_events_of_stream_line line
+    |> List.filter (function
+         | Task_event.Session_id _ -> false
+         | Task_event.Agent_text_delta "" -> false
+         | _ -> true)
+
 let run_invocation ~sw ~env ~spec ?context ?on_raw_line ?on_display invocation =
   Diagnostics.debug "backend command: %s stdin=%s"
     (String.concat " " invocation.redacted_argv)
     invocation.redacted_stdin ;
+  let assistant_text_streamed = ref false in
   let on_stdout line =
     Option.iter (fun callback -> callback line) on_raw_line ;
+    let events = stream_events_before_terminal line in
+    if
+      List.exists
+        (function Task_event.Agent_text_delta _ -> true | _ -> false)
+        events
+    then assistant_text_streamed := true ;
     Option.iter
       (fun context ->
-        List.iter
-          (Task_execution_context.emit context)
-          (normalized_events_of_stream_line line))
+        List.iter (Task_execution_context.emit context) events)
       context ;
     Option.iter
-      (fun display -> Option.iter display (parse_stream_event line))
+      (fun display -> Option.iter display (display_text_of_events events))
       on_display
   in
   Option.iter Task_execution_context.claim_structured_text context ;
@@ -745,26 +850,57 @@ let run_invocation ~sw ~env ~spec ?context ?on_raw_line ?on_display invocation =
       ~working_dir:spec.working_dir
       ~timeout_seconds:(duration_to_seconds spec.timeout)
       ?context
-      ~parse_cost:parse_public_cost
       ~on_stdout
       ()
   in
+  let status, stderr, terminal =
+    match result.status with
+    | Success -> (
+        match verify_terminal_stdout result.stdout with
+        | Ok terminal -> (Success, result.stderr, Some terminal)
+        | Error message -> (Failed message, message, None))
+    | (Failed _ | Timeout | Cancelled) as status ->
+        (status, result.stderr, None)
+  in
   let task_result =
     {
-      status = result.status;
+      status;
       files_changed =
         Backend_process.get_git_diff ~sw ~env ~working_dir:spec.working_dir;
       report = None;
       elapsed = result.elapsed;
-      cost = result.cost;
+      cost = Option.bind terminal (fun terminal -> terminal.cost);
       stdout = result.stdout;
-      agent_text = parse_public_stdout_text result.stdout;
-      stderr = result.stderr;
+      agent_text =
+        Option.value ~default:"" (Option.map (fun terminal -> terminal.text) terminal);
+      stderr;
       exit_code = result.exit_code;
-      session_id = parse_public_session_id result.stdout;
+      session_id = Option.bind terminal (fun terminal -> terminal.session_id);
     }
   in
-  Option.iter Task_execution_context.mark_final_public_text context ;
+  Option.iter
+    (fun terminal ->
+      if not !assistant_text_streamed && terminal.text <> "" then begin
+        Option.iter
+          (fun context ->
+            Task_execution_context.emit context
+              (Task_event.Agent_text_delta terminal.text))
+          context ;
+        Option.iter (fun display -> display terminal.text) on_display
+      end ;
+      Option.iter
+        (fun context ->
+          Option.iter
+            (fun id ->
+              Task_execution_context.emit context (Task_event.Session_id id))
+            terminal.session_id ;
+          Option.iter
+            (fun cost ->
+              Task_execution_context.emit context (Task_event.Token_usage cost))
+            terminal.cost ;
+          Task_execution_context.mark_final_public_text context)
+        context)
+    terminal ;
   task_result
 
 let run_task_common ~sw ~env ?context ?on_raw_line ?on_display spec =
@@ -774,10 +910,7 @@ let run_task_common ~sw ~env ?context ?on_raw_line ?on_display spec =
       match requested_attachment_delivery ?context spec with
       | Error message -> failed_result message
       | Ok attachment_delivery -> (
-          match
-            validate_transport_request ~attachment_delivery ~attachment_paths:[]
-              spec
-          with
+          match validate_transport_request ~attachment_delivery spec with
           | Error message -> failed_result message
           | Ok () ->
               (* Sensitive inputs and caller-controlled resume values have been
@@ -797,8 +930,9 @@ let run_task_common ~sw ~env ?context ?on_raw_line ?on_display spec =
               let mcp_config_path = Backend_process.setup_mcp_config ~env spec in
               Fun.protect
                 ~finally:(fun () ->
-                  Option.iter (Backend_process.cleanup_mcp_config ~env)
-                    mcp_config_path)
+                  Eio.Cancel.protect (fun () ->
+                      Option.iter (Backend_process.cleanup_mcp_config ~env)
+                        mcp_config_path))
                 (fun () ->
                   match
                     build_invocation ~attachment_delivery ~project_config_path

@@ -25,6 +25,7 @@ PROBE_TIMEOUT_SECONDS = 180
 VERSION_TIMEOUT_SECONDS = 15
 OFFICIAL_PAGE = "https://code.claude.com/docs/en/overview"
 OFFICIAL_PAGE_H1 = "Claude Code overview"
+SEARCH_QUERY = "site:code.claude.com/docs/en/overview Claude Code overview"
 SESSION_ID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
@@ -241,9 +242,10 @@ def require_version() -> None:
 
 def parse_public_output(stdout: str) -> tuple[str, dict[str, Any], set[str], set[str]]:
     session_ids: set[str] = set()
-    final_result: dict[str, Any] | None = None
-    tool_names: set[str] = set()
+    tool_starts: dict[str, tuple[str, dict[str, Any]]] = {}
+    tool_finishes: set[str] = set()
     init_tools: set[str] = set()
+    events: list[dict[str, Any]] = []
 
     for line in stdout.splitlines():
         if not line.strip():
@@ -254,14 +256,19 @@ def parse_public_output(stdout: str) -> tuple[str, dict[str, Any], set[str], set
             raise ProbeFailure("Claude emitted malformed public JSONL") from error
         if not isinstance(event, dict):
             raise ProbeFailure("Claude emitted malformed public JSONL")
+        events.append(event)
 
         if event.get("type") == "system" and event.get("subtype") == "init":
             candidate = event.get("session_id")
-            if isinstance(candidate, str) and SESSION_ID.fullmatch(candidate):
-                session_ids.add(candidate)
+            if not isinstance(candidate, str) or not SESSION_ID.fullmatch(candidate):
+                raise ProbeFailure("Claude emitted an invalid public session UUID")
+            session_ids.add(candidate)
             tools = event.get("tools")
-            if isinstance(tools, list):
-                init_tools.update(tool for tool in tools if isinstance(tool, str))
+            if not isinstance(tools, list) or not all(
+                isinstance(tool, str) for tool in tools
+            ):
+                raise ProbeFailure("Claude emitted malformed public init tools")
+            init_tools.update(tools)
 
         if event.get("type") == "assistant":
             message = event.get("message")
@@ -275,26 +282,67 @@ def parse_public_output(stdout: str) -> tuple[str, dict[str, Any], set[str], set
                     continue
                 name = block.get("name")
                 tool_id = block.get("id")
+                tool_input = block.get("input")
                 if (
-                    isinstance(name, str)
-                    and name in {"WebSearch", "WebFetch"}
-                    and isinstance(tool_id, str)
-                    and SAFE_TOOL_ID.fullmatch(tool_id)
+                    not isinstance(name, str)
+                    or name not in {"WebSearch", "WebFetch"}
+                    or not isinstance(tool_id, str)
+                    or not SAFE_TOOL_ID.fullmatch(tool_id)
+                    or not isinstance(tool_input, dict)
+                    or tool_id in tool_starts
                 ):
-                    tool_names.add(name)
+                    raise ProbeFailure("Claude emitted an unexpected public tool use")
+                if name == "WebSearch" and tool_input.get("query") != SEARCH_QUERY:
+                    raise ProbeFailure("Claude WebSearch used an unexpected query")
+                if name == "WebFetch" and not official_overview_url(
+                    tool_input.get("url")
+                ):
+                    raise ProbeFailure("Claude WebFetch used an unrelated URL")
+                tool_starts[tool_id] = (name, tool_input)
 
-        if event.get("type") == "result" and event.get("is_error") is False:
-            candidate = event.get("session_id")
-            if isinstance(candidate, str) and SESSION_ID.fullmatch(candidate):
-                session_ids.add(candidate)
-            structured = event.get("structured_output")
-            if isinstance(structured, dict):
-                final_result = structured
+        if event.get("type") == "user":
+            message = event.get("message")
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_id = block.get("tool_use_id")
+                if (
+                    not isinstance(tool_id, str)
+                    or not SAFE_TOOL_ID.fullmatch(tool_id)
+                    or tool_id not in tool_starts
+                    or tool_id in tool_finishes
+                ):
+                    raise ProbeFailure("Claude emitted an unexpected public tool result")
+                tool_finishes.add(tool_id)
+
+    result_count = sum(event.get("type") == "result" for event in events)
+    terminal = events[-1] if events else None
+    if (
+        result_count != 1
+        or terminal is None
+        or terminal.get("type") != "result"
+        or terminal.get("subtype") != "success"
+        or terminal.get("is_error") is not False
+    ):
+        raise ProbeFailure("Claude emitted no exact successful terminal result")
+    candidate = terminal.get("session_id")
+    if not isinstance(candidate, str) or not SESSION_ID.fullmatch(candidate):
+        raise ProbeFailure("Claude emitted an invalid public session UUID")
+    session_ids.add(candidate)
+    final_result = terminal.get("structured_output")
 
     if len(session_ids) != 1:
         raise ProbeFailure("Claude emitted no unique canonical public session UUID")
-    if final_result is None:
+    if not isinstance(final_result, dict):
         raise ProbeFailure("Claude emitted no structured public answer")
+    if set(tool_starts) != tool_finishes:
+        raise ProbeFailure("Claude public tool start/finish records do not match")
+    tool_names = {name for name, _ in tool_starts.values()}
     return next(iter(session_ids)), final_result, tool_names, init_tools
 
 
@@ -449,8 +497,8 @@ def run_modes(workspace: Path, inputs: Path, selected_modes: tuple[str, ...]) ->
             run_probe(
                 workspace,
                 mode,
-                "Use WebSearch with the query 'site:code.claude.com/docs/en/overview "
-                "Claude Code overview'. Do not open or fetch a result. Return only the bare "
+                f"Use WebSearch with the query '{SEARCH_QUERY}'. "
+                "Do not open or fetch a result. Return only the bare "
                 "official overview HTTPS URL in the required field; do not answer from memory.",
                 (),
                 {"official_result_url": OFFICIAL_PAGE},
@@ -478,6 +526,12 @@ def jsonl_fixture(
         {"type": "system", "subtype": "init", "session_id": sid, "tools": list(tools_available)}
     ]
     for index, name in enumerate(tools_used):
+        if name == "WebSearch":
+            tool_input = {"query": SEARCH_QUERY}
+        elif name == "WebFetch":
+            tool_input = {"url": OFFICIAL_PAGE}
+        else:
+            tool_input = {"private": "/never/report"}
         events.append(
             {
                 "type": "assistant",
@@ -488,7 +542,22 @@ def jsonl_fixture(
                             "type": "tool_use",
                             "id": f"toolu_{index}",
                             "name": name,
-                            "input": {"private": "/never/report"},
+                            "input": tool_input,
+                        }
+                    ],
+                },
+            }
+        )
+        events.append(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"toolu_{index}",
+                            "content": "/private/tool-result-never-report",
                         }
                     ],
                 },
@@ -578,6 +647,76 @@ def run_self_test() -> None:
         pass
     else:
         raise ProbeFailure("offline exact-tool-set self-test failed")
+
+    def expect_public_parse_failure(stdout: str) -> None:
+        try:
+            parse_public_output(stdout)
+        except ProbeFailure:
+            pass
+        else:
+            raise ProbeFailure("offline public tool-trace self-test failed")
+
+    valid_search = jsonl_fixture(
+        expectations["web-search"], ("WebSearch",), ("WebSearch",)
+    )
+    mixed_session_events = [json.loads(line) for line in valid_search.splitlines()]
+    mixed_session_events[0]["session_id"] = "not-canonical"
+    expect_public_parse_failure(
+        "\n".join(
+            json.dumps(event, separators=(",", ":"))
+            for event in mixed_session_events
+        )
+    )
+
+    out_of_order_events = [json.loads(line) for line in valid_search.splitlines()]
+    out_of_order_events[1], out_of_order_events[2] = (
+        out_of_order_events[2],
+        out_of_order_events[1],
+    )
+    expect_public_parse_failure(
+        "\n".join(
+            json.dumps(event, separators=(",", ":"))
+            for event in out_of_order_events
+        )
+    )
+
+    expect_public_parse_failure(
+        valid_search
+        + "\n"
+        + json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": "/private/never-report",
+            },
+            separators=(",", ":"),
+        )
+    )
+
+    unexpected_tool = jsonl_fixture(
+        expectations["web-search"], ("WebSearch",), ("WebSearch", "Bash")
+    )
+    expect_public_parse_failure(unexpected_tool)
+
+    wrong_query = jsonl_fixture(
+        expectations["web-search"], ("WebSearch",), ("WebSearch",)
+    ).replace(SEARCH_QUERY, "unrelated private query")
+    expect_public_parse_failure(wrong_query)
+
+    unrelated_fetch = jsonl_fixture(
+        expectations["web-live"], ("WebSearch", "WebFetch"), ("WebSearch", "WebFetch")
+    ).replace(OFFICIAL_PAGE, "https://example.invalid/private")
+    expect_public_parse_failure(unrelated_fetch)
+
+    unfinished_tool = "\n".join(
+        line
+        for line in jsonl_fixture(
+            expectations["web-search"], ("WebSearch",), ("WebSearch",)
+        ).splitlines()
+        if '"type":"tool_result"' not in line
+    )
+    expect_public_parse_failure(unfinished_tool)
 
     disabled_argv = probe_argv("web-disabled", settings=Path("private-settings"))
     search_argv = probe_argv("web-search")

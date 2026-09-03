@@ -9,6 +9,8 @@
 
 open Cabal
 
+let () = Process_test_helper.run_if_requested ()
+
 (** {1 Module Identity Tests} *)
 
 let test_id () = Alcotest.(check string) "id" "claude-code" Claude_code.id
@@ -312,12 +314,11 @@ let command_spec ?(attachments = []) ?(web_access = Backend_types.Web_disabled)
     ~read_only
     ()
 
-let build_invocation ?attachment_paths
-    ?(attachment_delivery = Backend_types.Upload_attachments)
+let build_invocation ?(attachment_delivery = Backend_types.Upload_attachments)
     ?(project_config_path = None) ?(mcp_config_path = None) spec =
   match
-    Claude_code.build_invocation ?attachment_paths ~attachment_delivery
-      ~project_config_path ~mcp_config_path spec
+    Claude_code.build_invocation ~attachment_delivery ~project_config_path
+      ~mcp_config_path spec
   with
   | Ok invocation -> invocation
   | Error message -> Alcotest.fail message
@@ -471,9 +472,9 @@ let test_build_invocation_keeps_media_and_web_fail_closed () =
         Backend_types.Jpeg;
     ]
   in
-  let assert_rejected label ?(attachment_paths = []) spec =
+  let assert_rejected label spec =
     match
-      Claude_code.build_invocation ~attachment_paths
+      Claude_code.build_invocation
         ~attachment_delivery:Backend_types.Upload_attachments
         ~project_config_path:None ~mcp_config_path:None spec
     with
@@ -486,9 +487,7 @@ let test_build_invocation_keeps_media_and_web_fail_closed () =
               (contains_substring message private_value))
           ["front cover.png"; "back cover.jpg"; "/private/sealed image.png"]
   in
-  assert_rejected "media upload"
-    ~attachment_paths:["/private/sealed image.png"; "/private/sealed image.jpg"]
-    (command_spec ~attachments ()) ;
+  assert_rejected "media upload" (command_spec ~attachments ()) ;
   assert_rejected "media session reuse"
     (command_spec ~attachments ~resume_session_id:valid_session_id ()) ;
   assert_rejected "web search"
@@ -554,6 +553,426 @@ let write_executable path contents =
     ~finally:(fun () -> close_out_noerr channel)
     (fun () -> output_string channel contents) ;
   Unix.chmod path 0o700
+
+let read_file path =
+  let channel = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in_noerr channel)
+    (fun () -> really_input_string channel (in_channel_length channel))
+
+let read_lines path =
+  read_file path |> String.split_on_char '\n'
+  |> List.filter (fun line -> line <> "")
+
+type fake_claude = {
+  args_path : string;
+  stdin_path : string;
+  mcp_path_path : string;
+  mcp_present_path : string;
+  started_path : string;
+}
+
+let install_fake_claude ?(hang = false) directory output_lines =
+  let capture suffix = Filename.concat directory suffix in
+  let fake =
+    {
+      args_path = capture "claude-args";
+      stdin_path = capture "claude-stdin";
+      mcp_path_path = capture "claude-mcp-path";
+      mcp_present_path = capture "claude-mcp-present";
+      started_path = capture "claude-started";
+    }
+  in
+  let output =
+    output_lines
+    |> List.map (fun line ->
+        Printf.sprintf "printf '%%s\\n' %s\n" (Filename.quote line))
+    |> String.concat ""
+  in
+  let script =
+    String.concat ""
+      [
+        "#!/bin/sh\nset -eu\n";
+        Printf.sprintf
+          "for arg in \"$@\"; do printf '%%s\\n' \"$arg\"; done > %s\n"
+          (Filename.quote fake.args_path);
+        "previous=''\nfor arg in \"$@\"; do\n";
+        "  if [ \"$previous\" = '--mcp-config' ]; then\n";
+        Printf.sprintf "    printf '%%s' \"$arg\" > %s\n"
+          (Filename.quote fake.mcp_path_path);
+        Printf.sprintf
+          "    if [ -f \"$arg\" ]; then printf 'present' > %s; fi\n"
+          (Filename.quote fake.mcp_present_path);
+        "  fi\n  previous=\"$arg\"\ndone\n";
+        Printf.sprintf "printf 'started' > %s\n"
+          (Filename.quote fake.started_path);
+        Printf.sprintf "cat > %s\n" (Filename.quote fake.stdin_path);
+        (if hang then "sleep 30\n" else output);
+      ]
+  in
+  write_executable (Filename.concat directory "claude") script ;
+  fake
+
+let fake_mcp_server =
+  Backend_types.make_mcp_server_config ~name:"fake-mcp" ~command:"false" ()
+
+let protocol_failure_message =
+  "Claude Code protocol failure: missing or invalid terminal result"
+
+let session_conflict_message =
+  "Claude Code protocol failure: invalid or conflicting session identifiers"
+
+let alternate_session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+let successful_stream ?(session_id = valid_session_id) answer =
+  [
+    Printf.sprintf
+      {|{"type":"system","subtype":"init","session_id":"%s","tools":["Read"]}|}
+      session_id;
+    Printf.sprintf
+      {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":%s}]}}|}
+      (Yojson.Safe.to_string (`String answer));
+    Printf.sprintf
+      {|{"type":"result","subtype":"success","is_error":false,"result":%s,"session_id":"%s","usage":{"input_tokens":12,"output_tokens":3,"cache_creation_input_tokens":2,"cache_read_input_tokens":4},"total_cost_usd":0.125}|}
+      (Yojson.Safe.to_string (`String answer))
+      session_id;
+  ]
+
+let assert_protocol_failure label expected_message result =
+  (match result.Backend_types.status with
+  | Backend_types.Failed message ->
+      Alcotest.(check string) (label ^ " fixed failure") expected_message message
+  | Backend_types.Success -> Alcotest.fail (label ^ " unexpectedly succeeded")
+  | Backend_types.Timeout -> Alcotest.fail (label ^ " unexpectedly timed out")
+  | Backend_types.Cancelled -> Alcotest.fail (label ^ " unexpectedly cancelled")) ;
+  Alcotest.(check string)
+    (label ^ " no public final text") "" result.agent_text ;
+  Alcotest.(check (option string))
+    (label ^ " no resumable session") None result.session_id ;
+  Alcotest.(check bool) (label ^ " no cost") true (Option.is_none result.cost) ;
+  Alcotest.(check string)
+    (label ^ " sanitized stderr") expected_message result.stderr
+
+let test_run_task_fake_cli_success_stream_resume_and_cleanup () =
+  Process_test_helper.install_launcher () ;
+  with_temp_dir "fake-success" @@ fun temp_dir ->
+  let answer = "line one\nline two" in
+  let fake = install_fake_claude temp_dir (successful_stream answer) in
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let events = ref [] in
+  let sink =
+    Task_event.create_sink ~sw ~now:(fun () -> 0.0)
+      ~on_event:(fun event -> events := event :: !events) ()
+  in
+  let context =
+    Task_execution_context.create ~remaining_time:(fun () -> None) sink
+  in
+  let spec =
+    Backend_types.make_task_spec ~prompt:"private prompt"
+      ~instructions:"private instructions" ~working_dir:temp_dir
+      ~mcp_servers:[fake_mcp_server] ~resume_session_id:valid_session_id
+      ~timeout:3.0 ()
+  in
+  let displayed = ref [] in
+  let raw = ref [] in
+  let result =
+    Claude_code.run_task_streaming ~sw ~env
+      ~on_stdout:(fun text -> displayed := text :: !displayed)
+      ~on_raw_line:(fun line -> raw := line :: !raw)
+      ~context
+      spec
+  in
+  Task_event.emit_terminal sink Task_event.Succeeded ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  Alcotest.(check bool)
+    "exact terminal makes success" true (result.status = Backend_types.Success) ;
+  Alcotest.(check string) "terminal result text" answer result.agent_text ;
+  Alcotest.(check (list string))
+    "multiline assistant callback has no duplicate terminal answer"
+    [answer]
+    (List.rev !displayed) ;
+  Alcotest.(check int) "all raw JSONL lines forwarded" 3 (List.length !raw) ;
+  let public_text_events, session_events, usage_events =
+    List.fold_left
+      (fun (texts, sessions, usages) event ->
+        match event.Task_event.payload with
+        | Task_event.Agent_text_delta text -> (text :: texts, sessions, usages)
+        | Session_id id -> (texts, id :: sessions, usages)
+        | Token_usage _ -> (texts, sessions, usages + 1)
+        | _ -> (texts, sessions, usages))
+      ([], [], 0) (List.rev !events)
+  in
+  Alcotest.(check (list string))
+    "public callback has no duplicate terminal answer" [answer]
+    (List.rev public_text_events) ;
+  Alcotest.(check (list string))
+    "public callback receives one verified session" [valid_session_id]
+    (List.rev session_events) ;
+  Alcotest.(check int)
+    "public callback receives one verified usage" 1 usage_events ;
+  Alcotest.(check (option string))
+    "consistent session extracted" (Some valid_session_id) result.session_id ;
+  (match result.cost with
+  | Some cost ->
+      Alcotest.(check (option int)) "input cost" (Some 12) cost.tokens_input ;
+      Alcotest.(check (option int)) "output cost" (Some 3) cost.tokens_output ;
+      Alcotest.(check (option (float 0.0)))
+        "USD cost" (Some 0.125) cost.cost_usd
+  | None -> Alcotest.fail "expected terminal usage") ;
+  let args = read_lines fake.args_path in
+  Alcotest.(check (option string))
+    "resume flag/value" (Some valid_session_id)
+    (find_flag_value "--resume" args) ;
+  let mcp_path = read_file fake.mcp_path_path in
+  Alcotest.(check string)
+    "MCP config existed while Claude ran" "present"
+    (read_file fake.mcp_present_path) ;
+  Alcotest.(check bool)
+    "MCP config cleaned after success" false (Sys.file_exists mcp_path) ;
+  let expected_stdin =
+    (build_invocation ~mcp_config_path:(Some mcp_path) spec).stdin
+  in
+  Alcotest.(check string)
+    "one exact SDK user JSON record plus newline" expected_stdin
+    (read_file fake.stdin_path)
+
+let test_run_task_fake_cli_native_schema () =
+  Process_test_helper.install_launcher () ;
+  with_temp_dir "fake-schema" @@ fun temp_dir ->
+  let terminal =
+    {|{"type":"result","subtype":"success","is_error":false,"result":"schema answer","structured_output":{"answer":"ok"}}|}
+  in
+  let fake = install_fake_claude temp_dir [terminal] in
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let schema =
+    `Assoc
+      [
+        ("$schema", `String "https://json-schema.org/draft/2020-12/schema");
+        ("type", `String "object");
+      ]
+  in
+  let spec =
+    Backend_types.make_task_spec ~prompt:"schema prompt" ~working_dir:temp_dir
+      ~json_schema:schema ~timeout:3.0 ()
+  in
+  let result = Claude_code.run_task ~sw ~env spec in
+  Alcotest.(check bool)
+    "native schema exact terminal succeeds" true
+    (result.status = Backend_types.Success) ;
+  Alcotest.(check string)
+    "structured terminal answer" {|{"answer":"ok"}|} result.agent_text ;
+  Alcotest.(check (option string))
+    "schema argument"
+    (Some {|{"type":"object"}|})
+    (find_flag_value "--json-schema" (read_lines fake.args_path))
+
+let test_run_task_fake_cli_rejects_invalid_exit_zero_streams () =
+  Process_test_helper.install_launcher () ;
+  let schema = `Assoc [("type", `String "object")] in
+  let cases =
+    [
+      ( "missing terminal",
+        [
+          {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"assistant only"}]}}|};
+        ],
+        None );
+      ( "subtype-less terminal",
+        [{|{"type":"result","is_error":false,"result":"not exact"}|}],
+        None );
+      ( "missing is-error terminal",
+        [{|{"type":"result","subtype":"success","result":"not exact"}|}],
+        None );
+      ( "missing terminal output",
+        [{|{"type":"result","subtype":"success","is_error":false}|}],
+        None );
+      ( "malformed terminal",
+        [{|{"type":"result","subtype":"success"|}],
+        None );
+      ( "malformed stream",
+        [
+          "not-json-private-output";
+          {|{"type":"result","subtype":"success","is_error":false,"result":"tempting"}|};
+        ],
+        None );
+      ( "error terminal",
+        [
+          {|{"type":"result","subtype":"error_during_execution","is_error":true,"result":"private failure"}|};
+        ],
+        None );
+      ( "native schema assistant-only",
+        [
+          {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"schema-looking assistant only"}]}}|};
+        ],
+        Some schema );
+    ]
+  in
+  List.iter
+    (fun (label, lines, json_schema) ->
+      with_temp_dir ("fake-invalid-" ^ String.map (function ' ' -> '-' | c -> c) label)
+      @@ fun temp_dir ->
+      let fake = install_fake_claude temp_dir lines in
+      with_path_prefix temp_dir @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let spec =
+        Backend_types.make_task_spec ~prompt:"test" ~working_dir:temp_dir
+          ~mcp_servers:[fake_mcp_server] ?json_schema ~timeout:3.0 ()
+      in
+      assert_protocol_failure label protocol_failure_message
+        (Claude_code.run_task ~sw ~env spec) ;
+      let mcp_path = read_file fake.mcp_path_path in
+      Alcotest.(check bool)
+        (label ^ " cleans MCP config") false (Sys.file_exists mcp_path))
+    cases
+
+let test_session_ids_must_be_exact_and_consistent () =
+  let consistent =
+    String.concat "\n"
+      [
+        Printf.sprintf
+          {|{"type":"system","subtype":"init","session_id":"%s"}|}
+          valid_session_id;
+        Printf.sprintf
+          {|{"type":"user","session_id":"%s"}|}
+          alternate_session_id;
+        Printf.sprintf
+          {|{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"%s"}|}
+          valid_session_id;
+      ]
+  in
+  let conflicting =
+    String.concat "\n"
+      [
+        Printf.sprintf
+          {|{"type":"system","subtype":"init","session_id":"%s"}|}
+          valid_session_id;
+        Printf.sprintf
+          {|{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"%s"}|}
+          alternate_session_id;
+      ]
+  in
+  let noncanonical_then_valid =
+    String.concat "\n"
+      [
+        {|{"type":"system","subtype":"init","session_id":"not-canonical"}|};
+        Printf.sprintf
+          {|{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"%s"}|}
+          valid_session_id;
+      ]
+  in
+  List.iter
+    (fun parse ->
+      Alcotest.(check (option string))
+        "private record ignored and public IDs agree" (Some valid_session_id)
+        (parse consistent) ;
+      Alcotest.(check (option string))
+        "conflicting public IDs are not resumable" None (parse conflicting) ;
+      Alcotest.(check (option string))
+        "one noncanonical public ID suppresses resume" None
+        (parse noncanonical_then_valid))
+    [Claude_code.parse_session_id_from_stdout; Claude_code.parse_public_session_id]
+
+let test_run_task_fake_cli_rejects_session_conflict () =
+  Process_test_helper.install_launcher () ;
+  let conflicting =
+    [
+      Printf.sprintf
+        {|{"type":"system","subtype":"init","session_id":"%s"}|}
+        valid_session_id;
+      Printf.sprintf
+        {|{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"%s"}|}
+        alternate_session_id;
+    ]
+  in
+  let noncanonical_then_valid =
+    [
+      {|{"type":"system","subtype":"init","session_id":"not-canonical"}|};
+      Printf.sprintf
+        {|{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"%s"}|}
+        valid_session_id;
+    ]
+  in
+  List.iter
+    (fun (label, lines) ->
+      with_temp_dir ("fake-session-" ^ label) @@ fun temp_dir ->
+      ignore (install_fake_claude temp_dir lines) ;
+      with_path_prefix temp_dir @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let spec =
+        Backend_types.make_task_spec ~prompt:"test" ~working_dir:temp_dir
+          ~timeout:3.0 ()
+      in
+      assert_protocol_failure label session_conflict_message
+        (Claude_code.run_task ~sw ~env spec))
+    [("conflict", conflicting); ("noncanonical", noncanonical_then_valid)]
+
+let wait_for_file ~clock path =
+  let rec loop attempts =
+    if Sys.file_exists path then ()
+    else if attempts = 0 then Alcotest.fail "fake Claude did not start"
+    else begin
+      Eio.Time.sleep clock 0.01 ;
+      loop (attempts - 1)
+    end
+  in
+  loop 300
+
+let test_run_task_fake_cli_timeout_cleans_mcp () =
+  Process_test_helper.install_launcher () ;
+  with_temp_dir "fake-timeout" @@ fun temp_dir ->
+  let fake = install_fake_claude ~hang:true temp_dir [] in
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let spec =
+    Backend_types.make_task_spec ~prompt:"test" ~working_dir:temp_dir
+      ~mcp_servers:[fake_mcp_server] ~timeout:0.5 ()
+  in
+  let result = Claude_code.run_task ~sw ~env spec in
+  Alcotest.(check bool)
+    "timeout preserved" true (result.status = Backend_types.Timeout) ;
+  let mcp_path = read_file fake.mcp_path_path in
+  Alcotest.(check string)
+    "MCP config existed before timeout" "present"
+    (read_file fake.mcp_present_path) ;
+  Alcotest.(check bool)
+    "MCP config cleaned after timeout" false (Sys.file_exists mcp_path)
+
+let test_run_task_fake_cli_cancellation_cleans_mcp () =
+  Process_test_helper.install_launcher () ;
+  with_temp_dir "fake-cancel" @@ fun temp_dir ->
+  let fake = install_fake_claude ~hang:true temp_dir [] in
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let clock = Eio.Stdenv.clock env in
+  let spec =
+    Backend_types.make_task_spec ~prompt:"test" ~working_dir:temp_dir
+      ~mcp_servers:[fake_mcp_server] ~timeout:30.0 ()
+  in
+  let cancelled =
+    try
+      Eio.Cancel.sub (fun token ->
+          Eio.Fiber.both
+            (fun () -> ignore (Claude_code.run_task ~sw ~env spec))
+            (fun () ->
+              wait_for_file ~clock fake.started_path ;
+              Eio.Cancel.cancel token (Failure "cancel fake Claude"))) ;
+      false
+    with Eio.Cancel.Cancelled _ -> true
+  in
+  Alcotest.(check bool) "cancellation propagated" true cancelled ;
+  let mcp_path = read_file fake.mcp_path_path in
+  Alcotest.(check string)
+    "MCP config existed before cancellation" "present"
+    (read_file fake.mcp_present_path) ;
+  Alcotest.(check bool)
+    "MCP config cleaned after cancellation" false (Sys.file_exists mcp_path)
 
 let test_sensitive_requests_fail_before_config_or_spawn () =
   with_temp_dir "fail-closed" @@ fun temp_dir ->
@@ -878,6 +1297,27 @@ let session_reuse_tests =
     ( "project config exception diagnostics are redacted",
       `Quick,
       test_project_config_exception_diagnostic_is_redacted );
+    ( "fake CLI success, streaming, resume, and cleanup",
+      `Quick,
+      test_run_task_fake_cli_success_stream_resume_and_cleanup );
+    ( "fake CLI native schema terminal",
+      `Quick,
+      test_run_task_fake_cli_native_schema );
+    ( "fake CLI rejects invalid exit-zero streams",
+      `Quick,
+      test_run_task_fake_cli_rejects_invalid_exit_zero_streams );
+    ( "session IDs are exact and consistent",
+      `Quick,
+      test_session_ids_must_be_exact_and_consistent );
+    ( "fake CLI rejects unsafe session identities",
+      `Quick,
+      test_run_task_fake_cli_rejects_session_conflict );
+    ( "fake CLI timeout cleans MCP config",
+      `Slow,
+      test_run_task_fake_cli_timeout_cleans_mcp );
+    ( "fake CLI cancellation cleans MCP config",
+      `Slow,
+      test_run_task_fake_cli_cancellation_cleans_mcp );
     ( "build_command leaves a meta-schema-free schema verbatim (#283)",
       `Quick,
       test_build_command_schema_without_meta_is_verbatim );
