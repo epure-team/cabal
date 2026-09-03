@@ -486,6 +486,122 @@ let test_extensible_claude_invocation_caps_config_web_tools () =
        argv) ;
   Registry.clear ()
 
+let test_extensible_builtin_claude_requires_exact_terminal () =
+  Process_test_helper.install_launcher () ;
+  let protocol_failure =
+    "Claude Code protocol failure: missing or invalid terminal result"
+  in
+  let cases =
+    [
+      ( "assistant-only",
+        [
+          {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"not final"}]}}|};
+        ] );
+      ("malformed", ["not-json-private-output"]);
+      ( "error",
+        [
+          {|{"type":"result","subtype":"error_during_execution","is_error":true,"result":"private error"}|};
+        ] );
+      ( "duplicate-result",
+        [
+          {|{"type":"result","subtype":"success","is_error":false,"result":"first"}|};
+          {|{"type":"result","subtype":"success","is_error":false,"result":"second"}|};
+        ] );
+      ( "record-after-result",
+        [
+          {|{"type":"result","subtype":"success","is_error":false,"result":"not terminal"}|};
+          {|{"type":"system","subtype":"status","message":"private trailing record"}|};
+        ] );
+    ]
+  in
+  List.iter
+    (fun (label, output_lines) ->
+      with_temp_dir @@ fun root ->
+      let home = Filename.concat root "home" in
+      let working_dir = Filename.concat root "workspace" in
+      let bin_dir = Filename.concat root "bin" in
+      List.iter (fun path -> Unix.mkdir path 0o700) [home; working_dir; bin_dir] ;
+      let output =
+        output_lines
+        |> List.map (fun line ->
+            Printf.sprintf "printf '%%s\\n' %s\n" (Filename.quote line))
+        |> String.concat ""
+      in
+      let claude = Filename.concat bin_dir "claude" in
+      write_file claude ("#!/bin/sh\nset -eu\ncat >/dev/null\n" ^ output) ;
+      Unix.chmod claude 0o700 ;
+      let path =
+        match Sys.getenv_opt "PATH" with
+        | Some current when current <> "" -> bin_dir ^ ":" ^ current
+        | Some _ | None -> bin_dir
+      in
+      with_env "HOME" home @@ fun () ->
+      with_env "PATH" path @@ fun () ->
+      Registry.clear () ;
+      (match
+         Runtime_bootstrap.register_runtime ~project_dir:working_dir
+           ~profile:Runtime_bootstrap.Extensible ()
+       with
+      | Ok () -> ()
+      | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error)) ;
+      let backend =
+        match Registry.get "claude-code" with
+        | Some backend -> backend
+        | None -> Alcotest.fail "Extensible Claude backend missing"
+      in
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let spec = Backend_types.make_task_spec ~prompt:"test" ~working_dir () in
+      let result = Agentic_backend.run_task ~sw ~env backend spec in
+      (match result.Backend_types.status with
+      | Backend_types.Failed message ->
+          Alcotest.(check string)
+            (label ^ " fixed failure") protocol_failure message
+      | Success -> Alcotest.fail (label ^ " unexpectedly succeeded")
+      | Timeout -> Alcotest.fail (label ^ " unexpectedly timed out")
+      | Cancelled -> Alcotest.fail (label ^ " unexpectedly cancelled")) ;
+      Alcotest.(check string)
+        (label ^ " suppresses final text") "" result.agent_text ;
+      Alcotest.(check string)
+        (label ^ " sanitizes stderr") protocol_failure result.stderr ;
+      Registry.clear ())
+    cases
+
+let test_claude_user_override_retains_generic_semantics () =
+  Process_test_helper.install_launcher () ;
+  with_temp_dir @@ fun working_dir ->
+  let executable = Filename.concat working_dir "custom-claude" in
+  write_file executable
+    {|#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"custom output"}]}}'
+|} ;
+  Unix.chmod executable 0o700 ;
+  let config : Yaml_adapter.config =
+    {
+      name = "claude-code";
+      display_name = "Custom Claude";
+      invocation_command = executable;
+      template_set = "custom";
+      env_mappings = [];
+      timeout_seconds = 3.0;
+      source = "project adapter";
+      models = [];
+    }
+  in
+  let backend = Yaml_adapter.make_backend config in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let spec = Backend_types.make_task_spec ~prompt:"test" ~working_dir () in
+  let result = Agentic_backend.run_task ~sw ~env backend spec in
+  Alcotest.(check bool)
+    "custom same-id adapter keeps generic exit-zero success" true
+    (result.status = Backend_types.Success) ;
+  Alcotest.(check string)
+    "custom same-id adapter keeps generic structured parser"
+    "custom output" result.agent_text
+
 (* --- validate tests -------------------------------------------------------- *)
 
 let test_validate_ok () =
@@ -711,6 +827,14 @@ let () =
             "Extensible Claude caps permissive config web tools"
             `Quick
             test_extensible_claude_invocation_caps_config_web_tools;
+          Alcotest.test_case
+            "Extensible built-in Claude requires exact terminal"
+            `Quick
+            test_extensible_builtin_claude_requires_exact_terminal;
+          Alcotest.test_case
+            "same-id Claude user override keeps generic semantics"
+            `Quick
+            test_claude_user_override_retains_generic_semantics;
           Alcotest.test_case
             "project-local override"
             `Quick
