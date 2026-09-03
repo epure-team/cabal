@@ -6,7 +6,6 @@
 |---|---|
 | Backend | `claude-code` |
 | Cabal baseline | `2.1.117` |
-| Installed version | `2.1.258 (Claude Code)`; not used as baseline evidence |
 | Investigation date | 2026-09-03 |
 | Story | #30 / CBL-07B |
 | Evidence level in this phase | Exact release artifacts, help, SDK source/types, offline probe self-test, and unit tests only |
@@ -110,15 +109,14 @@ The offline validator and sanitization suite passes:
 PASS self-test
 ```
 
-The installed CLI is `2.1.258`, so the artifact correctly refuses it. An
-integrity-checked exact-baseline binary reached process execution, but its
-authenticated modes could not run because the dedicated profile is logged out.
-No raw failed-process output was recorded as evidence.
+Authenticated execution was not available during this phase. No local
+credential, configuration-directory, or raw failed-process detail is recorded as
+evidence.
 
 For a later manual rerun, authenticate outside this task with:
 
 ```text
-CLAUDE_CONFIG_DIR="$HOME/.claude-atacama" claude auth login --claudeai
+CLAUDE_CONFIG_DIR="<dedicated-claude-config-dir>" claude auth login --claudeai
 ```
 
 Then expose the verified `2.1.117` binary on `PATH` and run the checked-in probe.
@@ -155,6 +153,10 @@ built-in tool set and that an empty tool array becomes `--tools ""`. Cabal now
 uses a fixed tool list that excludes `WebSearch` and `WebFetch` for
 `Web_disabled`; `--strict-mcp-config` prevents unrelated MCP discovery. User
 permission settings cannot add a built-in omitted from the fixed `--tools` set.
+This controls Claude's native web tools, not total process egress: separately
+authorized Bash commands or explicitly supplied MCP servers can have their own
+network access. A host that requires a complete network boundary must provide
+one outside the backend process.
 
 Positive web behavior was not authenticated. Cabal therefore rejects
 `Web_search` and `Web_search_and_fetch` before config I/O or process spawn, and
@@ -165,13 +167,15 @@ the descriptor remains at `Web_disabled` with no web evidence.
 The normalized stream parser accepts only exact public structures:
 
 - assistant text and bounded tool identity, never tool arguments;
-- canonical lowercase `8-4-4-4-12` session UUIDs from `system/init` or successful
-  results; and
+- mutually consistent canonical lowercase `8-4-4-4-12` session UUIDs from exact
+  `system/init` or successful result records; and
 - independently valid non-negative usage fields from successful results.
 
-For compatibility with the repository's existing public-result contract, a
-result may omit the `success` subtype; any explicit non-success subtype remains
-rejected.
+Exit zero becomes task success only when the stream has exactly one terminal
+record and it has `type=result`, `subtype=success`, and `is_error=false` with a
+documented text or structured result. Missing, subtypeless, malformed, error,
+non-terminal, or duplicate result records produce one fixed sanitized failure.
+Assistant-only output cannot satisfy native schema execution.
 
 User/input/image records, thinking, tool results, error records, malformed JSON,
 unsafe identifiers, paths, and raw fallback text do not become normalized
@@ -204,8 +208,11 @@ No media/web capability metadata changed.
 - canonical resume validation and the parity SDK's exact flag/value shape;
 - redacted diagnostics;
 - fail-closed media and positive-web behavior before config or spawn;
-- public assistant/tool/session/usage parsing; and
+- fake-CLI active text, native schema, resume, exact stdin, public callbacks,
+  session/cost extraction, MCP cleanup, invalid exit-zero output, timeout, and
+  cancellation;
+- public assistant/tool/session/usage parsing without duplicate final text; and
 - negative privacy fixtures plus the probe's offline self-test.
 
 Re-evaluate media/web only after all content-dependent modes pass against an
-integrity-checked exact baseline with the dedicated account profile.
+integrity-checked exact baseline with an isolated authenticated test profile.
