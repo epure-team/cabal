@@ -68,3 +68,35 @@ let selected_backend_ids ?(getenv = Sys.getenv_opt) ~all_backend_ids () =
   match non_empty_env ~getenv "CABAL_E2E_BACKEND" with
   | Some raw -> split_backend_filter raw
   | None -> all_backend_ids
+
+let positive_media_descriptor (d : Cabal.Backend_registry.descriptor) =
+  d.capabilities.media_support.media_types <> []
+
+let positive_web_descriptor (d : Cabal.Backend_registry.descriptor) =
+  d.capabilities.web_support.maximum <> Cabal.Backend_types.Web_disabled
+
+let media_schema_descriptors ~descriptors () =
+  List.filter positive_media_descriptor descriptors
+
+let web_descriptors ~descriptors () =
+  List.filter positive_web_descriptor descriptors
+
+let select_descriptors ?(getenv = Sys.getenv_opt) descriptors =
+  let selected_ids =
+    selected_backend_ids ~getenv
+      ~all_backend_ids:
+        (List.map
+           (fun (d : Cabal.Backend_registry.descriptor) -> d.id)
+           descriptors)
+      ()
+  in
+  List.filter
+    (fun (d : Cabal.Backend_registry.descriptor) -> List.mem d.id selected_ids)
+    descriptors
+
+let selected_media_schema_descriptors ?(getenv = Sys.getenv_opt) ~descriptors ()
+    =
+  media_schema_descriptors ~descriptors () |> select_descriptors ~getenv
+
+let selected_web_descriptors ?(getenv = Sys.getenv_opt) ~descriptors () =
+  web_descriptors ~descriptors () |> select_descriptors ~getenv

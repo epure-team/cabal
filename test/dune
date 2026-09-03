@@ -5,6 +5,12 @@
  (modules e2e_harness_config))
 
 (library
+ (name cabal_media_web_schema_e2e_support)
+ (wrapped false)
+ (libraries cabal digestif yojson unix)
+ (modules media_web_schema_fixture media_web_schema_e2e_support))
+
+(library
  (name cabal_process_test_helper)
  (wrapped false)
  (libraries unix)
@@ -342,6 +348,37 @@
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1)))
 
+(test
+ (name test_media_web_schema_backends)
+ (libraries
+  cabal
+  cabal_e2e_harness_config
+  cabal_media_web_schema_e2e_support
+  cabal_process_test_helper
+  alcotest
+  digestif
+  eio
+  eio_posix
+  yojson
+  unix)
+ (deps ../bin/process_group_launcher.exe)
+ (modules test_media_web_schema_backends)
+ (enabled_if
+  (= %{env:CABAL_E2E_TESTS=0} 1)))
+
+(test
+ (name test_media_web_schema_e2e_structure)
+ (libraries
+  cabal
+  cabal_e2e_harness_config
+  cabal_media_web_schema_e2e_support
+  alcotest
+  digestif
+  yojson
+  unix)
+ (deps dune test_media_web_schema_backends.ml)
+ (modules test_media_web_schema_e2e_structure))
+
 (rule
  (alias e2e)
  (enabled_if
@@ -349,11 +386,13 @@
  (deps
   ../bin/process_group_launcher.exe
   test_demo_627.exe
-  test_native_json_schema_backends.exe)
+  test_native_json_schema_backends.exe
+  test_media_web_schema_backends.exe)
  (action
   (progn
    (run ./test_demo_627.exe)
-   (run ./test_native_json_schema_backends.exe))))
+   (run ./test_native_json_schema_backends.exe)
+   (run ./test_media_web_schema_backends.exe))))
 
 (test
  (name test_demo_630)
