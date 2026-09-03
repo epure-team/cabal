@@ -53,12 +53,200 @@ let with_path_prefix path f =
     ~finally:(fun () -> Unix.putenv "PATH" (Option.value ~default:"" previous))
     f
 
+let with_env name value f =
+  let previous = Sys.getenv_opt name in
+  Unix.putenv name value;
+  Fun.protect
+    ~finally:(fun () ->
+      match previous with
+      | Some previous -> Unix.putenv name previous
+      | None -> Unix.putenv name "")
+    f
+
+let with_captured_diagnostics f =
+  let events = ref [] in
+  Diagnostics.set_handler (fun event -> events := event :: !events);
+  Fun.protect ~finally:Diagnostics.reset_handler (fun () -> f events)
+
+let diagnostic_messages events =
+  List.filter_map
+    (function
+      | Diagnostics.Log (_, message) | Diagnostics.User_warning message ->
+          Some message)
+    !events
+
 let write_executable path contents =
   let channel = open_out path in
   Fun.protect
     ~finally:(fun () -> close_out_noerr channel)
     (fun () -> output_string channel contents);
   Unix.chmod path 0o700
+
+let fake_gemini_script =
+  {|#!/bin/sh
+set -e
+capture=${CABAL_FAKE_GEMINI_CAPTURE_DIR-}
+mode=${CABAL_FAKE_GEMINI_MODE-}
+if [ -z "$capture" ] || [ -z "$mode" ]; then
+  exit 90
+fi
+counter="$capture/count"
+if [ -f "$counter" ]; then
+  count=$(/bin/cat "$counter")
+else
+  count=0
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+stdin_file="$capture/stdin-$count"
+/bin/cat > "$stdin_file"
+
+policy=
+admin_policy=
+resume=
+prompt_contract=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --policy)
+      shift
+      policy=${1-}
+      ;;
+    --admin-policy)
+      shift
+      admin_policy=${1-}
+      ;;
+    --resume)
+      shift
+      resume=${1-}
+      ;;
+    -p)
+      shift
+      if [ "${1+x}" = x ] && [ "$1" = "" ]; then
+        prompt_contract=1
+      fi
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$policy" ] || [ "$policy" != "$admin_policy" ]; then
+  exit 91
+fi
+if [ ! -f "$policy" ]; then
+  exit 92
+fi
+if [ "$prompt_contract" -ne 1 ]; then
+  exit 93
+fi
+printf '%s\n' "$policy" > "$capture/policy-$count"
+printf '%s\n' "$resume" > "$capture/resume-$count"
+printf '%s\n' ok > "$capture/validated-$count"
+
+case "$mode" in
+  success)
+    printf '%s\n' '{"type":"init","session_id":"123e4567-e89b-12d3-a456-426614174000"}'
+    printf '%s\n' '{"type":"message","role":"assistant","content":"public answer"}'
+    printf '%s\n' '{"type":"result","status":"success","stats":{"input_tokens":11,"output_tokens":7,"cached":3}}'
+    ;;
+  exit-failure)
+    printf '%s\n' 'fixed fake failure' >&2
+    exit 7
+    ;;
+  error-event)
+    printf '%s\n' '{"type":"error","message":"private fake error"}'
+    printf '%s\n' 'fixed fake error' >&2
+    exit 8
+    ;;
+  malformed)
+    printf '%s\n' 'not-json private output'
+    ;;
+  hang)
+    sleep 30
+    ;;
+  schema-fresh|schema-resume)
+    if [ "$count" -eq 1 ]; then
+      if [ "$mode" = schema-resume ]; then
+        printf '%s\n' '{"type":"init","session_id":"123e4567-e89b-12d3-a456-426614174000"}'
+      fi
+      printf '%s\n' '{"type":"message","role":"assistant","content":"not-json"}'
+      printf '%s\n' '{"type":"result","status":"success","stats":{"input_tokens":1,"output_tokens":1}}'
+    else
+      if [ "$mode" = schema-resume ]; then
+        printf '%s\n' '{"type":"init","session_id":"123e4567-e89b-12d3-a456-426614174000"}'
+      fi
+      printf '%s\n' '{"type":"message","role":"assistant","content":"{\"value\":\"a@b\"}"}'
+      printf '%s\n' '{"type":"result","status":"success","stats":{"input_tokens":2,"output_tokens":2}}'
+    fi
+    ;;
+  *)
+    exit 94
+    ;;
+esac
+|}
+
+let with_fake_gemini mode f =
+  with_temp_dir ("fake-" ^ mode) @@ fun root ->
+  let workspace = Filename.concat root "workspace" in
+  let capture = Filename.concat root "capture" in
+  Unix.mkdir workspace 0o700;
+  Unix.mkdir capture 0o700;
+  write_executable (Filename.concat root "gemini") fake_gemini_script;
+  with_path_prefix root @@ fun () ->
+  with_env "CABAL_FAKE_GEMINI_CAPTURE_DIR" capture @@ fun () ->
+  with_env "CABAL_FAKE_GEMINI_MODE" mode @@ fun () ->
+  f ~workspace ~capture
+
+let capture_path capture kind call =
+  Filename.concat capture (Printf.sprintf "%s-%d" kind call)
+
+let captured capture kind call =
+  String.trim (read_file (capture_path capture kind call))
+
+let call_count capture = int_of_string (String.trim (read_file (Filename.concat capture "count")))
+
+let assert_policy_removed capture call =
+  let path = captured capture "policy" call in
+  Alcotest.(check bool)
+    (Printf.sprintf "call %d policy cleanup attempted successfully" call)
+    false (Sys.file_exists path)
+
+let wait_for_file ~clock path =
+  let deadline = Eio.Time.now clock +. 3.0 in
+  let rec loop () =
+    if Sys.file_exists path then ()
+    else if Eio.Time.now clock >= deadline then
+      Alcotest.fail "fake Gemini did not reach the policy-validated state"
+    else begin
+      Eio.Time.sleep clock 0.01;
+      loop ()
+    end
+  in
+  loop ()
+
+let find_substring_from text ~start needle =
+  let text_length = String.length text in
+  let needle_length = String.length needle in
+  let rec loop index =
+    if index + needle_length > text_length then None
+    else if String.sub text index needle_length = needle then Some index
+    else loop (index + 1)
+  in
+  if start < 0 || start > text_length then None else loop start
+
+let retry_schema_of_stdin stdin =
+  let header = "## Required output schema\n\n" in
+  let compliance =
+    "\n\nYour previous response did not conform to the required JSON schema.\n"
+  in
+  match find_substring_from stdin ~start:0 header with
+  | None -> Alcotest.fail "retry schema header is absent"
+  | Some header_index ->
+      let schema_start = header_index + String.length header in
+      (match find_substring_from stdin ~start:schema_start compliance with
+      | None -> Alcotest.fail "retry schema terminator is absent"
+      | Some schema_end ->
+          String.sub stdin schema_start (schema_end - schema_start)
+          |> Yojson.Safe.from_string)
 
 (** {1 Module identity} *)
 
@@ -390,9 +578,13 @@ let test_build_invocation_preserves_attachment_free_resume_reuse () =
     "stdin" (Some expected_plain_stdin) invocation.stdin
 
 let test_build_invocation_preserves_non_native_schema_retry_prompt () =
-  let schema = `Assoc [("type", `String "object")] in
+  let schema =
+    `Assoc [("type", `String "string"); ("const", `String "a@b")]
+  in
   let retry_prompt =
-    "## Required output schema\n{\"type\":\"object\"}\nRetry without @leak"
+    "## Required output schema\n\n{\"type\":\"string\",\"const\":\"a@b\"}\n\n\
+     Your previous response did not conform to the required JSON schema.\n\
+     Retry without @leak"
   in
   let spec =
     Backend_types.make_task_spec ~prompt:retry_prompt ~working_dir:"/private/ws"
@@ -403,9 +595,11 @@ let test_build_invocation_preserves_non_native_schema_retry_prompt () =
     "Gemini stays on non-native schema path" false
     (command_contains "--output-schema" invocation.argv);
   Alcotest.(check (option string))
-    "retry prompt is preserved and literal at-sign is neutralized"
+    "schema at-sign stays valid JSON and other at-signs are neutralized"
     (Some
-       "## Required output schema\n{\"type\":\"object\"}\nRetry without \\@leak")
+       "## Required output schema\n\n{\"type\":\"string\",\"const\":\"a\\u0040b\"}\n\n\
+        Your previous response did not conform to the required JSON schema.\n\
+        Retry without \\@leak")
     invocation.stdin
 
 let test_build_invocation_rejects_unproven_positive_web_levels () =
@@ -442,7 +636,7 @@ let test_build_invocation_rejects_invalid_resume_ids () =
             Alcotest.(check bool)
               "resume error omits the value" false
               (contains_substring message invalid_id))
-    [""; "latest"; "--resume"; valid_session_id ^ "\n"]
+    [""; "latest"; "--resume"; "gemini-fake-session"; valid_session_id ^ "\n"]
 
 let test_build_invocation_rejects_invalid_policy_paths () =
   List.iter
@@ -557,6 +751,34 @@ let test_web_policy_file_is_removed_after_exception () =
         "policy removed after exception" false (Sys.file_exists path)
   | None -> Alcotest.fail "policy callback did not run"
 
+let test_web_policy_cleanup_failure_is_sanitized_and_observable () =
+  with_captured_diagnostics @@ fun diagnostics ->
+  let observed_path = ref None in
+  Gemini_cli.with_web_disabled_policy_file (fun path ->
+      observed_path := Some path;
+      Sys.remove path;
+      Unix.mkdir path 0o700);
+  match !observed_path with
+  | None -> Alcotest.fail "policy callback did not run"
+  | Some path ->
+      Fun.protect
+        ~finally:(fun () -> Unix.rmdir path)
+        (fun () ->
+          Alcotest.(check bool)
+            "failed unlink leaves the replacement visible" true
+            (Sys.file_exists path);
+          let messages = diagnostic_messages diagnostics in
+          Alcotest.(check bool)
+            "cleanup failure is observable" true
+            (List.exists
+               (fun message -> contains_substring message "policy cleanup failed")
+               messages);
+          Alcotest.(check bool)
+            "cleanup warning omits the private path" false
+            (List.exists
+               (fun message -> contains_substring message path)
+               messages))
+
 let test_standard_admin_policy_conflict_detection () =
   with_temp_dir "admin-policy" @@ fun directory ->
   Alcotest.(check bool)
@@ -610,6 +832,9 @@ let command_tests =
     ( "web-disabled policy cleans exceptional exits",
       `Quick,
       test_web_policy_file_is_removed_after_exception );
+    ( "web-disabled policy cleanup failures are observable",
+      `Quick,
+      test_web_policy_cleanup_failure_is_sanitized_and_observable );
     ( "standard admin policy conflict is detected",
       `Quick,
       test_standard_admin_policy_conflict_detection );
@@ -699,6 +924,241 @@ let transport_gate_tests =
       test_invalid_session_fails_before_config_or_spawn );
   ]
 
+(** {1 Fake executable integration} *)
+
+let test_fake_gemini_successful_hardened_run () =
+  with_fake_gemini "success" @@ fun ~workspace ~capture ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let result =
+    Gemini_cli.run_task ~sw ~env
+      (Backend_types.make_task_spec ~prompt:"literal @reference"
+         ~instructions:"instruction @reference" ~working_dir:workspace ())
+  in
+  Alcotest.(check bool)
+    "successful status" true
+    (result.status = Backend_types.Success);
+  Alcotest.(check string) "strict public text" "public answer" result.agent_text;
+  Alcotest.(check (option string))
+    "canonical session" (Some valid_session_id) result.session_id;
+  (match result.cost with
+  | None -> Alcotest.fail "documented result.stats was not parsed"
+  | Some cost ->
+      Alcotest.(check (option int)) "input tokens" (Some 11) cost.tokens_input;
+      Alcotest.(check (option int)) "output tokens" (Some 7) cost.tokens_output;
+      Alcotest.(check (option int))
+        "cached tokens" (Some 3) cost.cache_read_input_tokens);
+  Alcotest.(check int) "one invocation" 1 (call_count capture);
+  Alcotest.(check string)
+    "fake observed both live policy flags and exact empty prompt option" "ok"
+    (captured capture "validated" 1);
+  Alcotest.(check string)
+    "exact stdin"
+    "literal \\@reference\n\n---\nProject Instructions:\ninstruction \\@reference"
+    (read_file (capture_path capture "stdin" 1));
+  assert_policy_removed capture 1
+
+let test_fake_gemini_failure_and_malformed_outputs () =
+  List.iter
+    (fun (mode, expected_status, expected_text) ->
+      with_fake_gemini mode @@ fun ~workspace ~capture ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let result =
+        Gemini_cli.run_task ~sw ~env
+          (Backend_types.make_task_spec ~prompt:"test" ~working_dir:workspace ())
+      in
+      Alcotest.(check bool)
+        (mode ^ " status") true (expected_status result.status);
+      Alcotest.(check string) (mode ^ " public text") expected_text
+        result.agent_text;
+      Alcotest.(check int) (mode ^ " one invocation") 1 (call_count capture);
+      assert_policy_removed capture 1)
+    [
+      ( "exit-failure",
+        (function Backend_types.Failed _ -> true | _ -> false),
+        "" );
+      ( "error-event",
+        (function Backend_types.Failed _ -> true | _ -> false),
+        "" );
+      ( "malformed",
+        (function Backend_types.Success -> true | _ -> false),
+        "" );
+    ]
+
+let test_fake_gemini_timeout_cleans_policy () =
+  with_fake_gemini "hang" @@ fun ~workspace ~capture ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let result =
+    Gemini_cli.run_task ~sw ~env
+      (Backend_types.make_task_spec ~prompt:"timeout" ~working_dir:workspace
+         ~timeout:0.05 ())
+  in
+  Alcotest.(check bool)
+    "timeout status" true (result.status = Backend_types.Timeout);
+  assert_policy_removed capture 1
+
+let test_fake_gemini_cancellation_cleans_policy () =
+  with_fake_gemini "hang" @@ fun ~workspace ~capture ->
+  Eio_posix.run @@ fun env ->
+  let clock = Eio.Stdenv.clock env in
+  let cancelled =
+    try
+      Eio.Cancel.sub (fun token ->
+          Eio.Switch.run @@ fun sw ->
+          Eio.Fiber.fork ~sw (fun () ->
+              wait_for_file ~clock (capture_path capture "validated" 1);
+              Eio.Cancel.cancel token (Failure "cancel fake Gemini"));
+          ignore
+            (Gemini_cli.run_task ~sw ~env
+               (Backend_types.make_task_spec ~prompt:"cancel"
+                  ~working_dir:workspace ~timeout:30.0 ())));
+      false
+    with Eio.Cancel.Cancelled _ -> true
+  in
+  Alcotest.(check bool) "cancellation propagated" true cancelled;
+  assert_policy_removed capture 1
+
+let schema_with_at =
+  `Assoc
+    [
+      ("type", `String "object");
+      ( "properties",
+        `Assoc
+          [
+            ( "value",
+              `Assoc
+                [("type", `String "string"); ("const", `String "a@b")] );
+          ] );
+      ("required", `List [`String "value"]);
+      ("additionalProperties", `Bool false);
+    ]
+
+let test_non_native_schema_retry_with_at ~mode ~expects_resume () =
+  with_fake_gemini mode @@ fun ~workspace ~capture ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let backend = (module Gemini_cli : Agentic_backend.S) in
+  let result =
+    Json_schema_enforcer.run_task ~sw ~env ~backend
+      (Backend_types.make_task_spec ~prompt:"Do not expand @workspace-secret"
+         ~working_dir:workspace ~json_schema:schema_with_at ())
+  in
+  let result =
+    match result with
+    | Ok result -> result
+    | Error message -> Alcotest.fail message
+  in
+  Alcotest.(check bool)
+    "retry succeeds schema validation" true
+    (result.status = Backend_types.Success);
+  Alcotest.(check string)
+    "validator receives semantic at-sign value" {|{"value":"a@b"}|}
+    result.agent_text;
+  Alcotest.(check int) "exactly two backend calls" 2 (call_count capture);
+  let retry_stdin = read_file (capture_path capture "stdin" 2) in
+  Alcotest.(check bool)
+    "schema contains a JSON unicode escape" true
+    (contains_substring retry_stdin {|"const":"a\u0040b"|});
+  Alcotest.(check bool)
+    "schema contains no raw at-sign value" false
+    (contains_substring retry_stdin "a@b");
+  Alcotest.(check bool)
+    (if expects_resume then "resume omits the original prompt"
+     else "fresh retry keeps the Gemini-escaped original prompt")
+    (not expects_resume)
+    (contains_substring retry_stdin "\\@workspace-secret");
+  Alcotest.(check bool)
+    "serialized retry schema retains exact semantics" true
+    (retry_schema_of_stdin retry_stdin = schema_with_at);
+  Alcotest.(check string)
+    "resume argument"
+    (if expects_resume then valid_session_id else "")
+    (captured capture "resume" 2);
+  assert_policy_removed capture 1;
+  assert_policy_removed capture 2
+
+let fake_integration_tests =
+  [
+    ( "successful hardened process contract",
+      `Quick,
+      test_fake_gemini_successful_hardened_run );
+    ( "failure, error event, and malformed output",
+      `Quick,
+      test_fake_gemini_failure_and_malformed_outputs );
+    ("timeout policy cleanup", `Quick, test_fake_gemini_timeout_cleans_policy);
+    ( "cancellation policy cleanup",
+      `Quick,
+      test_fake_gemini_cancellation_cleans_policy );
+    ( "fresh schema retry preserves at-sign semantics",
+      `Quick,
+      test_non_native_schema_retry_with_at ~mode:"schema-fresh"
+        ~expects_resume:false );
+    ( "resume schema retry preserves at-sign semantics",
+      `Quick,
+      test_non_native_schema_retry_with_at ~mode:"schema-resume"
+        ~expects_resume:true );
+  ]
+
+(** {1 Extensible YAML profile} *)
+
+let test_extensible_builtin_yaml_gemini_is_fail_closed () =
+  with_temp_dir "yaml-home" @@ fun home ->
+  with_temp_dir "yaml-project" @@ fun project ->
+  let marker = Filename.concat project "fake-gemini-ran" in
+  write_executable
+    (Filename.concat project "gemini")
+    (Printf.sprintf "#!/bin/sh\nprintf ran > %s\nexit 0\n"
+       (Filename.quote marker));
+  with_env "HOME" home @@ fun () ->
+  with_path_prefix project @@ fun () ->
+  Registry.clear ();
+  Fun.protect ~finally:Registry.clear @@ fun () ->
+  (match
+     Runtime_bootstrap.register_runtime ~project_dir:project
+       ~profile:Runtime_bootstrap.Extensible ()
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error));
+  let backend = Registry.get_exn Gemini_cli.id in
+  (match Yaml_adapter.config_of backend with
+  | Some config ->
+      Alcotest.(check string)
+        "built-in Gemini YAML is deliberately unavailable" "false"
+        config.invocation_command
+  | None -> Alcotest.fail "Extensible Gemini runtime is not YAML-backed");
+  (match Registry.find_entry Gemini_cli.id with
+  | Some (Registry.Validated entry) ->
+      Alcotest.(check bool)
+        "conservative descriptor remains Web_disabled" true
+        (entry.effective_descriptor.capabilities.web_support.maximum
+        = Backend_types.Web_disabled)
+  | Some (Registry.Raw _) | None ->
+      Alcotest.fail "Extensible Gemini runtime is not validated");
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Alcotest.(check bool)
+    "disabled YAML backend is unavailable" false
+    (Agentic_backend.available ~sw ~env backend);
+  let result =
+    Agentic_backend.run_task ~sw ~env backend
+      (Backend_types.make_task_spec ~prompt:"must fail closed"
+         ~working_dir:project ())
+  in
+  Alcotest.(check bool)
+    "direct YAML execution fails closed" true
+    (match result.status with Backend_types.Failed _ -> true | _ -> false);
+  Alcotest.(check bool)
+    "permissive Gemini transport is never invoked" false (Sys.file_exists marker)
+
+let yaml_tests =
+  [
+    ( "Extensible built-in Gemini execution is unavailable",
+      `Quick,
+      test_extensible_builtin_yaml_gemini_is_fail_closed );
+  ]
+
 (** {1 Probe artifact} *)
 
 let project_root () =
@@ -785,6 +1245,8 @@ let () =
       ("Public output", output_tests);
       ("Invocation", command_tests);
       ("Transport gate", transport_gate_tests);
+      ("Fake executable", fake_integration_tests);
+      ("Extensible YAML", yaml_tests);
       ("Probe", probe_tests);
       ("Availability", [("available check", `Quick, test_available)]);
       ( "Interface",

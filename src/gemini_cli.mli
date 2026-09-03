@@ -18,7 +18,9 @@
     does not support [--skip-trust]. Every runtime invocation also loads a
     private, invocation-scoped policy that denies [google_web_search] and
     [web_fetch] at admin priority. Stream-json emits one JSON event per stdout
-    line; only its documented public records are normalized.
+    line; only its documented public records are normalized. The bundled
+    Extensible-profile YAML runtime is deliberately unavailable because a
+    static YAML command cannot create this task-scoped deny policy.
 
     {b MCP Integration:}
     Gemini supports MCP servers configured in settings JSON. Épure writes
@@ -54,8 +56,10 @@ type backend_invocation = {
     baseline [0.38.2] ignores supplemental admin policies in that case.
 
     Literal [@] characters in caller text are escaped so Gemini does not treat
-    prompt content as an implicit file reference. A resume ID must be a
-    canonical lowercase UUID or a safe [gemini-] protocol identifier. *)
+    prompt content as an implicit file reference. Within a serialized retry
+    schema, [@] is instead encoded as JSON [\u0040], preserving the schema's
+    parsed value while avoiding an invalid [\@] JSON escape. A resume ID must
+    be a canonical lowercase UUID. *)
 val build_invocation :
   ?attachment_paths:string list ->
   ?attachment_delivery:Backend_types.attachment_delivery ->
@@ -66,7 +70,8 @@ val build_invocation :
 
 (** [with_web_disabled_policy_file f] creates a private [0o600] Gemini policy
     denying [google_web_search] and [web_fetch] at priority [999], calls [f], and
-    unlinks the policy on all exits. *)
+    attempts to unlink the policy on all exits. A persistent cleanup failure
+    emits a sanitized diagnostic without the policy path. *)
 val with_web_disabled_policy_file : (string -> 'a) -> 'a
 
 (** [standard_admin_policy_conflict ~directory] is [true] when [directory]

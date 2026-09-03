@@ -916,9 +916,9 @@ let test_structured_backend_parsers () =
         true
     | _ -> false) ;
   let gemini =
-    [ {|{"type":"init","session_id":"gemini-s"}|};
+    [ {|{"type":"init","session_id":"123e4567-e89b-12d3-a456-426614174000"}|};
       {|{"type":"message","role":"assistant","content":"gemini answer"}|};
-      {|{"type":"result","status":"success","usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":5}}|};
+      {|{"type":"result","status":"success","stats":{"input_tokens":4,"output_tokens":5}}|};
     ]
     |> List.concat_map Gemini_cli.normalized_events_of_line
   in

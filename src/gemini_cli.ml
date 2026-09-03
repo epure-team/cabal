@@ -234,10 +234,6 @@ let canonical_uuid value =
 
 let valid_gemini_session_id value =
   canonical_uuid value
-  ||
-  match safe_protocol_identifier value with
-  | Some value -> String.starts_with ~prefix:"gemini-" value
-  | None -> false
 
 let nonnegative_int_member name json =
   match Yojson.Safe.Util.member name json with
@@ -450,9 +446,89 @@ let escape_literal_ats text =
     text ;
   Buffer.contents buffer
 
+let encode_json_ats text =
+  let buffer = Buffer.create (String.length text) in
+  String.iter
+    (fun character ->
+      if character = '@' then Buffer.add_string buffer "\\u0040"
+      else Buffer.add_char buffer character)
+    text;
+  Buffer.contents buffer
+
+let find_substring_from text ~start needle =
+  let text_length = String.length text in
+  let needle_length = String.length needle in
+  let rec loop index =
+    if index + needle_length > text_length then None
+    else if String.sub text index needle_length = needle then Some index
+    else loop (index + 1)
+  in
+  if start < 0 || start > text_length then None else loop start
+
+let find_last_substring text needle =
+  let rec loop start selected =
+    match find_substring_from text ~start needle with
+    | None -> selected
+    | Some index -> loop (index + 1) (Some index)
+  in
+  loop 0 None
+
+let replace_all text ~needle ~replacement =
+  let buffer = Buffer.create (String.length text) in
+  let rec loop start =
+    match find_substring_from text ~start needle with
+    | None -> Buffer.add_substring buffer text start (String.length text - start)
+    | Some index ->
+        Buffer.add_substring buffer text start (index - start);
+        Buffer.add_string buffer replacement;
+        loop (index + String.length needle)
+  in
+  loop 0;
+  Buffer.contents buffer
+
+let encode_known_schema_ats schema text =
+  let schema_json = Yojson.Safe.to_string ~std:true schema in
+  let encoded = encode_json_ats schema_json in
+  replace_all text ~needle:schema_json ~replacement:encoded
+
+(* Non-native retries append one compact JSON schema between these pinned
+   enforcer markers. At-signs inside that JSON must use JSON's Unicode escape,
+   not Gemini's backslash-at path escape, which would make the schema invalid.
+   Selecting the last header handles an original prompt that mentions the same
+   heading. The parsed-value equality check keeps this transformation semantic. *)
+let encode_retry_schema_ats text =
+  let header = "## Required output schema\n\n" in
+  let compliance =
+    "\n\nYour previous response did not conform to the required JSON schema.\n"
+  in
+  match find_last_substring text header with
+  | None -> text
+  | Some header_index ->
+      let schema_start = header_index + String.length header in
+      (match find_substring_from text ~start:schema_start compliance with
+      | None -> text
+      | Some schema_end ->
+          let schema_json =
+            String.sub text schema_start (schema_end - schema_start)
+          in
+          let encoded = encode_json_ats schema_json in
+          (try
+             let original = Yojson.Safe.from_string schema_json in
+             if Yojson.Safe.from_string encoded <> original then text
+             else
+               String.sub text 0 schema_start ^ encoded
+               ^ String.sub text schema_end (String.length text - schema_end)
+           with Yojson.Json_error _ -> text))
+
+let neutralize_ats ?schema text =
+  let text =
+    match schema with None -> text | Some schema -> encode_known_schema_ats schema text
+  in
+  text |> encode_retry_schema_ats |> escape_literal_ats
+
 let full_prompt spec =
-  let prompt = escape_literal_ats spec.prompt in
-  let instructions = escape_literal_ats spec.instructions in
+  let prompt = neutralize_ats ?schema:spec.json_schema spec.prompt in
+  let instructions = neutralize_ats ?schema:spec.json_schema spec.instructions in
   if instructions = "" then prompt
   else Printf.sprintf "%s\n\n---\nProject Instructions:\n%s" prompt instructions
 
@@ -496,7 +572,14 @@ let web_disabled_policy =
    decision = \"deny\"\n\
    priority = 999\n"
 
-let remove_file_noerr path = try Sys.remove path with _ -> ()
+let warn_policy_cleanup_failure () =
+  try Diagnostics.warn "Gemini task web policy cleanup failed"
+  with _ -> ()
+
+let remove_file_noerr path =
+  try Sys.remove path
+  with Sys_error _ ->
+    if Sys.file_exists path then warn_policy_cleanup_failure ()
 
 let create_web_disabled_policy_file () =
   let path = Filename.temp_file "cabal_gemini_web_" ".toml" in

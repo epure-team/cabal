@@ -1,6 +1,10 @@
 name: gemini-cli
 display_name: Gemini CLI
-invocation_command: "gemini --output-format stream-json -y -p -"
+# The generic YAML runner cannot create an invocation-scoped Gemini policy.
+# Gemini 0.38.2 has no native deny-list flag: --allowed-tools controls
+# auto-approval, not tool availability. Keep Extensible-profile execution
+# unavailable rather than claim Web_disabled over a permissive transport.
+invocation_command: "false"
 template_set: default
 timeout_seconds: 300.0
 models:
