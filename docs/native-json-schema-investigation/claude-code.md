@@ -1,164 +1,211 @@
-# Native JSON Schema Investigation: claude-code
+# Claude Code schema, media, and web investigation
 
 ## Metadata
 
 | Field | Value |
 |---|---|
 | Backend | `claude-code` |
-| Baseline version | `2.1.117` |
-| Investigation date | 2026-05-25 |
-| Story | #629 (AC2(a) — retrofit `capability_evidence`) |
-| Predecessor story | #625 (original native wiring, Epic #94, not yet merged to main at time of #629) |
-| Evidence contract | Story #628 (introduced `capability_evidence` type, Epic #94, not yet merged to main at time of #629) |
+| Cabal baseline | `2.1.117` |
+| Installed version | `2.1.258 (Claude Code)`; not used as baseline evidence |
+| Investigation date | 2026-09-03 |
+| Story | #30 / CBL-07B |
+| Evidence level in this phase | Exact release artifacts, help, SDK source/types, offline probe self-test, and unit tests only |
 
-## Version range consulted
+No authenticated media or web probe completed in this phase. Media and positive
+web capabilities therefore remain unsupported. The existing native JSON Schema
+capability and its independent Story #625/#628 evidence are unchanged.
 
-`2.1.117` (baseline) through `2.3.x` (latest public release as of 2026-05-25).
+## Exact baseline artifacts
 
-## Sources consulted
+The inspected release is
+[`v2.1.117`](https://github.com/anthropics/claude-code/releases/tag/v2.1.117),
+published on 2026-04-22.
 
-1. Claude Code CLI `--help` output — inspected at version `2.1.117` (2026-05-25)
-2. Anthropic API tool use documentation:
-   <https://docs.anthropic.com/en/docs/build-with-claude/tool-use>
-   (accessed 2026-05-25)
-3. Anthropic structured output documentation:
-   <https://docs.anthropic.com/en/docs/build-with-claude/structured-outputs>
-   (accessed 2026-05-25)
-4. Claude Code CLI release notes:
-   <https://github.com/anthropics/claude-code/releases>
-   (accessed 2026-05-25)
+The Linux x64 package was checked against npm metadata before inspection:
 
-## CLI surface at baseline\_version 2.1.117
-
-The `claude` CLI at version `2.1.117` exposes the following relevant flags:
-
-- `--output-format json` — forces structured JSON output from the CLI subprocess
-- `--print` / `-p` — non-interactive print mode used by Cabal for task invocation
-
-The CLI does **not** expose a direct `--json-schema <path>` flag at this baseline.
-Schema enforcement is therefore not a first-class CLI flag, but is available through
-the underlying Anthropic Messages API used internally by the `claude` binary.
-
-## Mechanism: Anthropic API tool\_use with `input_schema`
-
-At `claude-code` baseline `2.1.117`, the Anthropic Messages API — accessed
-internally by the `claude` binary — supports constrained JSON output through the
-**tool use** mechanism:
-
-1. A synthetic tool definition is included in the API request, with the caller's
-   JSON schema as the tool's `input_schema` field.
-2. Anthropic's constrained decoding ensures that the model's tool-use response
-   conforms to the declared `input_schema`.
-3. Schema-violating model outputs are rejected at the API level: the provider
-   returns a structured `tool_use` block conforming to the schema rather than
-   free-form text.
-
-This mechanism has been available since the Claude 3 model series, which predates
-`claude-code` version `2.1.117` by a significant margin.
-
-### JSON Schema draft
-
-The Anthropic API `tool_use` `input_schema` field accepts a subset of
-**JSON Schema Draft-07**. Keywords outside this subset (e.g. some `$ref`
-constructs, certain `format` validators) may be silently ignored or rejected.
-The JSON Schema draft recorded in the `capability_evidence` record is **`draft-07`**.
-
-## Manual probe evidence
-
-**Invocation tested:**
-
-```
-claude --print --output-format json
+```text
+package:   @anthropic-ai/claude-code-linux-x64@2.1.117
+tarball:   https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.117.tgz
+integrity: sha512-bhN6qnc9xchKQqKWdwuZazEeSO+9NIhOPcoD/WgqTK5QRPSAwnvo5SZWIQUbkNbTKLaMwuxAu3u+Fj/jYbiidg==
 ```
 
-A task spec embedding a synthetic tool definition whose `input_schema` matches the
-target JSON schema was submitted at baseline `2.1.117`.  Observations:
+The corresponding public TypeScript Agent SDK package provides the static wire
+contract used below:
 
-- Responses consistently conformed to the declared schema.
-- A deliberate conflict test — providing an instruction to output a non-conforming
-  response alongside a strict tool schema — produced a conforming `tool_use` block,
-  demonstrating provider-level enforcement over conflicting instructions.
+```text
+package:            @anthropic-ai/claude-agent-sdk@0.2.117
+claudeCodeVersion:  2.1.117
+tarball:            https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.2.117.tgz
+integrity:          sha512-pVBss1Vu0w87nKCBhWtjMggSgCh6GVUtdRmuE58ZvXv0E2q0JcnUCQHehmn92BAW0+VCwPY8q/k7uKWkgwz/gA==
+```
 
-**Conclusion**: schema-violating responses are confirmed provider-rejected at the
-Anthropic API layer.
+Its versioned
+[`CHANGELOG.md`](https://github.com/anthropics/claude-agent-sdk-typescript/blob/v0.2.117/CHANGELOG.md)
+states that SDK `0.2.117` is at parity with Claude Code `2.1.117`. This is
+static upstream evidence, not an authenticated behavior claim.
 
-## Features present only in versions newer than `2.1.117`
+## Baseline CLI and SDK contracts
 
-None affecting this investigation.  The tool-use `input_schema` enforcement mechanism
-was stable well before `2.1.117`.
+The exact `2.1.117` binary help exposes:
 
-## Upstream issue / discussion link
+- `--print` for non-interactive execution;
+- `--input-format text|stream-json`;
+- `--output-format text|json|stream-json`;
+- `--json-schema <schema-json>`;
+- `--resume <session-id>`;
+- `--tools <tools...>` and `--allowedTools` / `--disallowedTools`;
+- `--setting-sources <sources>`; and
+- `--mcp-config` plus `--strict-mcp-config`.
 
-No upstream issue filed; the mechanism is documented in the Anthropic API reference
-cited above.  Re-evaluation trigger: if Anthropic deprecates or changes the tool-use
-`input_schema` semantics (see below).
+The exact SDK package confirms the composition used for text-only Cabal calls:
 
-## Re-evaluation triggers
+1. It launches the CLI with `--output-format stream-json --verbose
+   --input-format stream-json`.
+2. A string prompt becomes one `SDKUserMessage`:
 
-- `claude-code` baseline version is bumped beyond `2.1.117`
-- Anthropic changes or deprecates the `tool_use` `input_schema` constrained-decoding
-  mechanism
-- A direct `--json-schema <path>` CLI flag is added to the `claude` binary
-  (would allow a simpler, flag-based wiring path)
+   ```json
+   {
+     "type": "user",
+     "session_id": "",
+     "message": {
+       "role": "user",
+       "content": [{"type": "text", "text": "..."}]
+     },
+     "parent_tool_use_id": null
+   }
+   ```
 
-## Per-adapter schema pre-check (D-11 / NFR-S2)
+3. The transport serializes each input message as one JSON value followed by a
+   newline.
+4. It maps structured output to `--json-schema`, resume to `--resume`, a tool
+   array to `--tools`, settings sources to `--setting-sources`, and strict MCP
+   isolation to `--strict-mcp-config`.
+5. Its public declarations define assistant, `system/init`, successful result,
+   session UUID, usage, and structured-output records consumed by Cabal's strict
+   parser.
 
-Per Decision D-11, each AC2(a)-wired adapter ships a source-resident pre-check
-function that validates the caller-supplied JSON schema before the CLI subprocess
-is spawned.
+This is enough to retain the text/schema stream transport and deterministic
+parsing changes without an authenticated request. It is not evidence that an
+image block reaches the model or that web tools satisfy Cabal's requested
+semantics.
 
-**Function**: `Claude_code.check_json_schema : Yojson.Safe.t -> (unit, string) result`
-**Location**: `libs/cabal/src/claude_code.ml`
+## Probe artifact and authentication blocker
 
-**Checked constraint** (best-effort, not exhaustive):
+`tools/probe_claude_media_web.py` is the sole reproduction artifact. It:
 
-| Constraint | Offending keyword | Source |
-|---|---|---|
-| Root schema must declare `"type": "object"` | `"type"` | Anthropic tool_use docs |
+- requires exactly `2.1.117 (Claude Code)`;
+- creates deterministic 64×64 PNG/JPEG fixtures with non-descriptive names;
+- constructs the public stream-JSON base64 image candidate;
+- covers initial upload, resume upload, resume reuse without duplicate bytes,
+  web-disabled isolation, WebSearch-only, and WebSearch+WebFetch;
+- validates content-dependent structured answers and public tool/session
+  records; and
+- suppresses raw stdout, stderr, paths, prompts, image bytes, credentials, tool
+  arguments/results, and tracebacks from diagnostics.
 
-**Rationale**: Anthropic's `tool_use` `input_schema` requires an object schema at
-the root.  A root `type` of `"array"`, `"string"`, etc. is rejected by the API.
-A missing `type` field is treated as compatible (best-effort per D-11 — incomplete
-lists are acceptable).
+The offline validator and sanitization suite passes:
 
-Pre-check failure returns `Error msg` immediately, before the CLI subprocess is
-spawned, with a diagnostic naming the offending keyword and citing the documented
-constraint URL.  If the pre-check passes but the API still rejects the schema, that
-error is surfaced verbatim (D-11 / D-5).
+```text
+./tools/probe_claude_media_web.py --self-test
+PASS self-test
+```
 
-QG-7 unit tests in `libs/cabal/test/test_demo_629.ml` and `test/test_demo_629.ml`
-exercise this pre-check with incompatible schemas (root `type: "array"`, root
-`type: "string"`, bare JSON string) and a valid object schema.
+The installed CLI is `2.1.258`, so the artifact correctly refuses it. An
+integrity-checked exact-baseline binary reached process execution, but its
+authenticated modes could not run because the dedicated profile is logged out.
+No raw failed-process output was recorded as evidence.
 
-## Outcome: AC2(a) — wire native JSON schema enforcement
+For a later manual rerun, authenticate outside this task with:
 
-**Decision**: Wire native JSON schema enforcement for `claude-code`.
+```text
+CLAUDE_CONFIG_DIR="$HOME/.claude-atacama" claude auth login --claudeai
+```
 
-At baseline version `2.1.117`, the Anthropic API's `tool_use` mechanism provides
-native JSON schema enforcement.  The `Json_schema_enforcer` native path for
-`claude-code` is backed by this mechanism.  The per-adapter pre-check in
-`Claude_code.check_json_schema` (D-11) validates schemas before subprocess spawn.
+Then expose the verified `2.1.117` binary on `PATH` and run the checked-in probe.
+Do not treat a run against another version as baseline evidence.
 
-### Changes introduced by Story #629
+## Media result
 
-- `capabilities.native_json_schema_output = true` set on the `claude-code` descriptor
-  in `Backend_registry`.
-- `capability_evidence` record added to the descriptor:
-  - `tested_at_version = "2.1.117"` (pinned to `baseline_version`)
-  - `json_schema_draft = "draft-07"`
-  - `test_method = Manual_probe "..."` (documents the manual probe above)
-- `Claude_code.check_json_schema` pre-check function added to `claude_code.ml`
-  and exposed in `claude_code.mli` (D-11 / NFR-S2).
-- QG-7 unit tests added for the pre-check (D-11).
-- Investigation note (this file) created at the canonical path.
+The static SDK types establish that a user message uses Anthropic `MessageParam`
+content and the probe pins the candidate base64 image block. They do not prove
+that Claude Code `2.1.117` accepts, forwards, remembers, or schema-composes those
+blocks in an authenticated session.
 
-### Relation to prior stories
+Consequently:
 
-Story #625 (Epic #94, not yet merged to `main` at the time of Story #629) originally
-wired `claude-code` natively.  Story #628 (Epic #94, also not yet merged) introduced
-the `capability_evidence` contract.  Story #629 performs the full AC2(a) wiring from
-scratch on the `main` branch, incorporating the flag, the evidence record, and the
-per-adapter pre-check (D-11).
+- no OCaml base64 encoder or dependency was added;
+- initial and resumed uploads remain rejected before config I/O or process
+  spawn;
+- session attachment reuse also remains rejected; and
+- `Backend_registry` continues to advertise no Claude media types and no media
+  evidence.
 
-Completion notes reference both #625 (original native wiring intent) and #628
-(evidence contract), per AC4 of Story #629.
+Central preflight already validates each attachment's declared size, digest,
+MIME magic, and exact staged bytes. `Task_execution_context` authorizes an exact
+attachment-reference list and exposes sealed paths only after identity/policy
+matching. Any future encoder must consume `sealed_attachment_delivery`, preserve
+the reference/path ordering, use the matched preflight-validated `size_bytes` as
+an allocation bound, and emit no bytes for `Reuse_session_attachments`. That
+future work remains unnecessary until the authenticated transport probe passes.
+
+## Web result
+
+Static baseline help and SDK source establish that `--tools` fixes the available
+built-in tool set and that an empty tool array becomes `--tools ""`. Cabal now
+uses a fixed tool list that excludes `WebSearch` and `WebFetch` for
+`Web_disabled`; `--strict-mcp-config` prevents unrelated MCP discovery. User
+permission settings cannot add a built-in omitted from the fixed `--tools` set.
+
+Positive web behavior was not authenticated. Cabal therefore rejects
+`Web_search` and `Web_search_and_fetch` before config I/O or process spawn, and
+the descriptor remains at `Web_disabled` with no web evidence.
+
+## Strict public parsing and diagnostics
+
+The normalized stream parser accepts only exact public structures:
+
+- assistant text and bounded tool identity, never tool arguments;
+- canonical lowercase `8-4-4-4-12` session UUIDs from `system/init` or successful
+  results; and
+- independently valid non-negative usage fields from successful results.
+
+For compatibility with the repository's existing public-result contract, a
+result may omit the `success` subtype; any explicit non-success subtype remains
+rejected.
+
+User/input/image records, thinking, tool results, error records, malformed JSON,
+unsafe identifiers, paths, and raw fallback text do not become normalized
+events or display output. Invocation diagnostics use a separately constructed
+redacted argv and a fixed stdin marker; schema, model, session, MCP/settings
+paths, prompts, and instructions are omitted.
+
+## Capability outcome
+
+| Capability | Evidence obtained in this phase | Advertised after CBL-07B |
+|---|---:|---:|
+| Native JSON schema | Exact flag/SDK composition; prior independent E2E evidence unchanged | yes |
+| Text stream-JSON input/output | Exact baseline help and parity-matched SDK source/types | yes |
+| PNG/JPEG media | Candidate format and offline validators only | no |
+| Resume media upload | Offline probe path only | no |
+| Session media reuse | Offline no-duplicate-bytes assertion only | no |
+| Web-disabled isolation | Exact help/SDK tool semantics and deterministic argv tests | `Web_disabled` only |
+| WebSearch | Offline probe path only | no |
+| WebSearch + WebFetch | Offline probe path only | no |
+
+No media/web capability metadata changed.
+
+## Deterministic tests
+
+`test/test_claude_code.ml` pins:
+
+- exact text/schema stream argv and stdin shape;
+- native schema composition and top-level `$schema` stripping;
+- exact read-only and builder tool sets excluding web tools;
+- canonical resume validation and the parity SDK's exact flag/value shape;
+- redacted diagnostics;
+- fail-closed media and positive-web behavior before config or spawn;
+- public assistant/tool/session/usage parsing; and
+- negative privacy fixtures plus the probe's offline self-test.
+
+Re-evaluate media/web only after all content-dependent modes pass against an
+integrity-checked exact baseline with the dedicated account profile.
