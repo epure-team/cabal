@@ -231,11 +231,16 @@ The bounded probe is
 
 - pins `npx --yes @google/gemini-cli@0.38.2` by default and rejects version
   drift;
-- creates private deterministic blue PNG, red JPEG, and green PNG fixtures;
-- requires exact content-dependent colors for initial and resumed uploads;
+- creates private deterministic PNG/JPEG fixtures under opaque filenames;
+- keeps expected image properties solely in validators: filenames, prompts,
+  and response shapes disclose no expected colors;
+- requires exact content-dependent colors for initial and resumed uploads,
+  plus swapped-order and omitted-image negative controls that reject fixed or
+  leaked answers;
 - requires resume reuse to recall the last image without another `@path`;
 - tests disabled, search-only, and search-plus-fetch policy modes against public
-  tool lifecycle records;
+  tool lifecycle records; the disabled test must first complete an allow-policy
+  search/fetch invocation proving both tools are available in that environment;
 - uses direct argv plus stdin, bounds every subprocess, suppresses raw backend
   diagnostics, and prints only fixed errors;
 - provides an offline `--self-test` covering fixtures, permissions, escaping,
@@ -263,7 +268,9 @@ tools/probe_gemini_media_web.py --mode web-live
 
 The same account failure occurred with the installed `0.40.1` binary. No API
 key or Vertex AI environment was available. Resume-upload and resume-reuse could
-not begin because obtaining the initial authenticated session failed.
+not begin because obtaining the initial authenticated session failed. Likewise,
+`web-disabled` cannot pass without authentication because its required positive
+allow-control must succeed before the deny-policy observation is considered.
 
 ### 8.3 Capability outcome
 
@@ -304,15 +311,32 @@ settings. Gemini `0.38.2` ignores supplemental administrator policies when its
 standard administrator policy directory contains a TOML file; Cabal therefore
 checks the documented Linux, macOS, and Windows locations and fails closed
 before config I/O or spawn when such a policy can supersede the scoped deny.
-The policy file is unlinked on success, failure, timeout, cancellation, and
-ordinary exceptions.
+Policy unlink is attempted on success, failure, timeout, cancellation, and
+ordinary exceptions. A persistent unlink failure emits a sanitized diagnostic
+without the private policy path; Cabal does not falsely report guaranteed
+deletion when the operating system refuses cleanup.
 
 Baseline `0.38.2` rejects `--skip-trust`, so the adapter no longer emits that
 flag. It sends caller text over stdin with `-p ""`; the empty option value forces
 headless mode without appending a literal hyphen to stdin. Literal `@`
 characters in prompt/instructions are backslash-escaped to prevent caller text
-from becoming an implicit file-read directive. Schema prompts remain on the
-existing non-native validate-and-retry path.
+from becoming an implicit file-read directive. Within a serialized non-native
+retry schema, raw `@` is instead encoded as JSON `\u0040`: parsing yields the
+same schema string value, while blindly inserting Gemini's `\@` path escape
+would produce invalid JSON. Fresh-call and canonical-lowercase-UUID resume
+fake-runner tests exercise the complete two-attempt enforcer path and validate
+the final `a@b` result against a schema containing that exact constant.
+
+The generic YAML runner cannot create an invocation-scoped policy, and baseline
+`--allowed-tools` controls automatic approval rather than imposing a deny
+ceiling. Therefore the bundled `src/adapters/gemini.yaml` command is deliberately
+`false`: Extensible-profile Gemini stays registered conservatively but is
+unavailable and fails closed instead of exposing permissive web tools. Hardened
+registration continues to replace that candidate with the handwritten adapter.
+
+Public `init.session_id` evidence, the probe, runtime parser, resume validation,
+and fixtures all use one grammar: a canonical lowercase UUID. Synthetic
+`gemini-*` identifiers are rejected.
 
 ### 8.5 Re-evaluation gate
 
