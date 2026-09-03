@@ -775,6 +775,13 @@ let display_text_of_events events =
   in
   match rendered with [] -> None | _ -> Some (String.concat "\n" rendered)
 
+let assistant_text_of_events events =
+  events
+  |> List.filter_map (function
+       | Task_event.Agent_text_delta text -> Some text
+       | _ -> None)
+  |> String.concat ""
+
 (** Parse one stream event into display-safe public text. *)
 let parse_stream_event line =
   display_text_of_events (normalized_events_of_stream_line line)
@@ -823,15 +830,12 @@ let run_invocation ~sw ~env ~spec ?context ?on_raw_line ?on_display invocation =
   Diagnostics.debug "backend command: %s stdin=%s"
     (String.concat " " invocation.redacted_argv)
     invocation.redacted_stdin ;
-  let assistant_text_streamed = ref false in
+  let last_assistant_text = ref None in
   let on_stdout line =
     Option.iter (fun callback -> callback line) on_raw_line ;
     let events = stream_events_before_terminal line in
-    if
-      List.exists
-        (function Task_event.Agent_text_delta _ -> true | _ -> false)
-        events
-    then assistant_text_streamed := true ;
+    let assistant_text = assistant_text_of_events events in
+    if assistant_text <> "" then last_assistant_text := Some assistant_text ;
     Option.iter
       (fun context ->
         List.iter (Task_execution_context.emit context) events)
@@ -880,7 +884,7 @@ let run_invocation ~sw ~env ~spec ?context ?on_raw_line ?on_display invocation =
   in
   Option.iter
     (fun terminal ->
-      if not !assistant_text_streamed && terminal.text <> "" then begin
+      if !last_assistant_text <> Some terminal.text && terminal.text <> "" then begin
         Option.iter
           (fun context ->
             Task_execution_context.emit context

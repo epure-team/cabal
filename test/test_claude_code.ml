@@ -638,6 +638,76 @@ let successful_stream ?(session_id = valid_session_id) answer =
       session_id;
   ]
 
+let run_fake_claude_text_events label output_lines =
+  Process_test_helper.install_launcher () ;
+  with_temp_dir label @@ fun temp_dir ->
+  ignore (install_fake_claude temp_dir output_lines) ;
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let public_text = ref [] in
+  let sink =
+    Task_event.create_sink ~sw ~now:(fun () -> 0.0)
+      ~on_event:(fun event ->
+        match event.Task_event.payload with
+        | Task_event.Agent_text_delta text -> public_text := text :: !public_text
+        | _ -> ())
+      ()
+  in
+  let context =
+    Task_execution_context.create ~remaining_time:(fun () -> None) sink
+  in
+  let displayed = ref [] in
+  let spec =
+    Backend_types.make_task_spec ~prompt:"test" ~working_dir:temp_dir
+      ~timeout:3.0 ()
+  in
+  let result =
+    Claude_code.run_task_streaming ~sw ~env ~context
+      ~on_stdout:(fun text -> displayed := text :: !displayed)
+      spec
+  in
+  Task_event.emit_terminal sink Task_event.Succeeded ;
+  Eio.Promise.await (Task_event.Private.delivery_complete sink) ;
+  (result, List.rev !displayed, List.rev !public_text)
+
+let test_final_text_emitted_after_different_assistant_text () =
+  let result, displayed, public_text =
+    run_fake_claude_text_events "different-final"
+      [
+        {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working..."}]}}|};
+        {|{"type":"result","subtype":"success","is_error":false,"result":"done"}|};
+      ]
+  in
+  Alcotest.(check bool)
+    "verified result succeeds" true (result.status = Backend_types.Success) ;
+  Alcotest.(check string) "final result retained" "done" result.agent_text ;
+  Alcotest.(check (list string))
+    "display receives intermediate then final" ["working..."; "done"] displayed ;
+  Alcotest.(check (list string))
+    "public events receive intermediate then final"
+    ["working..."; "done"] public_text
+
+let test_structured_terminal_emitted_after_assistant_text () =
+  let structured = {|{"answer":"done"}|} in
+  let result, displayed, public_text =
+    run_fake_claude_text_events "structured-final"
+      [
+        {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"draft answer"}]}}|};
+        {|{"type":"result","subtype":"success","is_error":false,"result":"legacy","structured_output":{"answer":"done"}}|};
+      ]
+  in
+  Alcotest.(check bool)
+    "structured result succeeds" true (result.status = Backend_types.Success) ;
+  Alcotest.(check string)
+    "structured result retained" structured result.agent_text ;
+  Alcotest.(check (list string))
+    "display receives assistant then structured final"
+    ["draft answer"; structured] displayed ;
+  Alcotest.(check (list string))
+    "public events receive assistant then structured final"
+    ["draft answer"; structured] public_text
+
 let assert_protocol_failure label expected_message result =
   (match result.Backend_types.status with
   | Backend_types.Failed message ->
@@ -808,6 +878,18 @@ let test_run_task_fake_cli_rejects_invalid_exit_zero_streams () =
           {|{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"schema-looking assistant only"}]}}|};
         ],
         Some schema );
+      ( "duplicate result records",
+        [
+          {|{"type":"result","subtype":"success","is_error":false,"result":"first"}|};
+          {|{"type":"result","subtype":"success","is_error":false,"result":"second"}|};
+        ],
+        None );
+      ( "record after valid result",
+        [
+          {|{"type":"result","subtype":"success","is_error":false,"result":"not terminal"}|};
+          {|{"type":"system","subtype":"status","message":"private trailing record"}|};
+        ],
+        None );
     ]
   in
   List.iter
@@ -1300,6 +1382,12 @@ let session_reuse_tests =
     ( "fake CLI success, streaming, resume, and cleanup",
       `Quick,
       test_run_task_fake_cli_success_stream_resume_and_cleanup );
+    ( "different terminal text is emitted after assistant text",
+      `Quick,
+      test_final_text_emitted_after_different_assistant_text );
+    ( "structured terminal is emitted after assistant text",
+      `Quick,
+      test_structured_terminal_emitted_after_assistant_text );
     ( "fake CLI native schema terminal",
       `Quick,
       test_run_task_fake_cli_native_schema );

@@ -258,6 +258,23 @@ val parse_public_session_id : string -> string option
 (** Strict usage parser accepting only successful result records. *)
 val parse_public_cost : string -> Backend_types.cost option
 
+(** A terminal Claude result accepted by {!verify_terminal_stdout}. *)
+type verified_terminal = {
+  text : string;  (** Exact public result text, preferring structured output. *)
+  session_id : string option;
+      (** Canonical session UUID, present only when all public IDs agree. *)
+  cost : Backend_types.cost option;  (** Validated terminal usage, if present. *)
+}
+
+(** [verify_terminal_stdout stdout] validates a complete Claude stream before
+    process exit zero may become task success. It requires exactly one final
+    [type=result], [subtype=success], [is_error=false] record with public result
+    text, rejects malformed lines and any record after the result, and validates
+    all public session identifiers as one canonical UUID.
+
+    Errors are fixed sanitized diagnostics that never contain stream content. *)
+val verify_terminal_stdout : string -> (verified_terminal, string) result
+
 (** [parse_stream_event line] parses a stream-json event line and extracts only
     display-safe public content. Tool-use blocks retain a bounded tool name but
     never arguments; user/tool-result, thinking, error, malformed, and unknown
