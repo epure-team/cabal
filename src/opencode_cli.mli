@@ -13,9 +13,24 @@
 
     {b Configuration:}
     OpenCode is expected to be installed and accessible in the PATH.
-    The backend uses [opencode run --format json] for non-interactive
-    execution. Permissions can be configured via the [OPENCODE_PERMISSION]
-    environment variable.
+    The backend uses [opencode run --pure --format json] for non-interactive
+    execution. It pins task-local web permissions through fixed environment
+    values passed as direct argv to [env], isolates mutable config and
+    file-based managed-policy discovery in a private temporary directory,
+    selects an invocation-specific primary agent, and preserves the default
+    OpenCode data and account database for provider authentication. On macOS,
+    [/Library/Managed Preferences] MDM remains administrator-trusted and is
+    outside Cabal's override boundary. Caller-provided config fragments are
+    never interpolated.
+
+    {b Media and web transport:}
+    PNG/JPEG upload uses repeated [--file] arguments containing only centrally
+    sealed absolute paths. Native [websearch] and [webfetch] permissions are
+    independently fixed for each task. Native [codesearch] is always denied.
+    The backend denies task delegation via [task]. This controls native OpenCode
+    tools and is not an OS shell network sandbox. The built-in descriptor remains
+    the authoritative public capability gate; this module does not promote
+    catalog capabilities.
 
     {b MCP Integration:}
     OpenCode supports MCP servers via its config file. The [mcp_servers]
@@ -33,9 +48,19 @@
 (** @inline *)
 include Agentic_backend.S
 
-(** Extract public assistant text and token usage from one OpenCode JSON event.
-    Raw event content is otherwise omitted. *)
+(** Extract canonical identifiers, completed public text, sanitized completed
+    tool lifecycle, and bounded usage from one structurally valid OpenCode JSON
+    event. Runtime parsing additionally requires a preceding [step_start] and
+    retains only records with its assistant message ID. Raw event content,
+    reasoning, user text, errors, and tool payloads are otherwise omitted. The
+    exact legacy synthetic shape
+    [{"type":"text","part":{"text":...}}] remains supported by this utility
+    for source compatibility, but is excluded from runtime result/event parsing. *)
 val normalized_events_of_line : string -> Task_event.payload list
+
+(** Extract the canonical OpenCode session identifier from public [step_start]
+    JSONL, when present. Invalid, malformed, and non-public records are ignored. *)
+val parse_public_session_id : string -> string option
 
 (** {1 Additional Utilities} *)
 
@@ -95,18 +120,49 @@ val parse_json_events : string -> string * Backend_types.cost option
     (none) *)
 val parse_stdout_text : string -> string
 
-(** [build_command ~mcp_config_path spec] constructs the OpenCode CLI command
-    and stdin content.  OpenCode 1.14.20 has no native read-only sandbox;
-    [spec.read_only] is acknowledged as documented limitation and the baseline
-    command is returned unchanged.  Exported for testing.
+(** One direct process invocation and its diagnostics-safe projection. *)
+type backend_invocation = {
+  argv : string list;  (** Actual direct argv; never shell-interpolated. *)
+  stdin : string option;  (** Prompt/instructions, kept out of argv. *)
+  redacted_argv : string list;
+      (** Diagnostic argv with model and sealed paths replaced. *)
+}
+
+(** [build_invocation ~attachment_paths ~attachment_delivery
+    ~mcp_config_path spec] constructs an OpenCode invocation. Upload attempts
+    require one centrally sealed absolute [.png]/[.jpg] path per attachment and
+    emit one [--file] pair per path. Session reuse and [resume_session_id] fail
+    closed while the runtime capability remains disabled. Web policy maps only
+    to fixed [websearch]/[webfetch]/[codesearch] permission documents, with
+    [task] delegation denied for every web mode. [OPENCODE_CONFIG] is the exact
+    child-relative [opencode.json] name, resolved by the child from its actual
+    working directory after Cabal changes cwd. Cabal does not separately
+    normalize the config path and working directory.
+
+    The result contains direct argv, stdin, and redacted argv. No filesystem or
+    registry access occurs. *)
+val build_invocation :
+  ?attachment_paths:string list ->
+  ?attachment_delivery:Backend_types.attachment_delivery ->
+  mcp_config_path:string option ->
+  Backend_types.task_spec ->
+  (backend_invocation, string) result
+
+(** [build_command ~mcp_config_path spec] is the attachment-free compatibility
+    constructor. OpenCode 1.14.20 has no native read-only sandbox;
+    [spec.read_only] remains a documented limitation. Specs carrying media or
+    resume state are rejected because this helper has no central sealed handoff.
 
     {pre}
     (none)
 
     {post}
-    Returns [(cmd_list, stdin_content)].  Includes [-m <model>] when
-    [spec.model] is set.  Command is otherwise identical for [read_only = true]
-    and [read_only = false] (no native restriction model).
+    Returns [(cmd_list, stdin_content)]. Includes [-m <model>] when [spec.model]
+    is set. Web access is represented by fixed [env] assignments, [--pure], and
+    [--agent build]. The command is otherwise identical for
+    [read_only = true] and [read_only = false] (no native restriction model).
+    [codesearch] and [task] delegation are always denied, including when web
+    search/fetch is enabled.
 
     {violators}
     (none)

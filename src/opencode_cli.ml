@@ -474,127 +474,562 @@ let ensure_mcp_if_config_applied ~env ~setup_outcome spec =
                 config."
                (write_outcome_reason setup_outcome)))
 
-(* Parse OpenCode's JSON event output.
-   OpenCode with --format json emits JSONL events, one per line.
-   Event types:
-     {"type":"text", "part":{"text":"..."}} — text content (concatenated)
-     {"type":"step_finish", "part":{"tokens":{"input":N,"output":N},"cost":F}}
-   Text events are concatenated in order to build the full response. *)
-let parse_json_events stdout =
-  let lines =
-    stdout |> String.split_on_char '\n'
-    |> List.filter (fun s -> String.length (String.trim s) > 0)
+let safe_protocol_identifier value =
+  let safe_character = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' | '.' | ':' -> true
+    | _ -> false
   in
-  let text_buf = Buffer.create 4096 in
-  let total_input = ref 0 in
-  let total_output = ref 0 in
-  let has_usage = ref false in
-  let total_cost = ref 0.0 in
-  List.iter
-    (fun line ->
-      try
-        let json = Yojson.Safe.from_string line in
-        let open Yojson.Safe.Util in
-        let event_type =
-          try json |> member "type" |> to_string with _ -> ""
+  if
+    value <> ""
+    && String.length value <= 128
+    && String.for_all safe_character value
+  then Some value
+  else None
+
+let canonical_prefixed_id prefix value =
+  let lowercase_hex = function '0' .. '9' | 'a' .. 'f' -> true | _ -> false in
+  let alphanumeric = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' -> true
+    | _ -> false
+  in
+  String.length value = 30
+  && String.starts_with ~prefix:(prefix ^ "_") value
+  && String.for_all lowercase_hex (String.sub value 4 12)
+  && String.for_all alphanumeric (String.sub value 16 14)
+
+let canonical_opencode_session_id = canonical_prefixed_id "ses"
+
+let canonical_opencode_message_id = canonical_prefixed_id "msg"
+
+let canonical_opencode_part_id = canonical_prefixed_id "prt"
+
+let nonnegative_int_member name json =
+  match Yojson.Safe.Util.member name json with
+  | `Int value when value >= 0 -> Some value
+  | `Intlit value -> (
+      match int_of_string_opt value with
+      | Some value when value >= 0 -> Some value
+      | Some _ | None -> None)
+  | _ -> None
+
+let finite_nonnegative_number = function
+  | (`Int _ | `Intlit _ | `Float _) as value -> (
+      match Yojson.Safe.Util.to_number_option value with
+      | Some number
+        when number >= 0.0
+             && not (Float.is_nan number || Float.is_infinite number) ->
+          Some number
+      | Some _ | None -> None)
+  | _ -> None
+
+let nonnegative_float_member name json =
+  finite_nonnegative_number (Yojson.Safe.Util.member name json)
+
+let valid_completed_timing = function
+  | `Assoc _ as timing -> (
+      match
+        ( finite_nonnegative_number (Yojson.Safe.Util.member "start" timing),
+          finite_nonnegative_number (Yojson.Safe.Util.member "end" timing) )
+      with
+      | Some start, Some end_ -> end_ >= start
+      | _ -> false)
+  | _ -> false
+
+let token_usage_of_part part =
+  let open Yojson.Safe.Util in
+  match
+    ( part |> member "type",
+      part |> member "reason",
+      part |> member "tokens",
+      nonnegative_float_member "cost" part )
+  with
+  | `String "step-finish", `String _, (`Assoc _ as tokens), Some cost_usd ->
+      let cache = tokens |> member "cache" in
+      let tokens_input = nonnegative_int_member "input" tokens in
+      let tokens_output = nonnegative_int_member "output" tokens in
+      let reasoning = nonnegative_int_member "reasoning" tokens in
+      let cache_read_input_tokens =
+        match cache with
+        | `Assoc _ -> nonnegative_int_member "read" cache
+        | _ -> None
+      in
+      let cache_creation_input_tokens =
+        match cache with
+        | `Assoc _ -> nonnegative_int_member "write" cache
+        | _ -> None
+      in
+      let total_valid =
+        match tokens |> member "total" with
+        | `Null -> true
+        | _ -> Option.is_some (nonnegative_int_member "total" tokens)
+      in
+      if
+        total_valid
+        && Option.is_some tokens_input
+        && Option.is_some tokens_output
+        && Option.is_some reasoning
+        && Option.is_some cache_read_input_tokens
+        && Option.is_some cache_creation_input_tokens
+      then
+        Some
+          {
+            Backend_types.tokens_input;
+            tokens_output;
+            cost_usd = Some cost_usd;
+            cache_creation_input_tokens;
+            cache_read_input_tokens;
+          }
+      else None
+  | _ -> None
+
+let completed_text_of_part part =
+  let open Yojson.Safe.Util in
+  match (part |> member "type", part |> member "text", part |> member "time") with
+  | `String "text", `String text, timing when valid_completed_timing timing ->
+      Some text
+  | _ -> None
+
+let completed_tool_of_part part =
+  let open Yojson.Safe.Util in
+  match (part |> member "type", part |> member "state") with
+  | `String "tool", (`Assoc _ as state)
+    when state |> member "status" = `String "completed" -> (
+      match
+        ( Option.bind
+            (part |> member "tool" |> to_string_option)
+            safe_protocol_identifier,
+          Option.bind
+            (part |> member "callID" |> to_string_option)
+            safe_protocol_identifier,
+          state |> member "input",
+          state |> member "output",
+          state |> member "title",
+          state |> member "metadata",
+          state |> member "time" )
+      with
+      | ( Some name,
+          Some id,
+          `Assoc _,
+          `String _,
+          `String _,
+          `Assoc _,
+          timing )
+        when valid_completed_timing timing ->
+          Some (Task_event.Tool_finished {id = Some id; name = Some name})
+      | _ -> None)
+  | _ -> None
+
+type strict_record =
+  | Ignored_record
+  | Public_record of {
+      session_id : string;
+      message_id : string;
+      starts_message : bool;
+      payloads : Task_event.payload list;
+    }
+
+type protocol_failure =
+  | Error_record
+  | Invalid_jsonl
+  | Invalid_envelope
+  | Mixed_session
+  | Mixed_message
+
+let common_public_envelope json part =
+  let open Yojson.Safe.Util in
+  match
+    ( finite_nonnegative_number (json |> member "timestamp"),
+      json |> member "sessionID",
+      part |> member "id",
+      part |> member "sessionID",
+      part |> member "messageID" )
+  with
+  | ( Some _,
+      `String session_id,
+      `String part_id,
+      `String part_session_id,
+      `String message_id )
+    when canonical_opencode_session_id session_id
+         && session_id = part_session_id
+         && canonical_opencode_part_id part_id
+         && canonical_opencode_message_id message_id ->
+      Some (session_id, message_id)
+  | _ -> None
+
+(* Parse only the public OpenCode 1.14.20 JSONL surface. The exact source at
+   v1.14.20 emits this top-level envelope from RunCommand.emit. Runtime stream
+   state below binds timed text to the message ID introduced by the assistant
+   processor's step-start. See the pinned source citations in the addendum. *)
+let strict_record_of_line line =
+  try
+    let json = Yojson.Safe.from_string line in
+    let open Yojson.Safe.Util in
+    let event_type = json |> member "type" |> to_string_option in
+    let part = json |> member "part" in
+    match event_type with
+    | Some "error" -> Error Error_record
+    | Some ("step_start" | "text" | "tool_use" | "step_finish") -> (
+        match common_public_envelope json part with
+        | None -> Error Invalid_envelope
+        | Some (session_id, message_id) -> (
+            let public ~starts_message payloads =
+              Ok
+                (Public_record
+                   {session_id; message_id; starts_message; payloads})
+            in
+            match event_type with
+            | Some "step_start" -> (
+                match part |> member "type" with
+                | `String "step-start" ->
+                    public ~starts_message:true
+                      [Task_event.Session_id session_id]
+                | _ -> Error Invalid_envelope)
+            | Some "text" -> (
+                match completed_text_of_part part with
+                | Some text ->
+                    public ~starts_message:false
+                      [Task_event.Agent_text_delta text]
+                | None -> Error Invalid_envelope)
+            | Some "tool_use" -> (
+                match completed_tool_of_part part with
+                | Some payload -> public ~starts_message:false [payload]
+                | None -> Error Invalid_envelope)
+            | Some "step_finish" -> (
+                match token_usage_of_part part with
+                | Some usage ->
+                    public ~starts_message:false [Task_event.Token_usage usage]
+                | None -> Error Invalid_envelope)
+            | Some _ | None -> assert false))
+    | Some _ -> Ok Ignored_record
+    | None -> Error Invalid_jsonl
+  with _ -> Error Invalid_jsonl
+
+let strict_normalized_events_of_line line =
+  match strict_record_of_line line with
+  | Ok (Public_record record) -> record.payloads
+  | Ok Ignored_record | Error _ -> []
+
+(* Retain the exact minimal fixture accepted by the original public utility.
+   OpenCode runtime JSONL always adds timestamp/sessionID, so the runtime parser
+   below deliberately does not use this compatibility projection. *)
+let legacy_normalized_text_fixture line =
+  try
+    match Yojson.Safe.from_string line with
+    | `Assoc fields when List.length fields = 2 -> (
+        match (List.assoc_opt "type" fields, List.assoc_opt "part" fields) with
+        | Some (`String "text"), Some (`Assoc [("text", `String text)]) ->
+            [Task_event.Agent_text_delta text]
+        | _ -> [])
+    | _ -> []
+  with _ -> []
+
+let normalized_events_of_line line =
+  match strict_normalized_events_of_line line with
+  | [] -> legacy_normalized_text_fixture line
+  | events -> events
+
+type stream_parser = {
+  mutable stream_session_id : string option;
+  mutable stream_message_id : string option;
+  mutable stream_failure : protocol_failure option;
+}
+
+let create_stream_parser () =
+  {stream_session_id = None; stream_message_id = None; stream_failure = None}
+
+let fail_stream parser failure =
+  parser.stream_failure <- Some failure ;
+  []
+
+let consume_strict_line parser line =
+  if Option.is_some parser.stream_failure || String.trim line = "" then []
+  else
+    match strict_record_of_line line with
+    | Error failure -> fail_stream parser failure
+    | Ok Ignored_record -> []
+    | Ok (Public_record record) ->
+        let session_valid =
+          match parser.stream_session_id with
+          | None ->
+              parser.stream_session_id <- Some record.session_id ;
+              true
+          | Some expected -> expected = record.session_id
         in
-        let part = json |> member "part" in
-        match event_type with
-        | "text" -> (
-            (* Extract text from part.text *)
-            try
-              let t = part |> member "text" |> to_string in
-              Buffer.add_string text_buf t
-            with _ -> ())
-        | "step_finish" -> (
-            (* Extract usage from part.tokens *)
-            (try
-               let tokens = part |> member "tokens" in
-               if tokens <> `Null then (
-                 has_usage := true ;
-                 (try
-                    total_input :=
-                      !total_input + (tokens |> member "input" |> to_int)
-                  with _ -> ()) ;
-                 try
-                   total_output :=
-                     !total_output + (tokens |> member "output" |> to_int)
-                 with _ -> ())
-             with _ -> ()) ;
-            (* Extract cost (USD) from part.cost *)
-            try
-              let c = part |> member "cost" |> to_number in
-              if c > 0.0 then total_cost := !total_cost +. c
-            with _ -> ())
-        | _ -> ()
-      with _ -> ())
-    lines ;
-  let text = Buffer.contents text_buf in
-  let cost =
-    if !has_usage then
-      Some
-        {
-          tokens_input = (if !total_input > 0 then Some !total_input else None);
-          tokens_output =
-            (if !total_output > 0 then Some !total_output else None);
-          cost_usd = (if !total_cost > 0.0 then Some !total_cost else None);
-          cache_creation_input_tokens = None;
-          cache_read_input_tokens = None;
-        }
-    else None
-  in
-  (text, cost)
+        if not session_valid then fail_stream parser Mixed_session
+        else
+          let message_valid =
+            match record.starts_message with
+            | true ->
+                parser.stream_message_id <- Some record.message_id ;
+                true
+            | false -> (
+                match parser.stream_message_id with
+                | Some expected -> expected = record.message_id
+                | None -> false)
+          in
+          if message_valid then record.payloads
+          else fail_stream parser Mixed_message
+
+let normalized_stream stdout =
+  let parser = create_stream_parser () in
+  let events = ref [] in
+  String.split_on_char '\n' stdout
+  |> List.iter (fun line ->
+      let next = consume_strict_line parser line in
+      events := List.rev_append next !events) ;
+  match parser.stream_failure with
+  | Some failure -> Error failure
+  | None -> Ok (List.rev !events, parser.stream_session_id)
+
+let parse_json_events stdout =
+  match normalized_stream stdout with
+  | Error _ -> ("", None)
+  | Ok (events, _) ->
+      let text = Buffer.create 4096 in
+      let costs = ref [] in
+      List.iter
+        (function
+          | Task_event.Agent_text_delta delta -> Buffer.add_string text delta
+          | Token_usage usage -> costs := Some usage :: !costs
+          | _ -> ())
+        events ;
+      (Buffer.contents text, Backend_types.aggregate_costs (List.rev !costs))
 
 let parse_cost_from_stdout stdout =
   let _, cost = parse_json_events stdout in
   cost
 
-let normalized_events_of_line line =
-  try
-    let json = Yojson.Safe.from_string line in
-    let open Yojson.Safe.Util in
-    let part = json |> member "part" in
-    match json |> member "type" |> to_string_option with
-    | Some "text" ->
-        Option.to_list
-          (Option.map
-             (fun text -> Task_event.Agent_text_delta text)
-             (part |> member "text" |> to_string_option))
-    | Some "step_finish" ->
-        let tokens = part |> member "tokens" in
-        if tokens = `Null then []
-        else
-          [
-            Task_event.Token_usage
-              {
-                Backend_types.tokens_input =
-                  tokens |> member "input" |> to_int_option;
-                tokens_output = tokens |> member "output" |> to_int_option;
-                cost_usd = part |> member "cost" |> to_float_option;
-                cache_creation_input_tokens = None;
-                cache_read_input_tokens = None;
-              };
-          ]
-    | _ -> []
-  with _ -> []
+let parse_public_session_id stdout =
+  match normalized_stream stdout with
+  | Error _ -> None
+  | Ok (_, session_id) -> session_id
 
-(* Build the opencode run command for non-interactive execution *)
-let build_command ~mcp_config_path:_ (spec : task_spec) =
-  (* Use - to read prompt from stdin *)
-  let model_args = match spec.model with Some m -> ["-m"; m] | None -> [] in
-  let base = ["opencode"; "run"; "--format"; "json"] @ model_args @ ["-"] in
+type backend_invocation = {
+  argv : string list;
+  stdin : string option;
+  redacted_argv : string list;
+}
+
+let ( let* ) result f =
+  match result with Ok value -> f value | Error _ as error -> error
+
+let invocation_error message = Error ("OpenCode invocation rejected: " ^ message)
+
+let staged_path_matches_media_type attachment path =
+  path <> ""
+  && (not (Filename.is_relative path))
+  && (not (String.contains path '\000'))
+  &&
+  match attachment.Backend_types.media_type with
+  | Backend_types.Png -> String.ends_with ~suffix:".png" path
+  | Backend_types.Jpeg -> String.ends_with ~suffix:".jpg" path
+
+let validate_transport_request ~attachment_delivery ~attachment_paths spec =
+  let* () =
+    match spec.Backend_types.resume_session_id with
+    | None -> Ok ()
+    | Some _ -> invocation_error "session resume is unsupported"
+  in
+  let* () =
+    match attachment_delivery with
+    | Backend_types.Upload_attachments -> Ok ()
+    | Reuse_session_attachments ->
+        invocation_error "session attachment reuse is unsupported"
+  in
+  if
+    List.length attachment_paths <> List.length spec.attachments
+    || not
+         (List.for_all2 staged_path_matches_media_type spec.attachments
+            attachment_paths)
+  then invocation_error "the sealed attachment set does not match the task"
+  else Ok ()
+
+let web_permission_json = function
+  | Backend_types.Web_disabled ->
+      {|{"websearch":"deny","webfetch":"deny","codesearch":"deny","task":"deny"}|}
+  | Web_search ->
+      {|{"websearch":"allow","webfetch":"deny","codesearch":"deny","task":"deny"}|}
+  | Web_search_and_fetch ->
+      {|{"websearch":"allow","webfetch":"allow","codesearch":"deny","task":"deny"}|}
+
+let web_config_json ?(agent = "build") web_access =
+  let permission = web_permission_json web_access in
+  Printf.sprintf
+    {|{"share":"disabled","permission":%s,"agent":{"%s":{"mode":"primary","permission":%s}}}|}
+    permission agent permission
+
+let fixed_environment_args ~project_config_path web_access =
+  [
+    "env";
+    "-u";
+    "OPENCODE_DB";
+    "OPENCODE_PERMISSION=" ^ web_permission_json web_access;
+    "OPENCODE_CONFIG_CONTENT=" ^ web_config_json web_access;
+    "OPENCODE_CONFIG=" ^ project_config_path;
+    "OPENCODE_CONFIG_DIR=";
+    "OPENCODE_DISABLE_PROJECT_CONFIG=1";
+    "OPENCODE_EXPERIMENTAL=0";
+    "OPENCODE_EXPERIMENTAL_EXA=0";
+    ( "OPENCODE_ENABLE_EXA="
+    ^ if web_access = Backend_types.Web_disabled then "0" else "1" );
+    "OPENCODE_AUTO_SHARE=0";
+    "OPENCODE_DISABLE_AUTOUPDATE=1";
+    "OPENCODE_DISABLE_LSP_DOWNLOAD=1";
+  ]
+
+let image_args paths =
+  List.concat_map (fun path -> ["--file"; path]) paths
+
+let redacted_image_args paths =
+  List.mapi
+    (fun index _ -> ["--file"; Printf.sprintf "<attachment-%d>" (index + 1)])
+    paths
+  |> List.concat
+
+let rec remove_tree path =
+  try
+    match (Unix.lstat path).st_kind with
+    | Unix.S_DIR ->
+        let children_removed =
+          Sys.readdir path
+          |> Array.fold_left
+               (fun success child ->
+                 remove_tree (Filename.concat path child) && success)
+               true
+        in
+        if children_removed then (
+          Unix.rmdir path ;
+          true)
+        else false
+    | _ ->
+        Unix.unlink path ;
+        true
+  with
+  | Unix.Unix_error (Unix.ENOENT, _, _) -> true
+  | Unix.Unix_error _ | Sys_error _ -> false
+
+let with_isolated_config_home f =
+  match
+    try
+      Ok (Filename.temp_dir ~perms:0o700 "cabal-opencode-config-" "")
+    with Sys_error _ | Unix.Unix_error _ -> Error ()
+  with
+  | Error () -> Error "OpenCode config isolation could not be created"
+  | Ok directory ->
+      let result =
+        Fun.protect ~finally:(fun () -> ignore (remove_tree directory))
+          (fun () -> f directory)
+      in
+      Ok result
+
+let isolate_invocation directory web_access invocation =
+  let runtime_agent = "cabal-" ^ Filename.basename directory in
+  let config_prefix = "OPENCODE_CONFIG_CONTENT=" in
+  let rewrite_config agent =
+    List.map (fun arg ->
+        if String.starts_with ~prefix:config_prefix arg then
+          config_prefix ^ web_config_json ~agent web_access
+        else arg)
+  in
+  let rec rewrite_agent agent = function
+    | "--agent" :: _ :: rest -> "--agent" :: agent :: rest
+    | item :: rest -> item :: rewrite_agent agent rest
+    | [] -> []
+  in
+  let actual =
+    [
+      "XDG_CONFIG_HOME=" ^ directory;
+      "OPENCODE_TEST_HOME=" ^ directory;
+      ( "OPENCODE_TEST_MANAGED_CONFIG_DIR="
+      ^ Filename.concat directory "managed" );
+    ]
+  in
+  let redacted =
+    [
+      "XDG_CONFIG_HOME=<isolated-config>";
+      "OPENCODE_TEST_HOME=<isolated-config>";
+      "OPENCODE_TEST_MANAGED_CONFIG_DIR=<isolated-config>/managed";
+    ]
+  in
+  let insert assignments = function
+    | "env" :: "-u" :: name :: rest ->
+        "env" :: "-u" :: name :: assignments @ rest
+    | "env" :: rest -> "env" :: assignments @ rest
+    | argv -> argv
+  in
+  {
+    invocation with
+    argv =
+      invocation.argv |> rewrite_config runtime_agent
+      |> rewrite_agent runtime_agent |> insert actual;
+    redacted_argv =
+      invocation.redacted_argv |> rewrite_config "<isolated-agent>"
+      |> rewrite_agent "<isolated-agent>" |> insert redacted;
+  }
+
+let child_project_config_path working_dir =
+  if working_dir = "" || String.contains working_dir '\000' then
+    invocation_error "OpenCode working directory is invalid"
+  else Ok "opencode.json"
+
+let build_invocation ?(attachment_paths = [])
+    ?(attachment_delivery = Backend_types.Upload_attachments) ~mcp_config_path:_
+    (spec : task_spec) =
+  let* () =
+    validate_transport_request ~attachment_delivery ~attachment_paths spec
+  in
+  let* project_config_path = child_project_config_path spec.working_dir in
+  let model_args, redacted_model_args =
+    match spec.model with
+    | Some model -> (["-m"; model], ["-m"; "<model>"])
+    | None -> ([], [])
+  in
+  let root =
+    fixed_environment_args ~project_config_path spec.web_access
+    @ [
+        "opencode";
+        "run";
+        "--pure";
+        "--format";
+        "json";
+        "--agent";
+        "build";
+      ]
+  in
+  let redacted_root =
+    fixed_environment_args ~project_config_path:"<project-config>" spec.web_access
+    @ [
+        "opencode";
+        "run";
+        "--pure";
+        "--format";
+        "json";
+        "--agent";
+        "build";
+      ]
+  in
   let full_prompt =
     if String.length spec.instructions > 0 then
-      Printf.sprintf
-        "%s\n\n---\nProject Instructions:\n%s"
-        spec.prompt
+      Printf.sprintf "%s\n\n---\nProject Instructions:\n%s" spec.prompt
         spec.instructions
     else spec.prompt
   in
-  (* Return command and stdin content separately to avoid arg list too long *)
-  (base, full_prompt)
+  Ok
+    {
+      argv = root @ model_args @ image_args attachment_paths @ ["-"];
+      stdin = Some full_prompt;
+      redacted_argv =
+        redacted_root @ redacted_model_args @ redacted_image_args attachment_paths
+        @ ["-"];
+    }
 
-(* Extract response text from OpenCode JSON events stdout *)
+let build_command ~mcp_config_path spec =
+  match build_invocation ~mcp_config_path spec with
+  | Ok invocation ->
+      ( invocation.argv,
+        match invocation.stdin with Some stdin -> stdin | None -> "" )
+  | Error message -> invalid_arg message
+
 let parse_stdout_text stdout =
   let text, _ = parse_json_events stdout in
   text
@@ -649,86 +1084,185 @@ let check_opencode_mutation ~env ~config_path ~backup result =
         session_id = None;
       }
 
+let failed_result message =
+  make_task_result ~status:(Failed message) ~stderr:message ~exit_code:1 ()
+
+type transport_inputs = {
+  attachment_delivery : Backend_types.attachment_delivery;
+  attachment_paths : string list;
+}
+
+let sensitive_transport_requested spec =
+  spec.Backend_types.attachments <> []
+  || spec.web_access <> Backend_types.Web_disabled
+
+let requested_attachment_delivery context spec =
+  match Task_execution_context.requested_delivery context with
+  | None -> Ok Backend_types.Upload_attachments
+  | Some delivery
+    when delivery.attachment_references = spec.Backend_types.attachments
+         && delivery.web_access_policy = spec.web_access ->
+      Ok delivery.attachment_delivery
+  | Some _ ->
+      invocation_error "the execution delivery context does not match the task"
+
+let requested_transport_inputs ?context spec =
+  if not (sensitive_transport_requested spec) then
+    let* attachment_delivery =
+      match context with
+      | None -> Ok Backend_types.Upload_attachments
+      | Some context -> requested_attachment_delivery context spec
+    in
+    Ok {attachment_delivery; attachment_paths = []}
+  else
+    match context with
+    | None ->
+        invocation_error "central prepared transport authorization is required"
+    | Some context -> (
+        match
+          Task_execution_context.sealed_attachment_delivery context ~backend_id:id
+            ~attachment_references:spec.attachments
+            ~web_access_policy:spec.web_access
+        with
+        | Error message -> invocation_error message
+        | Ok sealed ->
+            Ok
+              {
+                attachment_delivery = sealed.attachment_delivery;
+                attachment_paths = sealed.attachment_paths;
+              })
+
+let protocol_failure_message = function
+  | Error_record -> "OpenCode emitted an error event"
+  | Invalid_jsonl | Invalid_envelope | Mixed_session | Mixed_message ->
+      "OpenCode emitted an invalid structured response"
+
+let run_invocation ~sw ~env ~spec ?context ?on_raw_line invocation =
+  match
+    with_isolated_config_home (fun config_home ->
+        let invocation =
+          isolate_invocation config_home spec.web_access invocation
+        in
+        Diagnostics.debug "backend command: %s"
+          (String.concat " " invocation.redacted_argv) ;
+        let stream_parser = create_stream_parser () in
+        let on_stdout line =
+          (match strict_record_of_line line with
+          | Error Error_record -> ()
+          | Error _ | Ok _ ->
+              Option.iter (fun callback -> callback line) on_raw_line) ;
+          let events = consume_strict_line stream_parser line in
+          Option.iter
+            (fun context ->
+              List.iter (Task_execution_context.emit context) events)
+            context
+        in
+        Option.iter Task_execution_context.claim_structured_text context ;
+        let result =
+          Backend_process.run_process
+            ~sw
+            ~env
+            ~cmd:invocation.argv
+            ~stdin_content:invocation.stdin
+            ~working_dir:spec.working_dir
+            ~timeout_seconds:(duration_to_seconds spec.timeout)
+            ?context
+            ~parse_cost:parse_cost_from_stdout
+            ~on_stdout
+            ()
+        in
+        let files_changed =
+          Backend_process.get_git_diff ~sw ~env ~working_dir:spec.working_dir
+        in
+        let task_result =
+          match normalized_stream result.stdout with
+          | Error failure ->
+              let message = protocol_failure_message failure in
+              {
+                status = Failed message;
+                files_changed;
+                report = None;
+                elapsed = result.elapsed;
+                cost = None;
+                stdout = "";
+                agent_text = "";
+                stderr = message;
+                exit_code = result.exit_code;
+                session_id = None;
+              }
+          | Ok (_, session_id) ->
+              {
+                status = result.status;
+                files_changed;
+                report = None;
+                elapsed = result.elapsed;
+                cost = result.cost;
+                stdout = result.stdout;
+                agent_text = parse_stdout_text result.stdout;
+                stderr = result.stderr;
+                exit_code = result.exit_code;
+                session_id;
+              }
+        in
+        Option.iter Task_execution_context.mark_final_public_text context ;
+        task_result)
+  with
+  | Ok result -> result
+  | Error message ->
+      make_task_result ~status:(Failed message) ~stderr:message ~exit_code:1 ()
+
 let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
   | None -> (
-      (* Write initial Épure-managed opencode.json (attribution + empty MCP) if
-         absent or still managed.  Must run before ensure_mcp_in_opencode_json so
-         the file exists and carries Épure markers before MCP entries are merged. *)
-      let setup =
-        Backend_config_writer.setup_artifacts
-          ~project_dir:spec.working_dir
-          ~force:false
-          (project_config_artifacts
-             ~managed_namespace:spec.managed_namespace
-             ~mcp_servers:[]
-             ~lsp_servers:spec.lsp_servers)
-      in
-      (* AC2/AC4 story #479: OpenCode has Medium precedence confidence.  Emit
-         non-fatal warning conditioned on whether the config was applied. *)
-      (match
-         Backend_config_writer.precedence_warning_for
-           ~backend_id:id
-           ~write_outcome:setup.Backend_config_writer.write_outcome
-       with
-      | None -> ()
-      | Some msg -> Diagnostics.user_warning "%s" msg) ;
-      let on_stdout line =
-        Option.iter (fun callback -> callback line) on_raw_line ;
-        Option.iter
-          (fun context ->
-            List.iter
-              (Task_execution_context.emit context)
-              (normalized_events_of_line line))
-          context
-      in
-      Option.iter Task_execution_context.claim_structured_text context ;
-      let mcp_ready =
-        ensure_mcp_if_config_applied
-          ~env
-          ~setup_outcome:setup.write_outcome
-          spec
-      in
-      match mcp_ready with
-      | Error msg -> make_task_result ~status:(Failed msg) ()
-      | Ok () ->
-          let runtime_spec = {spec with mcp_servers = []} in
-          let config_path = Filename.concat spec.working_dir "opencode.json" in
-          if user_owned_backup_needed setup.write_outcome then
-            (* Story #515 AC1/AC3: take pre-run backup of user-owned opencode.json *)
-            match read_opencode_backup ~env ~config_path with
-            | Error msg -> make_task_result ~status:(Failed msg) ()
-            | Ok backup ->
-                let result =
-                  Backend_process.run_task_with
-                    ~sw
-                    ~env
-                    ~spec:runtime_spec
-                    ~build_command
-                    ?context
-                    ~parse_cost:parse_cost_from_stdout
-                    ~parse_stdout:parse_stdout_text
-                    ~on_stdout
-                    ()
-                in
-                Option.iter
-                  Task_execution_context.mark_final_public_text
-                  context ;
-                (* Story #515 AC2: detect mutation and restore *)
-                check_opencode_mutation ~env ~config_path ~backup result
-          else
-            let result =
-              Backend_process.run_task_with
-                ~sw
-                ~env
-                ~spec:runtime_spec
-                ~build_command
-                ?context
-                ~parse_cost:parse_cost_from_stdout
-                ~parse_stdout:parse_stdout_text
-                ~on_stdout
-                ()
-            in
-            Option.iter Task_execution_context.mark_final_public_text context ;
-            result)
+      match requested_transport_inputs ?context spec with
+      | Error message -> failed_result message
+      | Ok transport -> (
+          match
+            build_invocation
+              ~attachment_paths:transport.attachment_paths
+              ~attachment_delivery:transport.attachment_delivery
+              ~mcp_config_path:None spec
+          with
+          | Error message -> failed_result message
+          | Ok invocation ->
+              (* Write initial Épure-managed opencode.json (attribution + empty
+                 MCP) only after the complete transport request has passed. *)
+              let setup =
+                Backend_config_writer.setup_artifacts
+                  ~project_dir:spec.working_dir
+                  ~force:false
+                  (project_config_artifacts
+                     ~managed_namespace:spec.managed_namespace
+                     ~mcp_servers:[]
+                     ~lsp_servers:spec.lsp_servers)
+              in
+              (match
+                 Backend_config_writer.precedence_warning_for
+                   ~backend_id:id
+                   ~write_outcome:setup.Backend_config_writer.write_outcome
+               with
+              | None -> ()
+              | Some msg -> Diagnostics.user_warning "%s" msg) ;
+              match
+                ensure_mcp_if_config_applied
+                  ~env
+                  ~setup_outcome:setup.write_outcome
+                  spec
+              with
+              | Error msg -> make_task_result ~status:(Failed msg) ()
+              | Ok () ->
+                  let runtime_spec = {spec with mcp_servers = []} in
+                  let config_path =
+                    Filename.concat spec.working_dir "opencode.json"
+                  in
+                  let run () =
+                    run_invocation ~sw ~env ~spec:runtime_spec ?context
+                      ?on_raw_line invocation
+                  in
+                  if user_owned_backup_needed setup.write_outcome then
+                    match read_opencode_backup ~env ~config_path with
+                    | Error msg -> make_task_result ~status:(Failed msg) ()
+                    | Ok backup ->
+                        check_opencode_mutation ~env ~config_path ~backup (run ())
+                  else run ()))
