@@ -143,7 +143,7 @@ let test_gemini_mcp_is_user_settings_not_config_file () =
 
 (* When resume_session_id is set, build_command must include --resume <sid>. *)
 let test_build_command_includes_resume_when_sid_set () =
-  let sid = "gemini-session-abc123" in
+  let sid = "123e4567-e89b-12d3-a456-426614174000" in
   let cmd, _stdin =
     Gemini_cli.build_command
       ~mcp_config_path:None

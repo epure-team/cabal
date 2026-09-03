@@ -13,11 +13,14 @@
 
     {b Configuration:}
     Gemini CLI is expected to be installed and accessible in the PATH.
-    The backend uses [--output-format stream-json -y --skip-trust -p -] for
-    non-interactive headless execution with auto-approval and non-interactive
-    trusted-folder checks. Stream-json emits one JSON event per stdout line,
-    which is captured by the [on_raw_line] hook and redacted by
-    [Backend_event_redaction] before NDJSON persistence (Story #484 AC2).
+    The backend uses [--output-format stream-json -y -p ""] for
+    non-interactive execution and sends the prompt on stdin. Baseline [0.38.2]
+    does not support [--skip-trust]. Every runtime invocation also loads a
+    private, invocation-scoped policy that denies [google_web_search] and
+    [web_fetch] at admin priority. Stream-json emits one JSON event per stdout
+    line; only its documented public records are normalized. The bundled
+    Extensible-profile YAML runtime is deliberately unavailable because a
+    static YAML command cannot create this task-scoped deny policy.
 
     {b MCP Integration:}
     Gemini supports MCP servers configured in settings JSON. Épure writes
@@ -32,6 +35,50 @@ include Agentic_backend.S
 (** Extract public assistant text, session identity, and token usage from one
     Gemini stream-JSON event. Malformed or private-only records return [[]]. *)
 val normalized_events_of_line : string -> Task_event.payload list
+
+(** Prepared Gemini process invocation. [argv] is passed directly to the
+    process launcher without a shell. [stdin] carries prompt/instructions, and
+    [redacted_argv] omits policy paths, model values, and session identities. *)
+type backend_invocation = {
+  argv : string list;
+  stdin : string option;
+  redacted_argv : string list;
+}
+
+(** [build_invocation ?attachment_paths ~attachment_delivery ~web_policy_path
+    spec] validates the Gemini-specific request and constructs the runtime argv.
+
+    The baseline's authenticated media behavior could not be proven, so any
+    attachment or sealed attachment path is rejected. Positive web levels are
+    likewise rejected. [Web_disabled] loads [web_policy_path] as both a user and
+    supplemental admin policy. The caller must first ensure that no policy is
+    present in Gemini's standard administrator policy directory, because
+    baseline [0.38.2] ignores supplemental admin policies in that case.
+
+    Literal [@] characters in caller text are escaped so Gemini does not treat
+    prompt content as an implicit file reference. Within a serialized retry
+    schema, [@] is instead encoded as JSON [\u0040], preserving the schema's
+    parsed value while avoiding an invalid [\@] JSON escape. A resume ID must
+    be a canonical lowercase UUID. *)
+val build_invocation :
+  ?attachment_paths:string list ->
+  ?attachment_delivery:Backend_types.attachment_delivery ->
+  web_policy_path:string ->
+  mcp_config_path:string option ->
+  Backend_types.task_spec ->
+  (backend_invocation, string) result
+
+(** [with_web_disabled_policy_file f] creates a private [0o600] Gemini policy
+    denying [google_web_search] and [web_fetch] at priority [999], calls [f], and
+    attempts to unlink the policy on all exits. A persistent cleanup failure
+    emits a sanitized diagnostic without the policy path. *)
+val with_web_disabled_policy_file : (string -> 'a) -> 'a
+
+(** [standard_admin_policy_conflict ~directory] is [true] when [directory]
+    contains a [.toml] policy, or exists but cannot be inspected. Gemini [0.38.2]
+    ignores supplemental [--admin-policy] values when a standard administrator
+    policy exists, so runtime execution fails closed in this case. *)
+val standard_admin_policy_conflict : directory:string -> bool
 
 (** {1 Additional Utilities} *)
 
@@ -56,8 +103,8 @@ val project_config_artifacts :
   lsp_servers:Backend_types.lsp_server_config list ->
   Backend_config_writer.artifact list
 
-(** [parse_gemini_json_output json] parses a single Gemini CLI JSON event
-    object and extracts the response text and optional cost information.
+(** [parse_gemini_json_output json] parses the documented single-object JSON
+    envelope and extracts [response] plus non-negative token fields from [stats].
 
     {pre}
     (none)
@@ -74,14 +121,11 @@ val project_config_artifacts :
 val parse_gemini_json_output :
   Yojson.Safe.t -> string * Backend_types.cost option
 
-(** [parse_gemini_stream_json stdout] parses Gemini CLI's stream-json NDJSON
-    stdout (one JSON event per line) and returns [(text, cost, session_id)].
-
-    Text is assembled from [response]/[result] fields (complete response) or
-    concatenated [text] fields (incremental chunks). Cost is taken from the
-    last event with [usageMetadata] or [usage]. Session ID from [session_id].
-
-    Non-JSON lines are silently skipped.
+(** [parse_gemini_stream_json stdout] is the compatibility parser for Gemini
+    stream-json NDJSON. Documented assistant [message] records, successful
+    [result] usage, and canonical [init.session_id] values use the strict public
+    parser. Historical [response], [content], and [usage] records remain
+    accepted only by this compatibility helper. Non-JSON lines are skipped.
 
     {pre}
     (none)
@@ -100,17 +144,16 @@ val parse_gemini_json_output :
 val parse_gemini_stream_json :
   string -> string * Backend_types.cost option * string option
 
-(** [parse_stdout_text stdout] extracts the agent response text from
-    Gemini's stream-json NDJSON stdout.  It prefers the last [response] or
-    [result] field, falling back to concatenated [text] chunks, and finally
-    to the raw [stdout] when nothing could be extracted.
+(** [parse_stdout_text stdout] is the compatibility extractor for documented
+    public assistant records and historical [response]/[content] records.
 
     {pre}
     (none)
 
     {post}
-    Returns the assembled response text, or the raw [stdout] when extraction
-    yields the empty string.
+    Returns the assembled text, or raw stdout when no compatible record exists.
+    Normal runtime execution uses {!parse_public_stdout_text} and never promotes
+    this raw fallback.
 
     {violators}
     (none)
@@ -128,22 +171,20 @@ val parse_public_session_id : string -> string option
 (** Strict usage parser accepting only successful result events. *)
 val parse_public_cost : string -> Backend_types.cost option
 
-(** [build_command ~mcp_config_path spec] constructs the Gemini CLI command and
-    stdin content.  Gemini CLI 0.38.2 has no native read-only sandbox;
-    [spec.read_only] is acknowledged as documented limitation and the baseline
-    command is returned unchanged.  Includes [--skip-trust] so headless
-    temporary workspaces do not block on trusted-folder prompts.  Exported for
-    testing.
+(** [build_command ~mcp_config_path spec] constructs the compatibility command
+    preview and stdin content. Gemini CLI [0.38.2] has no native read-only
+    sandbox. Media and positive-web requests are rejected. Runtime execution
+    uses {!build_invocation} so it can own the invocation-scoped deny policy.
+    Exported for testing only.
 
     {pre}
     (none)
 
     {post}
-    Returns [(cmd_list, stdin_content)].  Includes [-m <model>] when
-    [spec.model] is set, [--skip-trust] for headless trusted-folder checks, and
-    [--resume <session_id>] when [spec.resume_session_id] is set.  Command is
-    otherwise identical for [read_only = true] and [read_only = false] (no
-    native restriction model).
+    Returns [(cmd_list, stdin_content)]. Includes [-m <model>] when [spec.model]
+    is set and [--resume <session_id>] when resuming. Uses [-p ""] because the
+    baseline appends the prompt option value to piped stdin. The command is
+    otherwise identical for [read_only = true] and [read_only = false].
 
     {violators}
     (none)
