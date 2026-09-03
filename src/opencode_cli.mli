@@ -16,16 +16,21 @@
     The backend uses [opencode run --pure --format json] for non-interactive
     execution. It pins task-local web permissions through fixed environment
     values passed as direct argv to [env], isolates mutable config and
-    managed-policy discovery in a private temporary directory, selects an
-    invocation-specific primary agent, and preserves the default OpenCode data
-    and account database for provider authentication. Caller-provided config
-    fragments are never interpolated.
+    file-based managed-policy discovery in a private temporary directory,
+    selects an invocation-specific primary agent, and preserves the default
+    OpenCode data and account database for provider authentication. On macOS,
+    [/Library/Managed Preferences] MDM remains administrator-trusted and is
+    outside Cabal's override boundary. Caller-provided config fragments are
+    never interpolated.
 
     {b Media and web transport:}
     PNG/JPEG upload uses repeated [--file] arguments containing only centrally
-    sealed absolute paths. Search and fetch permissions are independently fixed
-    for each task. The built-in descriptor remains the authoritative public
-    capability gate; this module does not promote catalog capabilities.
+    sealed absolute paths. Native [websearch] and [webfetch] permissions are
+    independently fixed for each task. Native [codesearch] is always denied.
+    The backend denies task delegation via [task]. This controls native OpenCode
+    tools and is not an OS shell network sandbox. The built-in descriptor remains
+    the authoritative public capability gate; this module does not promote
+    catalog capabilities.
 
     {b MCP Integration:}
     OpenCode supports MCP servers via its config file. The [mcp_servers]
@@ -128,7 +133,10 @@ type backend_invocation = {
     require one centrally sealed absolute [.png]/[.jpg] path per attachment and
     emit one [--file] pair per path. Session reuse and [resume_session_id] fail
     closed while the runtime capability remains disabled. Web policy maps only
-    to fixed [websearch]/[webfetch] permission documents.
+    to fixed [websearch]/[webfetch]/[codesearch] permission documents, with
+    [task] delegation denied for every web mode. Relative working directories
+    are lexically resolved to an absolute [OPENCODE_CONFIG] path without
+    filesystem traversal.
 
     The result contains direct argv, stdin, and redacted argv. No filesystem or
     registry access occurs. *)
@@ -152,7 +160,8 @@ val build_invocation :
     is set. Web access is represented by fixed [env] assignments, [--pure], and
     [--agent build]. The command is otherwise identical for
     [read_only = true] and [read_only = false] (no native restriction model).
-    [codesearch] is always denied, including when web search/fetch is enabled.
+    [codesearch] and [task] delegation are always denied, including when web
+    search/fetch is enabled.
 
     {violators}
     (none)

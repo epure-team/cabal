@@ -47,6 +47,11 @@ let with_path_prefix path f =
     ~finally:(fun () -> Unix.putenv "PATH" (Option.value ~default:"" previous))
     f
 
+let with_cwd path f =
+  let previous = Sys.getcwd () in
+  Unix.chdir path ;
+  Fun.protect ~finally:(fun () -> Unix.chdir previous) f
+
 let with_env name value f =
   let previous = Sys.getenv_opt name in
   Unix.putenv name value ;
@@ -606,9 +611,9 @@ let media_attachment ?(id = "image") ?(path = "media/cover.png") media_type :
     Backend_types.media_attachment =
   {id; path; media_type; sha256 = String.make 64 '0'; size_bytes = 1}
 
-let minimal_spec ?model ?(attachments = [])
+let minimal_spec ?model ?(attachments = []) ?(working_dir = "/tmp")
     ?(web_access = Backend_types.Web_disabled) ?resume_session_id ?json_schema () =
-  Backend_types.make_task_spec ~prompt:"test" ~working_dir:"/tmp" ?model
+  Backend_types.make_task_spec ~prompt:"test" ~working_dir ?model
     ~attachments ~web_access ?resume_session_id ?json_schema ()
 
 let has_adjacent_args flag value cmd =
@@ -632,11 +637,11 @@ let test_build_command_includes_model_flag () =
 
 let web_permission_json = function
   | Backend_types.Web_disabled ->
-      {|{"websearch":"deny","webfetch":"deny","codesearch":"deny"}|}
+      {|{"websearch":"deny","webfetch":"deny","codesearch":"deny","task":"deny"}|}
   | Web_search ->
-      {|{"websearch":"allow","webfetch":"deny","codesearch":"deny"}|}
+      {|{"websearch":"allow","webfetch":"deny","codesearch":"deny","task":"deny"}|}
   | Web_search_and_fetch ->
-      {|{"websearch":"allow","webfetch":"allow","codesearch":"deny"}|}
+      {|{"websearch":"allow","webfetch":"allow","codesearch":"deny","task":"deny"}|}
 
 let web_config_json policy =
   let permissions = web_permission_json policy in
@@ -719,6 +724,127 @@ let test_build_invocation_exact_web_policy_argv () =
       Backend_types.Web_search;
       Backend_types.Web_search_and_fetch;
     ]
+
+let json_member_string name json =
+  match Yojson.Safe.Util.member name json with
+  | `String value -> value
+  | _ -> Alcotest.failf "missing string field %s" name
+
+let required_assignment_json prefix argv =
+  match
+    List.find_map
+      (fun arg ->
+        if String.starts_with ~prefix arg then
+          Some
+            (Yojson.Safe.from_string
+               (String.sub arg (String.length prefix)
+                  (String.length arg - String.length prefix)))
+        else None)
+      argv
+  with
+  | Some value -> value
+  | None -> Alcotest.failf "missing assignment %s" prefix
+
+let test_fixed_policy_denies_hostile_subagent_delegation () =
+  let hostile_source source =
+    `Assoc
+      [
+        ( "source",
+          `String source );
+        ("permission", `Assoc [("task", `String "allow")]);
+        ( "agent",
+          `Assoc
+            [
+              ( "explore",
+                `Assoc
+                  [
+                    ("mode", `String "subagent");
+                    ( "permission",
+                      `Assoc
+                        [
+                          ("websearch", `String "allow");
+                          ("webfetch", `String "allow");
+                          ("codesearch", `String "allow");
+                          ("task", `String "allow");
+                        ] );
+                  ] );
+            ] );
+      ]
+  in
+  List.iter
+    (fun source ->
+      let hostile = hostile_source source in
+      let explore =
+        hostile |> Yojson.Safe.Util.member "agent"
+        |> Yojson.Safe.Util.member "explore"
+        |> Yojson.Safe.Util.member "permission"
+      in
+      Alcotest.(check string)
+        (source ^ " fixture allows subagent fetch") "allow"
+        (json_member_string "webfetch" explore))
+    ["project"; "account"; "managed"] ;
+  List.iter
+    (fun policy ->
+      let invocation = build_invocation (minimal_spec ~web_access:policy ()) in
+      let top_level =
+        required_assignment_json "OPENCODE_PERMISSION=" invocation.argv
+      in
+      let config =
+        required_assignment_json "OPENCODE_CONFIG_CONTENT=" invocation.argv
+      in
+      let invocation_agent =
+        config |> Yojson.Safe.Util.member "agent"
+        |> Yojson.Safe.Util.member "build"
+        |> Yojson.Safe.Util.member "permission"
+      in
+      Alcotest.(check string)
+        "top-level delegation ceiling" "deny"
+        (json_member_string "task" top_level) ;
+      Alcotest.(check string)
+        "invocation-agent delegation ceiling" "deny"
+        (json_member_string "task" invocation_agent))
+    [
+      Backend_types.Web_disabled;
+      Backend_types.Web_search;
+      Backend_types.Web_search_and_fetch;
+    ]
+
+let test_build_invocation_absolutizes_nested_relative_config_path () =
+  with_tmpdir (fun root ->
+      let relative_working_dir = Filename.concat "project" "./nested" in
+      with_cwd root @@ fun () ->
+      let invocation =
+        build_invocation (minimal_spec ~working_dir:relative_working_dir ())
+      in
+      let expected =
+        Filename.concat
+          (Filename.concat root (Filename.concat "project" "nested"))
+          "opencode.json"
+      in
+      Alcotest.(check bool)
+        "explicit config path is absolute" true
+        (has_adjacent_args
+           ("OPENCODE_CONFIG=" ^ expected)
+           "OPENCODE_CONFIG_DIR=" invocation.argv) ;
+      Alcotest.(check bool)
+        "redacted argv omits absolute workspace" false
+        (contains_str (String.concat " " invocation.redacted_argv) root))
+
+let test_build_invocation_rejects_invalid_working_dir_without_disclosure () =
+  let private_path = "/private/attacker\000path" in
+  match
+    Opencode_cli.build_invocation ~mcp_config_path:None
+      (minimal_spec ~working_dir:private_path ())
+  with
+  | Ok _ -> Alcotest.fail "invalid working directory was accepted"
+  | Error message ->
+      Alcotest.(check string)
+        "fixed working-directory failure"
+        "OpenCode invocation rejected: OpenCode working directory is invalid"
+        message ;
+      Alcotest.(check bool)
+        "failure does not disclose working directory" false
+        (contains_str message private_path)
 
 let test_build_invocation_redacts_sensitive_values () =
   let attachment = media_attachment Backend_types.Png in
@@ -1041,6 +1167,22 @@ exit 0
 
 let test_run_isolates_mutable_config_and_neutralizes_inherited_flags () =
   with_tmpdir (fun workspace ->
+      let hostile_subagent_config =
+        {|{"permission":{"task":"allow"},"agent":{"explore":{"mode":"subagent","permission":{"websearch":"allow","webfetch":"allow","codesearch":"allow","task":"allow"}}}}|}
+      in
+      write_file
+        (Filename.concat workspace "opencode.json")
+        hostile_subagent_config ;
+      let hostile_account_data = Filename.concat workspace "hostile-account" in
+      let hostile_managed = Filename.concat workspace "hostile-managed" in
+      Unix.mkdir hostile_account_data 0o700 ;
+      Unix.mkdir hostile_managed 0o700 ;
+      write_file
+        (Filename.concat hostile_account_data "account-config.json")
+        hostile_subagent_config ;
+      write_file
+        (Filename.concat hostile_managed "opencode.json")
+        hostile_subagent_config ;
       let fake_dir = Filename.concat workspace "fake-bin" in
       Unix.mkdir fake_dir 0o700 ;
       let capture = Filename.concat workspace "captured-environment" in
@@ -1064,6 +1206,7 @@ done
   printf '%%s\n' "$OPENCODE_TEST_MANAGED_CONFIG_DIR"
   printf '%%s\n' "$XDG_DATA_HOME"
   printf '%%s\n' "$AGENT"
+  printf '%%s\n' "$OPENCODE_PERMISSION"
   printf '%%s\n' "$OPENCODE_CONFIG_CONTENT"
   printf '%%s\n' "$MODE"
   printf '%%s\n' "$OPENCODE_EXPERIMENTAL"
@@ -1090,10 +1233,12 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
           ("OPENCODE_DISABLE_PROJECT_CONFIG", "0");
           ("OPENCODE_CONFIG", "/private/attacker-config.json");
           ("OPENCODE_CONFIG_DIR", "/private/attacker-config-dir");
+          ("OPENCODE_CONFIG_CONTENT", hostile_subagent_config);
+          ("OPENCODE_PERMISSION", hostile_subagent_config);
           ("OPENCODE_DB", "/private/attacker-state.db");
-          ("OPENCODE_TEST_MANAGED_CONFIG_DIR", "/private/attacker-managed");
+          ("OPENCODE_TEST_MANAGED_CONFIG_DIR", hostile_managed);
           ("XDG_CONFIG_HOME", "/private/attacker-xdg");
-          ("XDG_DATA_HOME", "/private/auth-data");
+          ("XDG_DATA_HOME", hostile_account_data);
           ("OPENCODE_TEST_HOME", "/private/attacker-home");
         ]
         (fun () ->
@@ -1118,6 +1263,7 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
         :: managed_config_dir
         :: data_home
         :: runtime_agent
+        :: runtime_permission
         :: runtime_config
         :: mode
         :: experimental
@@ -1140,7 +1286,8 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
             (Filename.concat isolation_home "managed")
             managed_config_dir ;
           Alcotest.(check string)
-            "provider auth data remains available" "/private/auth-data" data_home ;
+            "provider account data remains available" hostile_account_data
+            data_home ;
           Alcotest.(check bool)
             "runtime uses a private primary agent" true
             (runtime_agent <> "build"
@@ -1149,6 +1296,33 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
             "fixed policy names only the private runtime agent" true
             (contains_str runtime_config (Printf.sprintf "\"%s\"" runtime_agent)
             && not (contains_str runtime_config {|"build"|})) ;
+          let top_level = Yojson.Safe.from_string runtime_permission in
+          let invocation_agent =
+            Yojson.Safe.from_string runtime_config
+            |> Yojson.Safe.Util.member "agent"
+            |> Yojson.Safe.Util.member runtime_agent
+            |> Yojson.Safe.Util.member "permission"
+          in
+          List.iter
+            (fun permission ->
+              Alcotest.(check string)
+                ("top-level denies " ^ permission) "deny"
+                (json_member_string permission top_level) ;
+              Alcotest.(check string)
+                ("invocation agent denies " ^ permission) "deny"
+                (json_member_string permission invocation_agent))
+            ["websearch"; "webfetch"; "codesearch"; "task"] ;
+          List.iter
+            (fun path ->
+              Alcotest.(check bool)
+                "hostile subagent fixture remains present" true
+                (contains_str (read_file path) {|"explore"|}
+                && contains_str (read_file path) {|"webfetch":"allow"|}))
+            [
+              Filename.concat workspace "opencode.json";
+              Filename.concat hostile_account_data "account-config.json";
+              Filename.concat hostile_managed "opencode.json";
+            ] ;
           Alcotest.(check string) "private isolation mode" "700" mode ;
           Alcotest.(check (list string))
             "experimental network flags neutralized"
@@ -1165,6 +1339,77 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
             "temporary config isolation removed" false
             (Sys.file_exists isolation_home)
       | _ -> Alcotest.fail "fake OpenCode captured incomplete environment")
+
+let test_run_loads_mcp_lsp_config_from_nested_relative_working_dir () =
+  with_tmpdir (fun root ->
+      let relative_working_dir = Filename.concat "project" "nested" in
+      let absolute_working_dir = Filename.concat root relative_working_dir in
+      ensure_parent_dir (Filename.concat absolute_working_dir "placeholder") ;
+      let fake_dir = Filename.concat root "fake-bin" in
+      Unix.mkdir fake_dir 0o700 ;
+      let capture = Filename.concat root "captured-relative-config" in
+      write_executable
+        (Filename.concat fake_dir "opencode")
+        (Printf.sprintf
+           {|#!/bin/sh
+{
+  printf '%%s\n' "$PWD"
+  printf '%%s\n' "$OPENCODE_CONFIG"
+  while IFS= read -r LINE; do printf '%%s\n' "$LINE"; done < "$OPENCODE_CONFIG"
+} > %s
+SESSION='ses_123456789abcABCDEFGHIJKLMN'
+printf '%%s\n' "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_123456789abcABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-start\"}}"
+printf '%%s\n' "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_23456789abcdABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"text\",\"text\":\"ok\",\"time\":{\"start\":1,\"end\":2}}}"
+printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_3456789abcdeABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-finish\",\"reason\":\"stop\",\"tokens\":{\"total\":2,\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"cost\":0}}"
+|}
+           (Filename.quote capture)) ;
+      let launcher = Filename.concat fake_dir "process-group-launcher" in
+      write_process_group_launcher launcher ;
+      let lsp_server : Backend_types.lsp_server_config =
+        {
+          name = "test-lsp";
+          command = "test-language-server";
+          args = ["--stdio"];
+          file_associations = [{extension = ".test"; language_id = "test"}];
+        }
+      in
+      let spec =
+        Backend_types.make_task_spec ~prompt:"relative config"
+          ~working_dir:relative_working_dir
+          ~mcp_servers:
+            [
+              Backend_types.make_mcp_server_config ~name:"epure"
+                ~command:"epure" ~args:["mcp"] ();
+            ]
+          ~lsp_servers:[lsp_server] ()
+      in
+      with_cwd root @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_LAUNCHER" launcher @@ fun () ->
+      with_path_prefix fake_dir @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let result = Opencode_cli.run_task ~sw ~env spec in
+      (match result.status with
+      | Backend_types.Success -> ()
+      | Failed message -> Alcotest.fail message
+      | Timeout -> Alcotest.fail "relative config fake timed out"
+      | Cancelled -> Alcotest.fail "relative config fake was cancelled") ;
+      let captured = read_file capture in
+      let expected_config = Filename.concat absolute_working_dir "opencode.json" in
+      Alcotest.(check bool)
+        "child cwd is nested project" true
+        (String.starts_with ~prefix:(absolute_working_dir ^ "\n") captured) ;
+      Alcotest.(check bool)
+        "child receives absolute config for its cwd" true
+        (contains_str captured ("\n" ^ expected_config ^ "\n")) ;
+      Alcotest.(check bool)
+        "requested MCP config loaded" true
+        (contains_str captured {|
+    "epure": {|}) ;
+      Alcotest.(check bool)
+        "requested LSP config loaded" true
+        (contains_str captured {|
+    "test-lsp": {|}))
 
 let rec project_root_from path =
   if Sys.file_exists (Filename.concat path "dune-project") then path
@@ -1214,6 +1459,25 @@ let test_media_web_addendum_records_non_evidence_provenance () =
       "installed OpenCode `1.18.25`";
     ]
 
+let test_interface_documents_network_and_macos_trust_scope () =
+  let root = project_root_from (Sys.getcwd ()) in
+  let path = Filename.concat root "src/opencode_cli.mli" in
+  let content = read_file path in
+  List.iter
+    (fun required ->
+      Alcotest.(check bool)
+        ("interface contains: " ^ required) true
+        (contains_str content required))
+    [
+      "websearch";
+      "webfetch";
+      "codesearch";
+      "task delegation";
+      "/Library/Managed Preferences";
+      "administrator-trusted";
+      "OS shell network";
+    ]
+
 let test_opencode_capabilities_remain_unpromoted () =
   match Backend_registry.find "opencode" with
   | None -> Alcotest.fail "OpenCode descriptor missing"
@@ -1243,6 +1507,15 @@ let command_tests =
     ( "build exact fixed web policy argv",
       `Quick,
       test_build_invocation_exact_web_policy_argv );
+    ( "deny hostile subagent delegation",
+      `Quick,
+      test_fixed_policy_denies_hostile_subagent_delegation );
+    ( "absolutize nested relative config path",
+      `Quick,
+      test_build_invocation_absolutizes_nested_relative_config_path );
+    ( "reject invalid working directory without disclosure",
+      `Quick,
+      test_build_invocation_rejects_invalid_working_dir_without_disclosure );
     ( "redact sensitive argv values",
       `Quick,
       test_build_invocation_redacts_sensitive_values );
@@ -1264,12 +1537,18 @@ let command_tests =
     ( "isolate mutable config and inherited experimental flags",
       `Quick,
       test_run_isolates_mutable_config_and_neutralizes_inherited_flags );
+    ( "load MCP/LSP config from nested relative working directory",
+      `Quick,
+      test_run_loads_mcp_lsp_config_from_nested_relative_working_dir );
     ( "media/web probe offline self-test",
       `Quick,
       test_media_web_probe_offline_self_test );
     ( "record below-baseline non-evidence provenance",
       `Quick,
       test_media_web_addendum_records_non_evidence_provenance );
+    ( "document network and macOS trust scope",
+      `Quick,
+      test_interface_documents_network_and_macos_trust_scope );
     ( "capabilities remain unpromoted",
       `Quick,
       test_opencode_capabilities_remain_unpromoted );

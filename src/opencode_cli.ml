@@ -846,11 +846,11 @@ let validate_transport_request ~attachment_delivery ~attachment_paths spec =
 
 let web_permission_json = function
   | Backend_types.Web_disabled ->
-      {|{"websearch":"deny","webfetch":"deny","codesearch":"deny"}|}
+      {|{"websearch":"deny","webfetch":"deny","codesearch":"deny","task":"deny"}|}
   | Web_search ->
-      {|{"websearch":"allow","webfetch":"deny","codesearch":"deny"}|}
+      {|{"websearch":"allow","webfetch":"deny","codesearch":"deny","task":"deny"}|}
   | Web_search_and_fetch ->
-      {|{"websearch":"allow","webfetch":"allow","codesearch":"deny"}|}
+      {|{"websearch":"allow","webfetch":"allow","codesearch":"deny","task":"deny"}|}
 
 let web_config_json ?(agent = "build") web_access =
   let permission = web_permission_json web_access in
@@ -967,21 +967,49 @@ let isolate_invocation directory web_access invocation =
       |> rewrite_agent "<isolated-agent>" |> insert redacted;
   }
 
+let canonical_absolute_path path =
+  let components = String.split_on_char '/' path in
+  let rec collect reversed = function
+    | [] -> List.rev reversed
+    | ("" | ".") :: rest -> collect reversed rest
+    | ".." :: rest ->
+        collect (match reversed with [] -> [] | _ :: parent -> parent) rest
+    | component :: rest -> collect (component :: reversed) rest
+  in
+  "/" ^ String.concat "/" (collect [] components)
+
+let absolute_project_config_path working_dir =
+  if working_dir = "" || String.contains working_dir '\000' then
+    invocation_error "OpenCode working directory is invalid"
+  else
+    try
+      let absolute_working_dir =
+        if Filename.is_relative working_dir then
+          Filename.concat (Sys.getcwd ()) working_dir
+        else working_dir
+      in
+      (* This is deliberately lexical: do not stat, realpath, or follow an
+         attacker-controlled component while constructing diagnostic argv. *)
+      Ok
+        (Filename.concat
+           (canonical_absolute_path absolute_working_dir)
+           "opencode.json")
+    with Sys_error _ -> invocation_error "OpenCode working directory is invalid"
+
 let build_invocation ?(attachment_paths = [])
     ?(attachment_delivery = Backend_types.Upload_attachments) ~mcp_config_path:_
     (spec : task_spec) =
   let* () =
     validate_transport_request ~attachment_delivery ~attachment_paths spec
   in
+  let* project_config_path = absolute_project_config_path spec.working_dir in
   let model_args, redacted_model_args =
     match spec.model with
     | Some model -> (["-m"; model], ["-m"; "<model>"])
     | None -> ([], [])
   in
   let root =
-    fixed_environment_args
-      ~project_config_path:(Filename.concat spec.working_dir "opencode.json")
-      spec.web_access
+    fixed_environment_args ~project_config_path spec.web_access
     @ [
         "opencode";
         "run";
