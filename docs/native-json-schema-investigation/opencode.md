@@ -161,49 +161,86 @@ issue exists yet.
 ## 7. CBL-07C Media and Web Transport Addendum
 
 This addendum does not change the native JSON Schema conclusion above. It records
-the separate content-dependent investigation of file delivery and per-invocation
-web policy at the pinned `1.14.20` baseline.
+the separate investigation of file delivery and per-invocation web policy. No
+CBL-07C observation currently qualifies as capability evidence.
 
-### 7a. Reproducible evidence
+### 7a. Provenance and evidence classification
 
-- Baseline release: OpenCode `v1.14.20`, source commit
+- Descriptor baseline: OpenCode `v1.14.20`, source commit
   `3175a3c61853e4666acb24fa435783826596665d`.
+- Authenticated observation version: OpenCode `1.2.24`, source commit
+  `c6262f9d4002d86a1f1795c306aa329d45361d12`; the official Linux x64 archive
+  used for the rerun had SHA-256
+  `20644ef6b85975f0b49c3ea131c8d49cdee854419b3b8cfb24476e01787a871e`.
 - Probe: `tools/probe_opencode_media_web.py`.
-- Default authenticated model: `openai/gpt-5.4-mini` (overridable with
+- Default authenticated observation model: `openai/gpt-5.4` (overridable with
   `CABAL_E2E_MODEL_OPENCODE`).
-- Baseline invocation used during the investigation:
 
-  ```sh
-  PATH="/tmp/cabal-cbl07c-opencode:$PATH" \
-    ./tools/probe_opencode_media_web.py
-  ```
+The authenticated binary is below the enforced descriptor baseline `1.14.20`.
+These results are therefore observations only and are not capability evidence.
+For a future positive `feature_evidence`, the version rule is:
+`tested_at_version must be greater than or equal to baseline_version`.
+The complete hardened probe must also pass at that version with a reproducible
+authenticated configuration.
 
-The probe first requires the exact version and verifies that `opencode run
---help` still exposes `--format`, repeated `--file`, `--session`, `--model`, and
-`--agent`. It then creates deterministic PNG/JPEG fixtures, including filenames
-with spaces, and checks content rather than process exit alone.
+The corrected observation matrix is:
 
-| Probe mode | Content-dependent assertion at `1.14.20` | Result |
-|------------|------------------------------------------|--------|
-| `structured-output` | Public completed text is the exact requested JSON and public token usage is present. | PASS |
-| `media-initial` | One repeated `--file` pair per PNG/JPEG; answer identifies blue PNG and red JPEG. | PASS |
-| `resume-upload` | `--session` plus a new green PNG preserves the public session and identifies green. | PASS |
-| `resume-reuse` | A later call without `--file` recalls the previously uploaded green image. | PASS |
-| `schema-retry-media` | An intentionally non-JSON first response is retried in a fresh session with both images uploaded again; the second response matches the schema. | PASS |
-| `web-disabled` | Fixed deny policy defeats hostile project allow rules; neither `websearch` nor `webfetch` completes and a local HTTP marker receives zero requests. | PASS |
-| `web-search` | Search is allowed, fetch denied; completed `websearch` lifecycle yields the official CLI documentation URL without `webfetch`. | PASS |
-| `web-search-fetch` | Both tools complete and the fetched official page yields its visible `CLI` heading. | PASS |
+| Probe mode | Authenticated observation at `1.2.24` | Classification |
+|------------|----------------------------------------|----------------|
+| `structured-output` | Exact requested public JSON and public usage were observed. | Promising, below baseline; not evidence. |
+| `media-initial` | Repeated PNG/JPEG delivery identified the blue PNG and red JPEG. | Promising, below baseline; not evidence. |
+| `resume-upload` | A new green PNG on the resumed session was identified. | Promising, below baseline; not evidence. |
+| `resume-reuse` | The resumed call without `--file` recalled the prior image. | Promising, below baseline; not evidence. |
+| `schema-retry-media` | A fresh retry re-uploaded both images and returned the required object. | Promising, below baseline; not evidence. |
+| `web-disabled` | The hardened rerun denied `websearch`, `webfetch`, and `codesearch`; the local marker received no request and no marker content returned. | Promising negative-policy observation below baseline; not evidence. |
+| `web-search` | An earlier xAI/auth error event is classified as a failure. A separate exact-version rerun with `openai/gpt-5.4` completed search and returned the official URL. | Provider/model-specific and below baseline; unproven for the descriptor and not evidence. |
+| `web-search-fetch` | An earlier xAI/auth error event is classified as a failure. A separate exact-version rerun with `openai/gpt-5.4` completed both lifecycles and returned the fetched `CLI` heading. | Provider/model-specific and below baseline; unproven for the descriptor and not evidence. |
 
-The same matrix was also run successfully as a forward-compatibility advisory
-against installed OpenCode `1.18.25` (tag commit
-`cb7d8b2f5e44876ef98b661dc10590c915af3a9f`). This does not replace the pinned
-baseline evidence.
+The probe is deliberately locked to the authenticated observation version and
+prints `OBSERVED-BELOW-BASELINE`, not `PASS`, for successful modes. It requires
+completed public text and completion usage. A top-level error record, malformed
+envelope, mixed session/message stream, failed tool record, missing text, or
+missing usage fails with a fixed diagnostic that does not expose the provider
+payload. The observation binary predates `opencode run --pure`, so the probe
+relies on its explicit config isolation instead of passing that unsupported
+flag; the baseline Cabal runtime continues to pass `--pure`.
 
 `./tools/probe_opencode_media_web.py --self-test` exercises the public JSONL,
-fixed-policy, argv, timeout, and diagnostic-sanitization validators without
-credentials or network access.
+fixed-policy, all-native-network-tool marker, marker-server disconnect, argv,
+timeout, and diagnostic-sanitization validators without credentials or network
+access.
 
-### 7b. Adapter contract resulting from the proof
+### 7b. Baseline source contract used by the parser
+
+The exact `v1.14.20` source, not a moving branch, establishes the public JSONL
+shape:
+
+- `run.ts` constructs each JSON record with `type`, finite millisecond
+  `timestamp`, invocation `sessionID`, and the public `part` payload, and emits
+  completed tool, `step-start`, `step-finish`, and completed text records:
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/cli/cmd/run.ts#L429-L493
+- JSON mode does not include the role from `message.updated`; therefore a text
+  record alone is not an assistant discriminator. `processor.ts` creates
+  `step-start` from `ctx.assistantMessage.id`, then creates text and finish parts
+  with that same assistant message ID:
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/session/processor.ts#L346-L375 and
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/session/processor.ts#L406-L450
+- Canonical IDs are generated as a three-letter prefix, underscore, 12 lowercase
+  hexadecimal timestamp characters, and 14 base-62 random characters:
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/id/id.ts#L4-L16 and
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/id/id.ts#L57-L75
+- `run.ts` emits `session.error` as a top-level `error` JSON record even though
+  the process may otherwise complete normally:
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/cli/cmd/run.ts#L520-L529
+
+The runtime parser consequently accepts session state only from `step_start` and
+accepts text, tool lifecycle, and usage only when they retain that exact session
+and the assistant message ID established by the latest `step_start`. A later
+assistant tool turn may establish a new message ID while retaining the session.
+This rejects adversarial completed user-shaped text and mixed streams rather
+than inferring the role from attacker-controlled text metadata.
+
+### 7c. Adapter transport and configuration contract
 
 - Initial and fresh-retry media delivery uses repeated direct argv pairs
   `--file <sealed-absolute-path>`. Paths come only from
@@ -212,10 +249,33 @@ credentials or network access.
 - Any attachment or enabled web request without matching central authorization
   fails before project config I/O and before process spawn.
 - `Web_disabled`, `Web_search`, and `Web_search_and_fetch` map to fixed
-  `websearch`/`webfetch` allow-or-deny documents supplied through
+  `websearch`/`webfetch` allow-or-deny documents, with `codesearch` always
+  denied, supplied through
   `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT`. The adapter invokes
-  `env` directly (no shell), uses `--pure --agent build`, disables automatic
-  sharing/update/LSP download, and never interpolates host config fragments.
+  `env` directly (no shell), uses `--pure` with an invocation-specific primary
+  agent, disables automatic sharing/update/LSP download, and never interpolates
+  host config fragments.
+- Each process receives a private mode-`0700` config home and empty
+  managed-config directory. Implicit home/global/project discovery is disabled;
+  inherited config and experimental-network flags are replaced; only the exact
+  task project `opencode.json` is named explicitly. An inherited `OPENCODE_DB`
+  override is removed, while `XDG_DATA_HOME` and OpenCode's default database are
+  intentionally preserved so provider and account authentication continue to
+  work. The temporary directory is removed after the process.
+- The invocation replaces the public `build` agent with an invocation-specific
+  primary agent whose fixed policy is supplied in `OPENCODE_CONFIG_CONTENT`.
+  Static project, account, or managed configuration therefore cannot append a
+  late allow rule to the selected agent. The final `OPENCODE_PERMISSION` merge
+  pins the same top-level rules after other config scopes.
+- At baseline, the explicit project file is loaded before
+  `OPENCODE_CONFIG_CONTENT`, and `OPENCODE_PERMISSION` is applied after managed
+  config. The runtime additionally redirects `/etc/opencode`/MDM discovery with
+  `OPENCODE_TEST_MANAGED_CONFIG_DIR`; OS administrator policy is not assumed
+  trustworthy for this task's web boundary. Authenticated provider/account
+  credential sources are trusted as authentication inputs, but not as the
+  authority for the selected agent's web policy. See:
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/config/config.ts#L505-L584 and
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/config/config.ts#L626-L669
 - JSONL normalization admits only canonical session IDs, completed assistant
   text, sanitized completed tool lifecycle, and bounded non-negative usage.
   Reasoning, user text, error payloads, tool inputs/results, malformed records,
@@ -224,8 +284,11 @@ credentials or network access.
   `Json_schema_enforcer`; every fresh attempt receives the same authorized
   sealed image set.
 
-Although the probe proves upstream `--session` upload and attachment reuse,
+Although the below-baseline observation showed upstream `--session` upload and
+attachment reuse,
 OpenCode's current Cabal descriptor advertises no session resume capability.
 Low-level resume/reuse requests therefore fail closed. CBL-07C deliberately
 does not alter shared capability descriptors, runtime snapshots, preflight,
-dispatch, or the native JSON Schema evidence recorded above.
+dispatch, or the native JSON Schema evidence recorded above. The descriptor
+therefore remains media-disabled with no media evidence and remains
+`Web_disabled` with `evidence = None`.

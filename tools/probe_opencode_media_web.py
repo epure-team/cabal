@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated OpenCode 1.14.20 content-dependent media/web probe."""
+"""Below-baseline OpenCode media/web observation probe (not capability evidence)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import secrets
 import struct
 import subprocess
 import sys
@@ -22,15 +23,18 @@ from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-
-EXPECTED_VERSION = "1.14.20"
-DEFAULT_MODEL = "openai/gpt-5.4-mini"
+AUTH_TESTED_VERSION = "1.2.24"
+DESCRIPTOR_BASELINE_VERSION = "1.14.20"
+EXPECTED_VERSION = AUTH_TESTED_VERSION
+DEFAULT_MODEL = "openai/gpt-5.4"
 PROBE_TIMEOUT_SECONDS = 300
 VERSION_TIMEOUT_SECONDS = 15
 OFFICIAL_PAGE = "https://opencode.ai/docs/cli/"
 OFFICIAL_PAGE_H1 = "CLI"
-PROBE_AGENT = "build"
+PROBE_AGENT = "cabal-probe-" + secrets.token_hex(8)
 SESSION_ID = re.compile(r"^ses_[0-9a-f]{12}[A-Za-z0-9]{14}$")
+MESSAGE_ID = re.compile(r"^msg_[0-9a-f]{12}[A-Za-z0-9]{14}$")
+PART_ID = re.compile(r"^prt_[0-9a-f]{12}[A-Za-z0-9]{14}$")
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9_.:/+-]{1,200}$")
 MODES = (
@@ -96,6 +100,17 @@ class PublicOutput:
         self.usage_seen = usage_seen
 
 
+def version_tuple(version: str) -> tuple[int, int, int]:
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise ProbeFailure("invalid fixed OpenCode version")
+    major, minor, patch_version = version.split(".")
+    return int(major), int(minor), int(patch_version)
+
+
+def version_at_least(version: str, baseline: str) -> bool:
+    return version_tuple(version) >= version_tuple(baseline)
+
+
 def png_chunk(kind: bytes, payload: bytes) -> bytes:
     body = kind + payload
     return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
@@ -128,7 +143,7 @@ def write_fixtures(directory: Path) -> tuple[Path, Path, Path]:
 def policy_rules(search: str, fetch: str) -> dict[str, str]:
     if search not in {"allow", "deny"} or fetch not in {"allow", "deny"}:
         raise ProbeFailure("invalid fixed web policy")
-    return {"websearch": search, "webfetch": fetch}
+    return {"websearch": search, "webfetch": fetch, "codesearch": "deny"}
 
 
 def fixed_config(search: str, fetch: str) -> str:
@@ -139,6 +154,7 @@ def fixed_config(search: str, fetch: str) -> str:
             "permission": rules,
             "agent": {
                 PROBE_AGENT: {
+                    "mode": "primary",
                     "permission": rules,
                 }
             },
@@ -147,15 +163,32 @@ def fixed_config(search: str, fetch: str) -> str:
     )
 
 
-def fixed_env(search: str, fetch: str) -> dict[str, str]:
+def fixed_env(
+    search: str,
+    fetch: str,
+    workspace: Path | None = None,
+) -> dict[str, str]:
     rules = policy_rules(search, fetch)
     env = os.environ.copy()
+    env.pop("OPENCODE_DB", None)
     env["OPENCODE_PERMISSION"] = json.dumps(rules, separators=(",", ":"))
     env["OPENCODE_CONFIG_CONTENT"] = fixed_config(search, fetch)
+    env["OPENCODE_CONFIG_DIR"] = ""
+    env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    env["OPENCODE_EXPERIMENTAL"] = "0"
+    env["OPENCODE_EXPERIMENTAL_EXA"] = "0"
     env["OPENCODE_ENABLE_EXA"] = "1" if search == "allow" else "0"
     env["OPENCODE_AUTO_SHARE"] = "0"
     env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
     env["OPENCODE_DISABLE_LSP_DOWNLOAD"] = "1"
+    if workspace is not None:
+        config_home = workspace / ".cabal-opencode-isolated-config"
+        config_home.mkdir(mode=0o700, exist_ok=True)
+        config_home.chmod(0o700)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["OPENCODE_TEST_HOME"] = str(config_home)
+        env["OPENCODE_TEST_MANAGED_CONFIG_DIR"] = str(config_home / "managed")
+        env["OPENCODE_CONFIG"] = str(workspace / "opencode.json")
     return env
 
 
@@ -213,7 +246,6 @@ def command_argv(
     argv = [
         "opencode",
         "run",
-        "--pure",
         "--format",
         "json",
         "--agent",
@@ -235,8 +267,46 @@ def nonnegative_int(value: Any) -> int | None:
     return value
 
 
+def finite_nonnegative_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number < 0 or not (float("-inf") < number < float("inf")):
+        return None
+    return number
+
+
+def valid_completed_timing(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    start = finite_nonnegative_number(value.get("start"))
+    end = finite_nonnegative_number(value.get("end"))
+    return start is not None and end is not None and end >= start
+
+
+def public_envelope(event: dict[str, Any], part: Any) -> tuple[str, str] | None:
+    if not isinstance(part, dict):
+        return None
+    session_id = event.get("sessionID")
+    part_session_id = part.get("sessionID")
+    message_id = part.get("messageID")
+    if (
+        finite_nonnegative_number(event.get("timestamp")) is None
+        or not isinstance(session_id, str)
+        or not SESSION_ID.fullmatch(session_id)
+        or part_session_id != session_id
+        or not isinstance(message_id, str)
+        or not MESSAGE_ID.fullmatch(message_id)
+        or not isinstance(part.get("id"), str)
+        or not PART_ID.fullmatch(part["id"])
+    ):
+        return None
+    return session_id, message_id
+
+
 def parse_public_output(stdout: str) -> PublicOutput:
     session_id: str | None = None
+    message_id: str | None = None
     text: list[str] = []
     tools: list[tuple[str, str]] = []
     usage_seen = False
@@ -251,27 +321,39 @@ def parse_public_output(stdout: str) -> PublicOutput:
         if not isinstance(event, dict):
             raise ProbeFailure("OpenCode emitted malformed public JSONL")
 
-        candidate = event.get("sessionID")
-        if isinstance(candidate, str) and SESSION_ID.fullmatch(candidate):
-            if session_id is not None and candidate != session_id:
-                raise ProbeFailure("OpenCode public JSONL changed session identifier")
-            session_id = candidate
-
         event_type = event.get("type")
+        if event_type == "error":
+            raise ProbeFailure("OpenCode emitted an error event")
+        if event_type not in {"step_start", "text", "tool_use", "step_finish"}:
+            if isinstance(event_type, str):
+                continue
+            raise ProbeFailure("OpenCode emitted malformed public JSONL")
         part = event.get("part")
-        if not isinstance(part, dict):
+        envelope = public_envelope(event, part)
+        if envelope is None:
+            raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
+        candidate_session, candidate_message = envelope
+        if session_id is not None and candidate_session != session_id:
+            raise ProbeFailure("OpenCode public JSONL changed session identifier")
+        session_id = candidate_session
+
+        if event_type == "step_start":
+            if part.get("type") != "step-start":
+                raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
+            message_id = candidate_message
             continue
 
+        if message_id is None or candidate_message != message_id:
+            raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
+
         if event_type == "text":
-            timing = part.get("time")
             if (
-                part.get("type") == "text"
-                and isinstance(part.get("text"), str)
-                and isinstance(timing, dict)
-                and isinstance(timing.get("end"), (int, float))
-                and not isinstance(timing.get("end"), bool)
+                part.get("type") != "text"
+                or not isinstance(part.get("text"), str)
+                or not valid_completed_timing(part.get("time"))
             ):
-                text.append(part["text"])
+                raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
+            text.append(part["text"])
             continue
 
         if event_type == "tool_use" and part.get("type") == "tool":
@@ -280,32 +362,62 @@ def parse_public_output(stdout: str) -> PublicOutput:
             if (
                 isinstance(name, str)
                 and SAFE_IDENTIFIER.fullmatch(name)
+                and isinstance(part.get("callID"), str)
+                and SAFE_IDENTIFIER.fullmatch(part["callID"])
                 and isinstance(state, dict)
-                and state.get("status") in {"completed", "error"}
             ):
-                tools.append((name, state["status"]))
-            continue
+                if state.get("status") == "error":
+                    raise ProbeFailure("OpenCode emitted a failed tool event")
+                if (
+                    state.get("status") == "completed"
+                    and isinstance(state.get("input"), dict)
+                    and isinstance(state.get("output"), str)
+                    and isinstance(state.get("title"), str)
+                    and isinstance(state.get("metadata"), dict)
+                    and valid_completed_timing(state.get("time"))
+                ):
+                    tools.append((name, "completed"))
+                    continue
+            raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
 
         if event_type == "step_finish" and part.get("type") == "step-finish":
             tokens = part.get("tokens")
-            if not isinstance(tokens, dict):
-                continue
+            if (
+                not isinstance(part.get("reason"), str)
+                or finite_nonnegative_number(part.get("cost")) is None
+                or not isinstance(tokens, dict)
+            ):
+                raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
             cache = tokens.get("cache")
             values = [
                 nonnegative_int(tokens.get("input")),
                 nonnegative_int(tokens.get("output")),
+                nonnegative_int(tokens.get("reasoning")),
             ]
-            if isinstance(cache, dict):
-                values.extend(
-                    (
-                        nonnegative_int(cache.get("read")),
-                        nonnegative_int(cache.get("write")),
-                    )
+            if not isinstance(cache, dict):
+                raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
+            values.extend(
+                (
+                    nonnegative_int(cache.get("read")),
+                    nonnegative_int(cache.get("write")),
                 )
-            usage_seen = usage_seen or any(value is not None for value in values)
+            )
+            total = tokens.get("total")
+            if any(value is None for value in values) or (
+                total is not None and nonnegative_int(total) is None
+            ):
+                raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
+            usage_seen = True
+            continue
+
+        raise ProbeFailure("OpenCode emitted an invalid public JSONL envelope")
 
     if session_id is None:
         raise ProbeFailure("OpenCode emitted no canonical public session identifier")
+    if not text:
+        raise ProbeFailure("OpenCode emitted no completed public response text")
+    if not usage_seen:
+        raise ProbeFailure("OpenCode emitted no valid public completion usage")
     return PublicOutput(
         session_id=session_id,
         text="".join(text),
@@ -354,7 +466,7 @@ def run_probe(
             stderr=subprocess.DEVNULL,
             text=True,
             timeout=PROBE_TIMEOUT_SECONDS,
-            env=fixed_env(search, fetch),
+            env=fixed_env(search, fetch, workspace),
         )
     except subprocess.TimeoutExpired as error:
         raise ProbeFailure("OpenCode probe timed out") from error
@@ -362,9 +474,18 @@ def run_probe(
         raise ProbeFailure("OpenCode probe process could not start") from error
     except UnicodeError as error:
         raise ProbeFailure("OpenCode probe output could not be decoded") from error
+    try:
+        output = parse_public_output(completed.stdout)
+    except ProbeFailure as error:
+        if (
+            completed.returncode != 0
+            and str(error) != "OpenCode emitted an error event"
+        ):
+            raise ProbeFailure("OpenCode probe process failed") from error
+        raise
     if completed.returncode != 0:
         raise ProbeFailure("OpenCode probe process failed")
-    return parse_public_output(completed.stdout)
+    return output
 
 
 def structured_probe(workspace: Path, model: str) -> None:
@@ -455,7 +576,9 @@ def schema_retry_media_probe(
         first_result = None
     expected = {"png_dominant_color": "blue", "jpeg_dominant_color": "red"}
     if first_result == expected:
-        raise ProbeFailure("OpenCode schema retry probe received no invalid first answer")
+        raise ProbeFailure(
+            "OpenCode schema retry probe received no invalid first answer"
+        )
 
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -484,7 +607,7 @@ def schema_retry_media_probe(
 
 
 def write_hostile_web_config(workspace: Path) -> None:
-    rules = {"websearch": "allow", "webfetch": "allow"}
+    rules = {"websearch": "allow", "webfetch": "allow", "codesearch": "allow"}
     content = {
         "permission": rules,
         "agent": {
@@ -513,16 +636,23 @@ class MarkerServer:
             def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
                 owner.requests += 1
                 body = owner.marker.encode("ascii")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass
 
             def log_message(self, format: str, *args: object) -> None:
                 del format, args
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class QuietThreadingHTTPServer(ThreadingHTTPServer):
+            def handle_error(self, request: object, client_address: object) -> None:
+                del request, client_address
+
+        self.server = QuietThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     @property
@@ -541,31 +671,37 @@ class MarkerServer:
         self.thread.join(timeout=5)
 
 
+def disabled_network_tool_prompts(marker_url: str) -> tuple[tuple[str, str], ...]:
+    return (
+        (
+            "websearch",
+            "Attempt to call websearch for the exact marker URL "
+            f"{marker_url}. Do not use any other tool. Return only compact JSON "
+            "with exactly websearch_completed as a boolean.",
+        ),
+        (
+            "webfetch",
+            f"Attempt to call webfetch on {marker_url}. Do not use any other tool. "
+            "Return only compact JSON with exactly fetched_marker as a string.",
+        ),
+        (
+            "codesearch",
+            "Attempt to call codesearch for the exact marker URL "
+            f"{marker_url}. Do not use any other tool. Return only compact JSON "
+            "with exactly codesearch_completed as a boolean.",
+        ),
+    )
+
+
 def web_disabled_probe(workspace: Path, model: str) -> None:
     write_hostile_web_config(workspace)
-    search = run_probe(
-        workspace,
-        command_argv(model),
-        "Attempt to call websearch for 'site:opencode.ai/docs/cli OpenCode CLI'. "
-        "Do not use any other tool. Return only compact JSON with exactly "
-        "websearch_completed as a boolean.",
-    )
-    if search.tools:
-        raise ProbeFailure("OpenCode disabled policy allowed a web tool")
-
     with MarkerServer() as marker:
-        fetched = run_probe(
-            workspace,
-            command_argv(model),
-            f"Attempt to call webfetch on {marker.url}. Do not use any other tool. "
-            "Return only compact JSON with exactly fetched_marker as a string.",
-        )
-        if (
-            marker.requests != 0
-            or marker.marker in fetched.text
-            or fetched.tools
-        ):
-            raise ProbeFailure("OpenCode disabled policy allowed web access")
+        for tool_name, prompt in disabled_network_tool_prompts(marker.url):
+            output = run_probe(workspace, command_argv(model), prompt)
+            if marker.requests != 0 or marker.marker in output.text or output.tools:
+                raise ProbeFailure(
+                    f"OpenCode disabled policy allowed {tool_name} access"
+                )
 
 
 def official_result_url(value: Any) -> bool:
@@ -669,7 +805,7 @@ def run_modes(
             web_search_fetch_probe(workspace, model)
         else:
             raise ProbeFailure("unknown probe mode")
-        print(f"PASS {mode}")
+        print(f"OBSERVED-BELOW-BASELINE {mode}", flush=True)
 
 
 def public_jsonl_fixture() -> str:
@@ -749,13 +885,18 @@ def run_self_test() -> None:
     if (
         AUTH_TESTED_VERSION != "1.2.24"
         or DESCRIPTOR_BASELINE_VERSION != "1.14.20"
+        or DEFAULT_MODEL != "openai/gpt-5.4"
         or version_at_least(AUTH_TESTED_VERSION, DESCRIPTOR_BASELINE_VERSION)
     ):
         raise ProbeFailure("offline version provenance self-test failed")
     denied = fixed_env("deny", "deny")
     expected_denials = {"websearch": "deny", "webfetch": "deny", "codesearch": "deny"}
     if (
-        json.loads(denied.get("OPENCODE_PERMISSION", "null")) != expected_denials
+        PROBE_AGENT == "build"
+        or not SAFE_IDENTIFIER.fullmatch(PROBE_AGENT)
+        or PROBE_AGENT not in json.loads(fixed_config("deny", "deny"))["agent"]
+        or "OPENCODE_DB" in fixed_env("deny", "deny")
+        or json.loads(denied.get("OPENCODE_PERMISSION", "null")) != expected_denials
         or denied.get("OPENCODE_EXPERIMENTAL") != "0"
         or denied.get("OPENCODE_EXPERIMENTAL_EXA") != "0"
         or denied.get("OPENCODE_ENABLE_EXA") != "0"
@@ -763,7 +904,9 @@ def run_self_test() -> None:
         or denied.get("OPENCODE_CONFIG_DIR") != ""
     ):
         raise ProbeFailure("offline disabled environment self-test failed")
-    if {name for name, _prompt in disabled_network_tool_prompts("http://127.0.0.1/")} != {
+    if {
+        name for name, _prompt in disabled_network_tool_prompts("http://127.0.0.1/")
+    } != {
         "websearch",
         "webfetch",
         "codesearch",
@@ -772,6 +915,17 @@ def run_self_test() -> None:
 
     with tempfile.TemporaryDirectory(prefix="cabal-opencode-probe-self-test-") as root:
         directory = Path(root)
+        isolated_env = fixed_env("deny", "deny", directory)
+        isolated_home = directory / ".cabal-opencode-isolated-config"
+        if (
+            isolated_env.get("XDG_CONFIG_HOME") != str(isolated_home)
+            or isolated_env.get("OPENCODE_TEST_HOME") != str(isolated_home)
+            or "OPENCODE_DB" in isolated_env
+            or isolated_env.get("OPENCODE_TEST_MANAGED_CONFIG_DIR")
+            != str(isolated_home / "managed")
+            or isolated_home.stat().st_mode & 0o777 != 0o700
+        ):
+            raise ProbeFailure("offline config-isolation self-test failed")
         blue, red, green = write_fixtures(directory)
         if not (
             blue.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -786,8 +940,14 @@ def run_self_test() -> None:
         ):
             raise ProbeFailure("offline fixture-name self-test failed")
         argv = command_argv(DEFAULT_MODEL, (blue, red))
-        expected_tail = ["--file", str(blue.resolve()), "--file", str(red.resolve()), "-"]
-        if argv[-5:] != expected_tail:
+        expected_tail = [
+            "--file",
+            str(blue.resolve()),
+            "--file",
+            str(red.resolve()),
+            "-",
+        ]
+        if argv[-5:] != expected_tail or "--pure" in argv:
             raise ProbeFailure("offline repeated-file argv self-test failed")
         resumed = command_argv(
             DEFAULT_MODEL,
@@ -811,6 +971,35 @@ def run_self_test() -> None:
     public_projection = parsed.text + repr(parsed.tools)
     if any(marker in public_projection for marker in private_markers):
         raise ProbeFailure("offline parser privacy self-test failed")
+
+    fixture_events = [json.loads(line) for line in public_jsonl_fixture().splitlines()]
+    second_start = json.loads(json.dumps(fixture_events[0]))
+    second_start["timestamp"] = 4
+    second_start["part"]["id"] = "prt_789abcdef012ABCDEFGHIJKLMN"
+    second_start["part"]["messageID"] = "msg_abcdef123456ABCDEFGHIJKLMN"
+    second_text = json.loads(json.dumps(fixture_events[2]))
+    second_text["timestamp"] = 5
+    second_text["part"]["messageID"] = "msg_abcdef123456ABCDEFGHIJKLMN"
+    second_finish = json.loads(json.dumps(fixture_events[3]))
+    second_finish["timestamp"] = 6
+    second_finish["part"]["messageID"] = "msg_abcdef123456ABCDEFGHIJKLMN"
+    first_finish = json.loads(json.dumps(fixture_events[3]))
+    first_finish["timestamp"] = 3
+    sequential_events = [
+        fixture_events[0],
+        fixture_events[1],
+        first_finish,
+        second_start,
+        second_text,
+        second_finish,
+    ]
+    sequential = parse_public_output(
+        "\n".join(
+            json.dumps(event, separators=(",", ":")) for event in sequential_events
+        )
+    )
+    if sequential.text != '{"probe_status":"ready"}' or not sequential.usage_seen:
+        raise ProbeFailure("offline sequential-assistant parser self-test failed")
 
     validate_color_object(
         {"png_dominant_color": "blue", "jpeg_dominant_color": "red"},
@@ -853,6 +1042,21 @@ def run_self_test() -> None:
     def change_message(value: dict[str, Any]) -> None:
         value["part"]["messageID"] = "msg_abcdef123456ABCDEFGHIJKLMN"
 
+    def change_only_part_session(value: dict[str, Any]) -> None:
+        value["part"]["sessionID"] = "ses_abcdef123456ABCDEFGHIJKLMN"
+
+    def invalidate_part_id(value: dict[str, Any]) -> None:
+        value["part"]["id"] = "part-private"
+
+    def reverse_completion_time(value: dict[str, Any]) -> None:
+        value["part"]["time"] = {"start": 5, "end": 4}
+
+    def make_token_negative(value: dict[str, Any]) -> None:
+        value["part"]["tokens"]["input"] = -1
+
+    def remove_tool_metadata(value: dict[str, Any]) -> None:
+        del value["part"]["state"]["metadata"]
+
     def remove_fixture_event(index: int) -> str:
         lines = public_jsonl_fixture().splitlines()
         del lines[index]
@@ -888,6 +1092,26 @@ def run_self_test() -> None:
             "OpenCode emitted an invalid public JSONL envelope",
         ),
         (
+            mutate_fixture(2, change_only_part_session),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
+            mutate_fixture(2, invalidate_part_id),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
+            mutate_fixture(2, reverse_completion_time),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
+            mutate_fixture(3, make_token_negative),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
+            mutate_fixture(1, remove_tool_metadata),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
             remove_fixture_event(2),
             "OpenCode emitted no completed public response text",
         ),
@@ -915,9 +1139,11 @@ def run_self_test() -> None:
         raise ProbeFailure("offline marker-server sanitization self-test failed")
 
     def expect_process_failure(exception: Exception, expected_message: str) -> None:
-        with patch("subprocess.run", side_effect=exception):
+        with tempfile.TemporaryDirectory(
+            prefix="cabal-opencode-probe-process-test-"
+        ) as workspace, patch("subprocess.run", side_effect=exception):
             try:
-                run_probe(Path("."), ["opencode"], "private prompt")
+                run_probe(Path(workspace), ["opencode"], "private prompt")
             except ProbeFailure as error:
                 if str(error) != expected_message or "private" in str(error):
                     raise ProbeFailure("offline process-error self-test failed")
@@ -932,6 +1158,39 @@ def run_self_test() -> None:
         OSError("private path and credential detail"),
         "OpenCode probe process could not start",
     )
+
+    private_provider_error = "/private/provider-auth-token=never-print"
+    error_stdout = json.dumps(
+        {
+            "type": "error",
+            "timestamp": 1,
+            "sessionID": "ses_123456789abcABCDEFGHIJKLMN",
+            "error": {"data": {"message": private_provider_error}},
+        },
+        separators=(",", ":"),
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="cabal-opencode-probe-error-record-test-"
+    ) as workspace, patch(
+        "subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            ["opencode"],
+            1,
+            stdout=error_stdout,
+            stderr=private_provider_error,
+        ),
+    ):
+        try:
+            run_probe(Path(workspace), ["opencode"], "private prompt")
+        except ProbeFailure as error:
+            message = str(error)
+            if (
+                message != "OpenCode emitted an error event"
+                or private_provider_error in message
+            ):
+                raise ProbeFailure("offline error-record self-test failed") from error
+        else:
+            raise ProbeFailure("offline error-record self-test failed")
 
     sensitive_marker = "/private/probe-token=never-print-this"
 
@@ -1012,6 +1271,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ProbeFailure("invalid probe model")
         require_version()
         require_help_contract()
+        print(
+            "NON-EVIDENCE: authenticated OpenCode "
+            f"{AUTH_TESTED_VERSION} observation below descriptor baseline "
+            f"{DESCRIPTOR_BASELINE_VERSION}",
+            flush=True,
+        )
         with tempfile.TemporaryDirectory(prefix="cabal-opencode-probe-") as temp_dir:
             with tempfile.TemporaryDirectory(
                 prefix="cabal opencode sealed inputs "
