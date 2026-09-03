@@ -112,7 +112,15 @@
 
 (test
  (name test_claude_code)
- (libraries cabal alcotest eio eio_posix yojson)
+ (libraries
+  cabal
+  cabal_process_test_helper
+  alcotest
+  eio
+  eio_posix
+  yojson
+  unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_claude_code))
 
 (test

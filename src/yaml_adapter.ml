@@ -147,6 +147,20 @@ let pi_stream_ended_without_finish_reason (result : task_result) =
       contains result.stdout || contains result.stderr
   | Success | Timeout | Cancelled -> false
 
+let claude_result_line line =
+  try
+    Yojson.Safe.Util.(
+      Yojson.Safe.from_string line |> member "type" |> to_string_option)
+    = Some "result"
+  with _ -> false
+
+let assistant_text_of_events events =
+  events
+  |> List.filter_map (function
+       | Task_event.Agent_text_delta text -> Some text
+       | _ -> None)
+  |> String.concat ""
+
 let make_backend (cfg : config) : Agentic_backend.t =
   let module M = struct
     let id = cfg.name
@@ -219,6 +233,9 @@ let make_backend (cfg : config) : Agentic_backend.t =
 
     let run_task ~sw ~env ?context ?on_raw_line (spec : task_spec) =
       let args = invocation_argv cfg in
+      let strict_builtin_claude =
+        cfg.name = "claude-code" && cfg.source = "builtin"
+      in
       let full_prompt =
         if String.length spec.instructions > 0 then
           spec.prompt ^ "\n\n---\nProject Instructions:\n" ^ spec.instructions
@@ -233,6 +250,7 @@ let make_backend (cfg : config) : Agentic_backend.t =
         else (args, full_prompt)
       in
       let run_once () =
+        let last_claude_assistant_text = ref None in
         (match context, structured_parser_for_id with
         | Some context, Some _ ->
             Task_execution_context.claim_structured_text context
@@ -241,10 +259,34 @@ let make_backend (cfg : config) : Agentic_backend.t =
           Option.iter (fun callback -> callback line) on_raw_line ;
           match context, structured_parser_for_id with
           | Some context, Some (_, _, normalized_events_of_line) ->
+              let events = normalized_events_of_line line in
+              let events =
+                if strict_builtin_claude then
+                  if claude_result_line line then []
+                  else
+                    List.filter
+                      (function Task_event.Session_id _ -> false | _ -> true)
+                      events
+                else events
+              in
+              if strict_builtin_claude then
+                let assistant_text = assistant_text_of_events events in
+                if assistant_text <> "" then
+                  last_claude_assistant_text := Some assistant_text ;
               List.iter
                 (Task_execution_context.emit context)
-                (normalized_events_of_line line)
+                events
           | Some _, None | None, _ -> ()
+        in
+        let parse_stdout =
+          if strict_builtin_claude then None else parse_stdout_for_id
+        in
+        let parse_session_id =
+          if strict_builtin_claude then None
+          else
+            match structured_parser_for_id with
+            | Some (_, parse_session_id, _) -> parse_session_id
+            | None -> None
         in
         let result =
           Backend_process.run_task_with
@@ -253,19 +295,59 @@ let make_backend (cfg : config) : Agentic_backend.t =
             ~spec:{spec with timeout = cfg.timeout_seconds}
             ~build_command
             ?context
-            ?parse_stdout:parse_stdout_for_id
-            ?parse_session_id:
-              (match structured_parser_for_id with
-              | Some (_, parse_session_id, _) -> parse_session_id
-              | None -> None)
+            ?parse_stdout
+            ?parse_session_id
             ~on_stdout
             ()
         in
-        (match context, structured_parser_for_id with
-        | Some context, Some _ ->
-            Task_execution_context.mark_final_public_text context
-        | Some _, None | None, _ -> ()) ;
-        result
+        if strict_builtin_claude then
+          match result.status with
+          | Success -> (
+              match Claude_code.verify_terminal_stdout result.stdout with
+              | Error message ->
+                  {
+                    result with
+                    status = Failed message;
+                    agent_text = "";
+                    stderr = message;
+                    cost = None;
+                    session_id = None;
+                  }
+              | Ok terminal ->
+                  Option.iter
+                    (fun context ->
+                      if
+                        !last_claude_assistant_text <> Some terminal.text
+                        && terminal.text <> ""
+                      then
+                        Task_execution_context.emit context
+                          (Task_event.Agent_text_delta terminal.text) ;
+                      Option.iter
+                        (fun id ->
+                          Task_execution_context.emit context
+                            (Task_event.Session_id id))
+                        terminal.session_id ;
+                      Option.iter
+                        (fun cost ->
+                          Task_execution_context.emit context
+                            (Task_event.Token_usage cost))
+                        terminal.cost ;
+                      Task_execution_context.mark_final_public_text context)
+                    context ;
+                  {
+                    result with
+                    agent_text = terminal.text;
+                    cost = terminal.cost;
+                    session_id = terminal.session_id;
+                  })
+          | Failed _ | Timeout | Cancelled -> result
+        else begin
+          (match context, structured_parser_for_id with
+          | Some context, Some _ ->
+              Task_execution_context.mark_final_public_text context
+          | Some _, None | None, _ -> ()) ;
+          result
+        end
       in
       let first = run_once () in
       if cfg.name = "pi" && pi_stream_ended_without_finish_reason first then

@@ -256,9 +256,14 @@ type media_attachment = {
 }
 [@@deriving show, eq, yojson]
 
-(** Maximum web access requested for a task. *)
+(** Maximum backend-native web search/fetch access requested for a task.
+
+    This policy is not a network sandbox. In particular, separately authorized
+    shell commands, MCP servers, or other tools may have their own network
+    access; hosts requiring a total egress boundary must enforce it outside the
+    backend transport. *)
 type web_access =
-  | Web_disabled  (** No web access requested. *)
+  | Web_disabled  (** No backend-native web access requested. *)
   | Web_search  (** Search is allowed, but fetching result pages is not. *)
   | Web_search_and_fetch  (** Search and result-page fetching are allowed. *)
 [@@deriving show, eq, yojson]

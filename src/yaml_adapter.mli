@@ -39,6 +39,11 @@ type config = {
       returns [true] if the exit code is 0.
     - [run_task] invokes [invocation_command] with the full prompt
       (prompt + instructions) written to stdin and returns raw stdout.
+      The embedded built-in [claude-code] adapter additionally requires the
+      same exact verified terminal record as the handwritten backend before
+      reporting success or publishing final text. Project/user YAML overrides,
+      including overrides that reuse that id, retain generic Extensible
+      semantics.
 
     {pre}
     (none)

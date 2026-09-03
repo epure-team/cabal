@@ -13,7 +13,11 @@
 
     {b Configuration:}
     Claude Code is expected to be installed and accessible in the PATH.
-    The backend uses [--print --output-format json] for non-interactive output.
+    The backend uses Claude's newline-delimited stream JSON input/output
+    protocol for non-interactive output. Exit zero becomes task success only
+    when stdout ends in the documented [result]/[success]/[is_error=false]
+    terminal record. Media and positive web transport remain disabled until
+    authenticated baseline evidence is available.
 
     {b MCP Integration:}
     The backend generates a temporary MCP configuration file that points to
@@ -149,18 +153,51 @@ val get_git_diff :
 val get_git_diff_content :
   sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> working_dir:string -> string
 
-(** [build_command ~mcp_config_path spec] constructs the Claude Code CLI
-    command and stdin content for a task invocation.
+(** Prepared Claude process invocation. [argv] and [stdin] are the actual
+    process inputs. [redacted_argv] replaces settings/MCP paths, schema, model,
+    and resume values; [redacted_stdin] contains no prompt or content data.
+    Only redacted fields are suitable for diagnostics. *)
+type backend_invocation = {
+  argv : string list;
+  stdin : string;
+  redacted_argv : string list;
+  redacted_stdin : string;
+}
+
+(** [build_invocation ... spec] constructs an attachment-free,
+    [Web_disabled] Claude stream-JSON invocation. Here [Web_disabled] removes
+    Claude's native [WebSearch]/[WebFetch] tools; it is not a total network-egress
+    guarantee because caller-authorized Bash or MCP tools can have independent
+    network access. The invocation validates resume IDs and emits them using the
+    parity SDK's [--resume <uuid>] shape. Native [--json-schema] composition is
+    preserved.
+
+    Attachment-bearing and positive-web requests are rejected with sanitized
+    errors. No raw attachment-path helper is exposed while media remains
+    dormant. A future media encoder must consume opaque central sealed delivery
+    and use the matching preflight-validated attachment references as its size
+    and MIME bounds. *)
+val build_invocation :
+  ?attachment_delivery:Backend_types.attachment_delivery ->
+  ?project_config_path:string option ->
+  mcp_config_path:string option ->
+  Backend_types.task_spec ->
+  (backend_invocation, string) result
+
+(** [build_command ~mcp_config_path spec] is the compatibility projection of
+    {!build_invocation}. It constructs the Claude Code CLI command and
+    stream-JSON stdin content for an attachment-free, [Web_disabled] task.
     Includes [--resume <id>] when [spec.resume_session_id] is set.
-    Exported for testing.
+    Unsupported media/web requests and malformed resume IDs raise
+    [Invalid_argument]. Exported for testing.
 
     {pre}
     (none)
 
     {post}
     Returns [(cmd_list, stdin_content)] where [cmd_list] is the full
-    argument vector for [claude] and [stdin_content] is the prompt text to
-    pipe to the process's stdin.
+    argument vector for [claude] and [stdin_content] is one user-message JSONL
+    record to pipe to the process's stdin.
 
     {violators}
     (none)
@@ -174,15 +211,16 @@ val build_command :
   Backend_types.task_spec ->
   string list * string
 
-(** [parse_session_id_from_stdout stdout] extracts the [session_id] field
-    from Claude Code's JSON output. Returns [None] if not present.
+(** [parse_session_id_from_stdout stdout] extracts a canonical lowercase UUID
+    [session_id] from exact public Claude [system/init] and successful [result]
+    records. Every identifier present in those records must be canonical and
+    all identifiers must agree; otherwise resume is suppressed with [None].
 
     {pre}
     (none)
 
     {post}
-    Returns [Some id] if a [session_id] field is found in the JSON output,
-    [None] otherwise.
+    Returns [Some id] if a valid public [session_id] is found, [None] otherwise.
 
     {violators}
     (none)
@@ -214,18 +252,34 @@ val parse_stdout_text : string -> string
 val parse_public_stdout_text : string -> string
 
 (** Strict session parser accepting only documented init or successful result
-    records. *)
+    records whose present identifiers are canonical and mutually consistent. *)
 val parse_public_session_id : string -> string option
 
 (** Strict usage parser accepting only successful result records. *)
 val parse_public_cost : string -> Backend_types.cost option
 
-(** [parse_stream_event line] parses a stream-json event line and extracts
-    displayable content. Returns [Some text] if there is content to display,
-    [None] otherwise.
+(** A terminal Claude result accepted by {!verify_terminal_stdout}. *)
+type verified_terminal = {
+  text : string;  (** Exact public result text, preferring structured output. *)
+  session_id : string option;
+      (** Canonical session UUID, present only when all public IDs agree. *)
+  cost : Backend_types.cost option;  (** Validated terminal usage, if present. *)
+}
 
-    Tool-use blocks are formatted as ["→ <tool_name> <arg>"] and
-    tool-result blocks are filtered out.
+(** [verify_terminal_stdout stdout] validates a complete Claude stream before
+    process exit zero may become task success. It requires exactly one final
+    [type=result], [subtype=success], [is_error=false] record with public result
+    text, rejects malformed lines and any record after the result, and validates
+    all public session identifiers as one canonical UUID.
+
+    Errors are fixed sanitized diagnostics that never contain stream content. *)
+val verify_terminal_stdout : string -> (verified_terminal, string) result
+
+(** [parse_stream_event line] parses a stream-json event line and extracts only
+    display-safe public content. Tool-use blocks retain a bounded tool name but
+    never arguments; user/tool-result, thinking, error, malformed, and unknown
+    records are filtered out. Session initialization renders a fixed marker,
+    not the session identifier.
 
     {pre}
     [line] should be a single line of Claude Code's stream-json output.
@@ -242,9 +296,10 @@ val parse_public_cost : string -> Backend_types.cost option
 val parse_stream_event : string -> string option
 
 (** [normalized_events_of_stream_line line] extracts only public assistant
-    text, tool identity, and session identity from one Claude stream event.
-    Thinking blocks, tool arguments, and malformed input produce no sensitive
-    normalized payload. *)
+    text, bounded tool identity, canonical session UUIDs, and independently
+    validated non-negative usage fields from one Claude stream event. Input
+    prompts/images, thinking, tool arguments/results, errors, unsafe identifiers,
+    and malformed input produce no sensitive normalized payload. *)
 val normalized_events_of_stream_line : string -> Task_event.payload list
 
 (** [run_task_streaming ~sw ~env ~on_stdout spec] runs a task with streaming

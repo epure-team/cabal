@@ -827,9 +827,15 @@ let test_claude_parser_emits_only_proven_public_content () =
         false
         (contains tool.name "/private/book.jpg")
   | _ -> Alcotest.fail "expected normalized text and tool events") ;
+  Alcotest.(check int)
+    "subtypeless result is not public success"
+    0
+    (List.length
+       (Claude_code.normalized_events_of_stream_line
+          {|{"type":"result","is_error":false,"structured_output":{"ok":true}}|})) ;
   let structured =
     Claude_code.normalized_events_of_stream_line
-      {|{"type":"result","is_error":false,"structured_output":{"ok":true}}|}
+      {|{"type":"result","subtype":"success","is_error":false,"structured_output":{"ok":true}}|}
   in
   Alcotest.(check bool)
     "successful structured result is public"
