@@ -146,6 +146,43 @@ standalone OCaml library and as the backend abstraction layer vendored under
   and interruption must emit no usage, traceback, supplied value, or path.
   `--self-test` must exercise every validator and these negative CLI paths.
 
+## Central media/schema E2E — CBL-08 P0
+
+- `test/test_media_web_schema_backends.ml` is authenticated and must stay behind
+  `CABAL_E2E_TESTS=1`. Standard CI neither builds nor runs it; the always-on
+  `test/test_media_web_schema_e2e_structure.ml` guards selection, fixtures,
+  schema/semantic validation, event invariants, credential-free environment
+  lookup, and Dune alias/gate wiring.
+- Select media cases from positive descriptor capabilities after applying the
+  comma-separated `CABAL_E2E_BACKEND` filter. P0 is one central
+  `Task_runtime.start_task` invocation for Codex carrying both a runtime-generated
+  blue PNG and red JPEG with computed size/SHA-256 metadata and native schema.
+  Never call `Agentic_backend.run_task`, `Json_schema_enforcer.run_task`, or a CLI
+  directly from this proof.
+- Mirror hosts with `Runtime_bootstrap.Hardened_builtins` and fail closed on any
+  effective descriptor, independent runtime-capability snapshot, or runtime
+  native-schema disagreement. Supply explicit attachment limits and assert
+  detailed requested delivery plus `Cleanup_succeeded`.
+- Await normalized event delivery and require one last terminal, no post-terminal
+  event, exact attempt start/finish agreement, and final public agent output.
+  Codex's public JSONL protocol additionally guarantees session and usage events;
+  a tool event is not mandatory for this image-only prompt, but any emitted tool
+  lifecycle must be paired.
+- The schema intentionally permits a small color vocabulary; exact blue/red
+  semantic validation is separate so a constant schema-shaped response cannot
+  pass. Live diagnostics are fixed and sanitized: never print prompts, raw
+  output, fixture bytes/paths, digests, credentials, or session identifiers.
+- An absent executable is an explicit skip. An installed CLI with a failed
+  version/availability/authentication probe is a real failure. Below-baseline
+  versions fail consistently with central dispatch; above-evidence versions get
+  only a fixed advisory.
+- Web selection is separate and includes only positive descriptors. Every current
+  built-in is `Web_disabled`, so P0 performs no web invocation and does not fail
+  for the empty matrix. The complete web E2E matrix remains P1.
+- Keep `test_process_group`, descendant cleanup, and other standard process
+  ownership tests outside the authenticated gate. Add the CBL-08 binary after the
+  existing E2Es in the sequential `@e2e` alias.
+
 ## Json_schema_validator — Story #623
 
 - `Json_schema_validator.validate` is backed by the `jsonschema` opam package

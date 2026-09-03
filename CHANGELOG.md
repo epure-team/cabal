@@ -9,6 +9,21 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Central media + schema E2E proof (CBL-08 P0).** A new authenticated,
+  `CABAL_E2E_TESTS=1`-gated harness selects evidence-backed media descriptors and
+  exercises Codex PNG/JPEG upload plus native JSON Schema in one hardened
+  `Task_runtime` invocation. Runtime-generated 64×64 fixtures carry computed
+  size/SHA-256 metadata; a strict schema plus an exact semantic assertion makes
+  the response image-dependent. The proof checks the validated descriptor/runtime
+  binding, enforced baseline, explicit limits, sealed upload intent, one detailed
+  native attempt, successful cleanup, public normalized output, session/usage
+  protocol events, exactly one terminal, and paired attempt lifecycle events.
+  It distinguishes absent CLIs from installed probe/authentication failures and
+  emits only fixed sanitized diagnostics. Web selection is positive-capability
+  only; with every current backend `Web_disabled`, P0 performs no web call and
+  leaves the full web matrix to P1. An always-on structural suite proves fixture,
+  schema, selection, event, environment, and Dune-gating contracts without
+  credentials; existing process cleanup tests remain outside the E2E gate.
 - **Sealed Codex media transport and web investigation (CBL-07A).** Codex 0.131.0
   now carries evidence-backed PNG/JPEG upload capability. Its web adapter modes
   remain implemented, but the descriptor and independent runtime snapshot stay
