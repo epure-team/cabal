@@ -502,6 +502,26 @@ search/fetch/official-page booleans. The probe
 never prints fixture, workspace, authentication, session, tool-argument, or raw
 backend data.
 
+CBL-08 adds the host-shaped proof in
+[`test/test_media_web_schema_backends.ml`](test/test_media_web_schema_backends.ml).
+It generates tiny, deterministic 64×64 blue PNG and red JPEG fixtures at runtime,
+computes attachment size and SHA-256 metadata from those bytes, and submits both
+in **one** `Task_runtime` invocation with a strict draft 2020-12 schema. The
+schema permits a small color vocabulary; the test separately requires the exact
+image-derived blue/red result, so constant structural compliance cannot pass. A
+credential-free inspector parses PNG chunks, stored DEFLATE scanlines, dimensions,
+and RGB pixels. The JPEG is pinned by byte count and SHA-256, its SOF dimensions
+are parsed independently, and only that reviewed golden is assigned red
+provenance; corrupted and wrong-color fixtures are negative-tested.
+Hardened bootstrap, explicit attachment limits, sealed staging, requested upload
+delivery, exactly one successful native initial attempt numbered 1, normalized
+public events, and successful central cleanup are all asserted. Tool starts and
+finishes are accepted only between that exact attempt's start and finish, and are
+paired by attempt plus stable id, falling back to name only when no id exists.
+The live harness emits only fixed PASS/SKIP/FAIL
+diagnostics and never prints prompts, fixture bytes or paths, raw backend output,
+credentials, or session identifiers.
+
 ### Redaction contract for hosts logging backend output
 
 Cabal's `Session_event_log` redacts events **before** writing them. Hosts
@@ -627,20 +647,26 @@ opam lint cabal.opam
 
 ### E2E tests (manual, CI-excluded)
 
-Two E2E test binaries are gated by `CABAL_E2E_TESTS=1` and are **not** run
-in CI:
+Three E2E test binaries are gated by `CABAL_E2E_TESTS=1` and are **not** built or
+run in CI:
 
 | Binary | Purpose |
 |---|---|
 | [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the enforcer path against all default backends, or an optional filtered backend |
 | [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true`, uses hardened runtime bootstrap, and exercises the native schema path (Story #628) |
+| [`test/test_media_web_schema_backends.ml`](test/test_media_web_schema_backends.ml) | Selects positive-media descriptors with valid native draft 2020-12 schema evidence and proves both through one central detailed runtime invocation per backend (CBL-08 P0) |
 
-Both are built and run via `@e2e`. With only `CABAL_E2E_TESTS=1`, the alias is
-a multi-backend run: `test_demo_627` iterates the default backend set
+All three are built and run sequentially via `@e2e`. With only
+`CABAL_E2E_TESTS=1`, the alias is a multi-backend run: `test_demo_627` iterates
+the default backend set
 (`claude-code`, `codex`, `opencode`, `copilot-cli`), while
 `test_native_json_schema_backends` iterates every registry backend whose
-`native_json_schema_output = true`. `gemini-cli` has a default model and
-override env var, but is opt-in via `CABAL_E2E_BACKEND=gemini-cli`.
+`native_json_schema_output = true`. The CBL-08 binary defaults to descriptors
+with positive media capability, `native_json_schema_output = true`, and valid
+native evidence for the fixture's draft 2020-12 schema, currently Codex. Generic
+`structured_output` alone is not eligible.
+`gemini-cli` has a default model and override env var, but is opt-in for the
+older generic E2Es via `CABAL_E2E_BACKEND=gemini-cli`.
 Managed host-owned artifacts created by these test harnesses use the test-only
 namespace `.cabal-tests/backend-config`; backend-fixed project config paths
 remain backend-owned (for example `.codex/config.toml`).
@@ -670,14 +696,34 @@ CABAL_E2E_TESTS=1 \
   dune build @e2e
 ```
 
+Run only the CBL-08 Codex image/schema proof:
+
+```bash
+CABAL_E2E_TESTS=1 \
+  CABAL_E2E_BACKEND=codex \
+  dune build @e2e-cbl08
+```
+
+The dedicated alias builds the process-group launcher and gated binary before
+running the proof, so the command also works from a clean build tree.
+
+The CBL-08 binary skips only a lookup that is genuinely absent with `ENOENT` or
+`ENOTDIR`. A present non-executable, permission failure, dangling/looping symlink,
+other lookup error, failed or malformed version probe, availability failure, or
+authenticated-call failure is a real E2E failure. The baseline decision reuses
+`Backend_version.check_gate`; versions above capability evidence emit only a
+fixed advisory. It preserves the backend-specific model variables above and
+defines no shared `CABAL_E2E_MODEL` variable.
+
 `test_native_json_schema_backends` iterates all registry entries with
 `native_json_schema_output = true`. It calls
 `Runtime_bootstrap.register_runtime ~profile:Hardened_builtins ()`; if a
 descriptor-native backend resolves to a runtime backend whose
 `Agentic_backend.native_json_schema_output` is false, the test fails closed.
-After that runtime-capability check, both E2E binaries skip backends whose CLI
-binary is unavailable on `PATH`; authentication failures from installed CLIs are
-reported as real E2E failures. Codex intentionally omits a model by default: the
+After that runtime-capability check, the generic native harness skips backends
+whose CLI binary is unavailable on `PATH`; the stricter CBL-08 lookup behavior is
+described above. Authentication failures from installed CLIs are reported as
+real E2E failures. Codex intentionally omits a model by default: the
 harness invokes `codex exec` without `-m`, letting an already-authenticated
 ChatGPT Codex session use its CLI default model. For non-interactive setup,
 provide a `CODEX_ACCESS_TOKEN` and bootstrap the CLI before the E2E run:
@@ -686,9 +732,26 @@ provide a `CODEX_ACCESS_TOKEN` and bootstrap the CLI before the E2E run:
 printf '%s' "$CODEX_ACCESS_TOKEN" | codex login --with-access-token
 ```
 
-Version-drift detection is advisory: a warning is emitted when the installed binary version is below
-`descriptor.baseline_version`; a debug log is emitted when the installed version
-exceeds `tested_at_version`.
+For the generic native harness, version-drift detection remains advisory: a
+warning is emitted below `descriptor.baseline_version`; a debug log is emitted
+above `tested_at_version`. CBL-08 instead enforces the shared baseline gate.
+
+The CBL-08 web case applies `CABAL_E2E_BACKEND` only after selecting descriptors
+with positive `web_support.maximum`. All current built-ins are `Web_disabled`, so
+P0 makes no web invocation and succeeds with an explicit skip. The complete
+authenticated web capability matrix remains CBL-08 P1.
+[`test/test_media_web_schema_e2e_structure.ml`](test/test_media_web_schema_e2e_structure.ml)
+is always on in standard CI and guards descriptor-driven selection, fixture and
+schema integrity, normalized-event invariants, credential-free configuration,
+and Dune gate/alias wiring without requiring a CLI or credentials. Existing
+process-group and descendant-cleanup suites remain ordinary, always-on
+prerequisites rather than moving behind the E2E gate.
+
+Run that structural executable directly with:
+
+```bash
+opam exec -- dune exec ./test/test_media_web_schema_e2e_structure.exe
+```
 
 If you consume Cabal as a vendored subtree inside a host monorepo, dune sees
 the cabal directory directly as part of the workspace — no `opam pin` is

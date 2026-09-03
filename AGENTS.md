@@ -146,6 +146,57 @@ standalone OCaml library and as the backend abstraction layer vendored under
   and interruption must emit no usage, traceback, supplied value, or path.
   `--self-test` must exercise every validator and these negative CLI paths.
 
+## Central media/schema E2E — CBL-08 P0
+
+- `test/test_media_web_schema_backends.ml` is authenticated and must stay behind
+  `CABAL_E2E_TESTS=1`. Standard CI neither builds nor runs it; the always-on
+  `test/test_media_web_schema_e2e_structure.ml` guards selection, fixtures,
+  schema/semantic validation, event invariants, credential-free environment
+  lookup, and Dune alias/gate wiring.
+- Select media cases only when media support is positive, native JSON Schema is
+  true, descriptor evidence is valid, and its draft is the fixture's 2020-12;
+  generic `structured_output` is insufficient. Apply the comma-separated
+  `CABAL_E2E_BACKEND` filter afterward. P0 is one central
+  `Task_runtime.start_task` invocation for Codex carrying both a runtime-generated
+  blue PNG and red JPEG with computed size/SHA-256 metadata and native schema.
+  Never call `Agentic_backend.run_task`, `Json_schema_enforcer.run_task`, or a CLI
+  directly from this proof.
+- Mirror hosts with `Runtime_bootstrap.Hardened_builtins` and fail closed on any
+  effective descriptor, independent runtime-capability snapshot, or runtime
+  native-schema disagreement. Supply explicit attachment limits and assert
+  detailed requested delivery plus `Cleanup_succeeded`.
+- Await normalized event delivery and require one last terminal, no post-terminal
+  event, exact attempt start/finish agreement, and final public agent output.
+  Codex's public JSONL protocol additionally guarantees session and usage events;
+  a tool event is not mandatory for this image-only prompt, but any emitted tool
+  lifecycle is valid only after that exact attempt starts and before it finishes,
+  and must pair within the attempt by stable id or, only without an id, by name.
+  Reject tools on unknown/pending/finished attempts, finish-before-start,
+  duplicates, identity mismatches, cross-attempt finishes, and tools left active
+  at attempt finish or terminal.
+- The schema intentionally permits a small color vocabulary; exact blue/red
+  semantic validation is separate so a constant schema-shaped response cannot
+  pass. Inspect PNG dimensions and decoded pixels in-process. Pin the no-decoder
+  JPEG golden by byte count/SHA-256, independently parse its SOF dimensions, and
+  reject corrupted or arbitrarily relabelled fixtures. Live diagnostics are
+  fixed and sanitized: never print prompts, raw output, fixture bytes/paths,
+  digests, credentials, or session identifiers.
+- Skip executable lookup only for genuine `ENOENT`/`ENOTDIR`. Non-executable
+  files, permission failures, broken or looping symlinks, all other lookup
+  errors, and installed CLIs with failed/malformed version, availability, or
+  authentication probes are failures. Reuse `Backend_version.check_gate` for the
+  enforced baseline; above-evidence versions get only a fixed advisory.
+- The native P0 execution is exactly attempt number 1, `Initial_attempt`, with
+  upload delivery, exact attachment references, `Web_disabled`, no local schema
+  rejection, and a successful attempt result equal to the final result. Generic
+  multi-attempt validation remains capped at two and numbered contiguously from 1.
+- Web selection is separate and includes only positive descriptors. Every current
+  built-in is `Web_disabled`, so P0 performs no web invocation and does not fail
+  for the empty matrix. The complete web E2E matrix remains P1.
+- Keep `test_process_group`, descendant cleanup, and other standard process
+  ownership tests outside the authenticated gate. Add the CBL-08 binary after the
+  existing E2Es in the sequential `@e2e` alias.
+
 ## Json_schema_validator — Story #623
 
 - `Json_schema_validator.validate` is backed by the `jsonschema` opam package
