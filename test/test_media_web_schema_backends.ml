@@ -8,10 +8,11 @@
 (** CBL-08 P0 authenticated media + JSON Schema E2E proof.
 
     This binary is compiled and run only with [CABAL_E2E_TESTS=1]. It selects
-    capability-positive media descriptors, applies [CABAL_E2E_BACKEND], checks
-    their hardened runtime binding, and performs exactly one central
-    [Task_runtime] invocation per selected installed backend. Current P0 is one
-    Codex invocation carrying both PNG and JPEG fixtures under native schema.
+    evidence-valid native-schema media descriptors, applies
+    [CABAL_E2E_BACKEND], checks their hardened runtime binding, and performs
+    exactly one central [Task_runtime] invocation per selected installed backend.
+    Current P0 is one Codex invocation carrying both PNG and JPEG fixtures under
+    native schema.
 
     Web selection is a separate test. No built-in currently has a positive web
     descriptor, so P0 performs no web invocation; the full web matrix is P1. *)
@@ -25,9 +26,11 @@ type failure =
   | Descriptor_invalid
   | Runtime_binding_missing
   | Runtime_capability_disagreement
+  | Binary_lookup_failed
   | Version_probe_failed
   | Version_below_baseline
   | Fixture_coverage_missing
+  | Fixture_semantics_invalid
   | Fixture_materialization_failed
   | Preflight_failed
   | Runtime_registration_untrusted
@@ -46,12 +49,16 @@ let render_failure = function
   | Runtime_binding_missing -> "selected descriptor has no hardened runtime"
   | Runtime_capability_disagreement ->
       "descriptor and hardened runtime capabilities disagree"
+  | Binary_lookup_failed ->
+      "CLI binary lookup failed; verify permissions and PATH integrity"
   | Version_probe_failed ->
       "installed CLI version probe failed; verify the CLI installation"
   | Version_below_baseline ->
       "installed CLI version is below the enforced descriptor baseline"
   | Fixture_coverage_missing ->
       "selected media capability has no deterministic CBL-08 fixture"
+  | Fixture_semantics_invalid ->
+      "deterministic fixture failed independent semantic inspection"
   | Fixture_materialization_failed ->
       "deterministic fixture materialization failed"
   | Preflight_failed ->
@@ -134,27 +141,6 @@ let with_private_workspace f =
       | `Result (Ok _), Error failure | `Result (Error _), Error failure ->
           Error failure)
 
-let executable_on_path binary_name =
-  let candidates =
-    if Filename.is_relative binary_name then
-      match Sys.getenv_opt "PATH" with
-      | None -> []
-      | Some path ->
-          String.split_on_char ':' path
-          |> List.map (fun directory ->
-                 Filename.concat
-                   (if directory = "" then "." else directory)
-                   binary_name)
-    else [binary_name]
-  in
-  List.exists
-    (fun candidate ->
-      try
-        Unix.access candidate [Unix.X_OK] ;
-        (Unix.stat candidate).Unix.st_kind = Unix.S_REG
-      with Unix.Unix_error _ -> false)
-    candidates
-
 let version_of_string value =
   match Backend_version.of_string value with Ok version -> Some version | Error _ -> None
 
@@ -175,30 +161,26 @@ let tested_versions (descriptor : Backend_registry.descriptor) =
 
 let check_version ~env (descriptor : Backend_registry.descriptor) =
   match
-    Backend_process.capture_version_output ~env
-      [descriptor.binary_name; "--version"]
+    E2e_harness_config.probe_version
+      ~capture:(fun command -> Backend_process.capture_version_output ~env command)
+      descriptor
   with
-  | Error _ -> Error Version_probe_failed
-  | Ok output -> (
-      match Backend_version.parse_from_output output with
-      | Error _ -> Error Version_probe_failed
-      | Ok installed -> (
-          match version_of_string descriptor.baseline_version with
-          | None -> Error Descriptor_invalid
-          | Some baseline when Backend_version.compare installed baseline < 0 ->
-              Error Version_below_baseline
-          | Some _ ->
-              let exceeds_tested =
-                tested_versions descriptor
-                |> List.filter_map version_of_string
-                |> List.exists (fun tested ->
-                       Backend_version.compare installed tested > 0)
-              in
-              if exceeds_tested then
-                Printf.eprintf
-                  "[e2e-cbl08] debug: %s installed version is above tested evidence\n%!"
-                  descriptor.id ;
-              Ok ()))
+  | E2e_harness_config.Version_probe_failed
+  | E2e_harness_config.Version_output_malformed ->
+      Error Version_probe_failed
+  | E2e_harness_config.Version_gate_rejected -> Error Version_below_baseline
+  | E2e_harness_config.Version_supported installed ->
+      let exceeds_tested =
+        tested_versions descriptor
+        |> List.filter_map version_of_string
+        |> List.exists (fun tested ->
+               Backend_version.compare installed tested > 0)
+      in
+      if exceeds_tested then
+        Printf.eprintf
+          "[e2e-cbl08] debug: %s installed version is above tested evidence\n%!"
+          descriptor.id ;
+      Ok ()
 
 let register_hardened_runtime () =
   Registry.clear () ;
@@ -214,13 +196,9 @@ let validate_runtime_binding (descriptor : Backend_registry.descriptor) =
   match Registry.find_entry descriptor.id with
   | None | Some (Registry.Raw _) -> Error Runtime_binding_missing
   | Some (Registry.Validated entry) ->
-      if
-        entry.Runtime_entry.effective_descriptor <> descriptor
-        || entry.runtime_capabilities <> descriptor.capabilities
-        || Agentic_backend.native_json_schema_output entry.backend
-           <> descriptor.capabilities.native_json_schema_output
-      then Error Runtime_capability_disagreement
-      else Ok ()
+      if E2e_harness_config.runtime_binding_matches_descriptor descriptor entry
+      then Ok ()
+      else Error Runtime_capability_disagreement
 
 let fixture_limits fixtures : Task_preflight.limits =
   {
@@ -237,28 +215,6 @@ let exact_fixture_coverage media_types fixtures =
   in
   List.sort_uniq compare covered = List.sort_uniq compare media_types
 
-let valid_attempts ~native ~attachments (execution : Backend_types.task_execution)
-    =
-  let count = List.length execution.attempts in
-  let expected_count = if native then 1 else count in
-  count > 0
-  && count <= 2
-  && count = expected_count
-  && List.for_all
-       (fun (attempt : Backend_types.task_attempt) ->
-         attempt.number >= 1
-         && attempt.delivery.attachment_references = attachments
-         && attempt.delivery.web_access_policy = Backend_types.Web_disabled
-         &&
-         match attempt.kind with
-         | Backend_types.Initial_attempt | Backend_types.Fresh_attempt ->
-             attempt.delivery.attachment_delivery
-             = Backend_types.Upload_attachments
-         | Backend_types.Resumed_attempt ->
-             attempt.delivery.attachment_delivery
-             = Backend_types.Reuse_session_attachments)
-       execution.attempts
-
 let validate_execution ~(descriptor : Backend_registry.descriptor) ~fixtures
     ~attachments execution events =
   let requirements =
@@ -270,19 +226,9 @@ let validate_execution ~(descriptor : Backend_registry.descriptor) ~fixtures
     Error Detailed_execution_invalid
   else if
     not
-      (valid_attempts
-         ~native:descriptor.capabilities.native_json_schema_output
-         ~attachments execution)
-  then Error Detailed_execution_invalid
-  else if
-    descriptor.capabilities.native_json_schema_output
-    &&
-    match execution.attempts with
-    | [attempt] ->
-        attempt.kind <> Backend_types.Initial_attempt
-        || attempt.schema_validation_error <> None
-        || attempt.result <> result
-    | _ -> true
+       (Media_web_schema_e2e_support.valid_attempts
+          ~native:descriptor.capabilities.native_json_schema_output
+          ~attachments execution)
   then Error Detailed_execution_invalid
   else if requirements.session && execution.final_session_id = None then
     Error Detailed_execution_invalid
@@ -307,6 +253,13 @@ let invoke_media_schema ~sw ~env (descriptor : Backend_registry.descriptor) mode
   let fixtures = Media_web_schema_fixture.for_media_types media_types in
   if not (exact_fixture_coverage media_types fixtures) then
     Error Fixture_coverage_missing
+  else if
+    List.exists
+      (fun fixture ->
+        Result.is_error
+          (Media_web_schema_fixture.validate_fixture_semantics fixture))
+      fixtures
+  then Error Fixture_semantics_invalid
   else
     let attachments =
       try Media_web_schema_fixture.materialize ~working_dir fixtures
@@ -373,7 +326,7 @@ let test_media_schema_backends () =
           in
           if selected = [] then
             Printf.eprintf
-              "[e2e-cbl08] SKIP media/schema: no capability-positive backend selected\n%!"
+              "[e2e-cbl08] SKIP media/schema: no eligible native-schema media backend\n%!"
           else
             Eio_posix.run @@ fun env ->
             Eio.Switch.run @@ fun sw ->
@@ -386,11 +339,19 @@ let test_media_schema_backends () =
                       descriptor.id
                       (render_failure failure)
                 | Ok () ->
-                    if not (executable_on_path descriptor.binary_name) then
-                      Printf.eprintf
-                        "[e2e-cbl08] SKIP %s: CLI binary is absent from PATH\n%!"
-                        descriptor.id
-                    else
+                    match
+                      E2e_harness_config.lookup_executable descriptor.binary_name
+                    with
+                    | E2e_harness_config.Executable_absent ->
+                        Printf.eprintf
+                          "[e2e-cbl08] SKIP %s: CLI binary is absent from PATH\n%!"
+                          descriptor.id
+                    | E2e_harness_config.Executable_lookup_failed ->
+                        Alcotest.failf
+                          "[e2e-cbl08] FAIL %s: %s"
+                          descriptor.id
+                          (render_failure Binary_lookup_failed)
+                    | E2e_harness_config.Executable_present ->
                       match
                         try run_media_backend ~sw ~env descriptor
                         with
@@ -437,7 +398,7 @@ let () =
     [
       ( "P0 media/schema",
         [
-          Alcotest.test_case "capability-positive backends" `Slow
+          Alcotest.test_case "native-evidence media backends" `Slow
             test_media_schema_backends;
         ] );
       ( "P1 web selection",

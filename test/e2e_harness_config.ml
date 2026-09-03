@@ -72,8 +72,17 @@ let selected_backend_ids ?(getenv = Sys.getenv_opt) ~all_backend_ids () =
 let positive_media_descriptor (d : Cabal.Backend_registry.descriptor) =
   d.capabilities.media_support.media_types <> []
 
-let schema_compatible_descriptor (d : Cabal.Backend_registry.descriptor) =
-  d.capabilities.structured_output
+let native_schema_draft = "2020-12"
+
+let valid_native_schema_descriptor (d : Cabal.Backend_registry.descriptor) =
+  d.capabilities.native_json_schema_output
+  &&
+  match d.capabilities.native_json_schema_output_evidence with
+  | Some evidence
+    when String.equal evidence.Cabal.Backend_types.json_schema_draft
+           native_schema_draft ->
+      Result.is_ok (Cabal.Task_preflight.validate_descriptor d)
+  | Some _ | None -> false
 
 let positive_web_descriptor (d : Cabal.Backend_registry.descriptor) =
   d.capabilities.web_support.maximum <> Cabal.Backend_types.Web_disabled
@@ -82,7 +91,7 @@ let media_schema_descriptors ~descriptors () =
   List.filter
     (fun descriptor ->
       positive_media_descriptor descriptor
-      && schema_compatible_descriptor descriptor)
+      && valid_native_schema_descriptor descriptor)
     descriptors
 
 let web_descriptors ~descriptors () =
@@ -107,3 +116,90 @@ let selected_media_schema_descriptors ?(getenv = Sys.getenv_opt) ~descriptors ()
 
 let selected_web_descriptors ?(getenv = Sys.getenv_opt) ~descriptors () =
   web_descriptors ~descriptors () |> select_descriptors ~getenv
+
+let runtime_binding_matches_descriptor
+    (descriptor : Cabal.Backend_registry.descriptor)
+    (entry : Cabal.Runtime_entry.t) =
+  entry.effective_descriptor = descriptor
+  && entry.runtime_capabilities = descriptor.capabilities
+  && Cabal.Agentic_backend.native_json_schema_output entry.backend
+     = descriptor.capabilities.native_json_schema_output
+
+type executable_lookup =
+  | Executable_present
+  | Executable_absent
+  | Executable_lookup_failed
+
+let lookup_error_is_absent = function
+  | Unix.ENOENT | Unix.ENOTDIR -> true
+  | _ -> false
+
+type candidate_lookup = Candidate_present | Candidate_absent | Candidate_failed
+
+let inspect_executable_candidate candidate =
+  match
+    try `Found (Unix.lstat candidate)
+    with
+    | Unix.Unix_error (error, _, _) -> `Lookup_error error
+  with
+  | `Lookup_error error ->
+      if lookup_error_is_absent error then Candidate_absent else Candidate_failed
+  | `Found _ -> (
+      match
+        try `Found (Unix.stat candidate)
+        with
+        | Unix.Unix_error (error, _, _) -> `Lookup_error error
+      with
+      | `Lookup_error _ -> Candidate_failed
+      | `Found stats when stats.Unix.st_kind <> Unix.S_REG -> Candidate_failed
+      | `Found _ -> (
+          try
+            Unix.access candidate [Unix.X_OK] ;
+            Candidate_present
+          with Unix.Unix_error _ -> Candidate_failed))
+
+let lookup_executable ?(getenv = Sys.getenv_opt) binary_name =
+  let candidates =
+    if binary_name = "" then Error ()
+    else if Filename.is_relative binary_name && not (String.contains binary_name '/')
+    then
+      match getenv "PATH" with
+      | None -> Error ()
+      | Some path ->
+          Ok
+            (String.split_on_char ':' path
+            |> List.map (fun directory ->
+                   Filename.concat
+                     (if directory = "" then "." else directory)
+                     binary_name))
+    else Ok [binary_name]
+  in
+  match candidates with
+  | Error () -> Executable_lookup_failed
+  | Ok candidates ->
+      let rec inspect = function
+        | [] -> Executable_absent
+        | candidate :: rest -> (
+            match inspect_executable_candidate candidate with
+            | Candidate_present -> Executable_present
+            | Candidate_absent -> inspect rest
+            | Candidate_failed -> Executable_lookup_failed)
+      in
+      inspect candidates
+
+type version_probe_result =
+  | Version_supported of Cabal.Backend_version.semver
+  | Version_probe_failed
+  | Version_output_malformed
+  | Version_gate_rejected
+
+let probe_version ~capture (descriptor : Cabal.Backend_registry.descriptor) =
+  match capture [descriptor.binary_name; "--version"] with
+  | Error _ -> Version_probe_failed
+  | Ok output -> (
+      match Cabal.Backend_version.parse_from_output output with
+      | Error _ -> Version_output_malformed
+      | Ok installed -> (
+          match Cabal.Backend_version.check_gate ~descriptor ~installed with
+          | Ok () -> Version_supported installed
+          | Error _ -> Version_gate_rejected))

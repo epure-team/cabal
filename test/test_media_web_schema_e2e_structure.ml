@@ -39,6 +39,11 @@ let read_test_file name =
   if Sys.file_exists name then read_file name
   else read_file (Filename.concat "test" name)
 
+let replace_byte bytes offset value =
+  let copy = Bytes.of_string bytes in
+  Bytes.set copy offset value ;
+  Bytes.unsafe_to_string copy
+
 let test_capability_driven_selection () =
   let descriptors = Backend_registry.all () in
   let media =
@@ -67,24 +72,96 @@ let test_capability_driven_selection () =
     "Codex P0 uses native schema"
     true
     codex.capabilities.native_json_schema_output ;
-  let media_without_schema =
+  let structured_without_native_schema =
     {
       codex with
-      id = "media-without-schema";
+      id = "structured-without-native-schema";
       capabilities =
         {
           codex.capabilities with
-          structured_output = false;
+          structured_output = true;
           native_json_schema_output = false;
           native_json_schema_output_evidence = None;
         };
     }
   in
   Alcotest.(check (list string))
-    "media-only descriptors are not schema-compatible"
+    "generic structured output is not native schema support"
     []
     (E2e_harness_config.media_schema_descriptors
-       ~descriptors:[media_without_schema]
+       ~descriptors:[structured_without_native_schema]
+       ()
+    |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
+  let native_without_generic_structured =
+    {
+      codex with
+      id = "native-without-generic-structured";
+      capabilities = {codex.capabilities with structured_output = false};
+    }
+  in
+  Alcotest.(check (list string))
+    "native schema eligibility does not use generic structured output"
+    ["native-without-generic-structured"]
+    (E2e_harness_config.media_schema_descriptors
+       ~descriptors:[native_without_generic_structured]
+       ()
+    |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
+  let native_without_evidence =
+    {
+      codex with
+      id = "native-without-evidence";
+      capabilities =
+        {codex.capabilities with native_json_schema_output_evidence = None};
+    }
+  in
+  Alcotest.(check (list string))
+    "native schema without evidence is excluded"
+    []
+    (E2e_harness_config.media_schema_descriptors
+       ~descriptors:[native_without_evidence]
+       ()
+    |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
+  let evidence =
+    match codex.capabilities.native_json_schema_output_evidence with
+    | Some evidence -> evidence
+    | None -> Alcotest.fail "Codex native schema evidence is missing"
+  in
+  let incompatible_draft =
+    {
+      codex with
+      id = "native-with-incompatible-draft";
+      capabilities =
+        {
+          codex.capabilities with
+          native_json_schema_output_evidence =
+            Some {evidence with json_schema_draft = "7"};
+        };
+    }
+  in
+  Alcotest.(check (list string))
+    "native schema evidence must match the fixture draft"
+    []
+    (E2e_harness_config.media_schema_descriptors
+       ~descriptors:[incompatible_draft]
+       ()
+    |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
+  let malformed_evidence =
+    {
+      codex with
+      id = "native-with-malformed-evidence";
+      capabilities =
+        {
+          codex.capabilities with
+          native_json_schema_output_evidence =
+            Some {evidence with tested_at_version = "not-a-version"};
+        };
+    }
+  in
+  Alcotest.(check (list string))
+    "malformed native evidence is excluded"
+    []
+    (E2e_harness_config.media_schema_descriptors
+       ~descriptors:[malformed_evidence]
        ()
     |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
   let installed_floor =
@@ -132,6 +209,140 @@ let test_filter_and_model_env_are_credential_free () =
         (name = "CABAL_E2E_BACKEND" || name = "CABAL_E2E_MODEL_CODEX"))
     !reads
 
+let test_runtime_binding_mismatch_fails_closed () =
+  Registry.clear () ;
+  Fun.protect
+    ~finally:Registry.clear
+    (fun () ->
+      match
+        Runtime_bootstrap.register_runtime
+          ~profile:Runtime_bootstrap.Hardened_builtins
+          ()
+      with
+      | Error _ -> Alcotest.fail "credential-free hardened bootstrap failed"
+      | Ok () -> (
+          match (Backend_registry.find "codex", Registry.find_entry "codex") with
+          | Some descriptor, Some (Registry.Validated entry) ->
+              Alcotest.(check bool)
+                "matching descriptor/runtime binding"
+                true
+                (E2e_harness_config.runtime_binding_matches_descriptor descriptor
+                   entry) ;
+              let mismatched =
+                {
+                  descriptor with
+                  capabilities =
+                    {
+                      descriptor.capabilities with
+                      native_json_schema_output = false;
+                      native_json_schema_output_evidence = None;
+                    };
+                }
+              in
+              Alcotest.(check bool)
+                "native descriptor/runtime mismatch fails closed"
+                false
+                (E2e_harness_config.runtime_binding_matches_descriptor mismatched
+                   entry)
+          | _ -> Alcotest.fail "hardened Codex runtime binding is unavailable"))
+
+let test_binary_lookup_and_version_probe_tri_state () =
+  let directory = Filename.temp_dir "cabal-cbl08-lookup-" "" in
+  Fun.protect
+    ~finally:(fun () ->
+      Sys.readdir directory
+      |> Array.iter (fun name -> Unix.unlink (Filename.concat directory name)) ;
+      Unix.rmdir directory)
+    (fun () ->
+      let write name mode =
+        let path = Filename.concat directory name in
+        let channel = open_out_bin path in
+        Fun.protect
+          ~finally:(fun () -> close_out_noerr channel)
+          (fun () -> output_string channel "#!/bin/sh\nexit 0\n") ;
+        Unix.chmod path mode ;
+        path
+      in
+      ignore (write "present" 0o700) ;
+      ignore (write "not-executable" 0o600) ;
+      let path_component_file = write "path-component-file" 0o600 in
+      Unix.symlink "missing-target" (Filename.concat directory "dangling") ;
+      Unix.symlink "loop" (Filename.concat directory "loop") ;
+      let getenv = function "PATH" -> Some directory | _ -> None in
+      let check_lookup label expected binary =
+        Alcotest.(check bool)
+          label true
+          (E2e_harness_config.lookup_executable ~getenv binary = expected)
+      in
+      check_lookup "executable file is present"
+        E2e_harness_config.Executable_present "present" ;
+      check_lookup "ENOENT is genuinely absent"
+        E2e_harness_config.Executable_absent "absent" ;
+      Alcotest.(check bool)
+        "ENOTDIR path component is genuinely absent"
+        true
+        (E2e_harness_config.lookup_executable
+           ~getenv:(function
+             | "PATH" -> Some path_component_file
+             | _ -> None)
+           "child"
+        = E2e_harness_config.Executable_absent) ;
+      check_lookup "non-executable file is a lookup failure"
+        E2e_harness_config.Executable_lookup_failed "not-executable" ;
+      check_lookup "dangling symlink is a lookup failure"
+        E2e_harness_config.Executable_lookup_failed "dangling" ;
+      check_lookup "symlink loop is a lookup failure"
+        E2e_harness_config.Executable_lookup_failed "loop" ;
+      Alcotest.(check bool)
+        "missing PATH is a lookup failure"
+        true
+        (E2e_harness_config.lookup_executable ~getenv:(fun _ -> None) "present"
+        = E2e_harness_config.Executable_lookup_failed) ;
+      Alcotest.(check bool)
+        "ENOENT is skippable" true
+        (E2e_harness_config.lookup_error_is_absent Unix.ENOENT) ;
+      Alcotest.(check bool)
+        "ENOTDIR is skippable" true
+        (E2e_harness_config.lookup_error_is_absent Unix.ENOTDIR) ;
+      Alcotest.(check bool)
+        "permission denial is not skippable" false
+        (E2e_harness_config.lookup_error_is_absent Unix.EACCES) ;
+      Alcotest.(check bool)
+        "lookup loop is not skippable" false
+        (E2e_harness_config.lookup_error_is_absent Unix.ELOOP) ;
+      let descriptor =
+        match Backend_registry.find "codex" with
+        | Some descriptor -> {descriptor with binary_name = "present"}
+        | None -> Alcotest.fail "Codex descriptor is unavailable"
+      in
+      let expect_probe_failure label expected capture =
+        Alcotest.(check bool)
+          label true
+          (E2e_harness_config.probe_version ~capture descriptor = expected)
+      in
+      let capture result command =
+        Alcotest.(check (list string))
+          "version probe uses the present descriptor binary"
+          ["present"; "--version"] command ;
+        result
+      in
+      expect_probe_failure "present binary with failed version process"
+        E2e_harness_config.Version_probe_failed
+        (capture (Error "sanitized")) ;
+      expect_probe_failure "present binary with malformed version output"
+        E2e_harness_config.Version_output_malformed
+        (capture (Ok "not-a-version")) ;
+      expect_probe_failure "present binary below baseline"
+        E2e_harness_config.Version_gate_rejected
+        (capture (Ok "codex-cli 0.1.0")) ;
+      match
+        E2e_harness_config.probe_version
+          ~capture:(capture (Ok "codex-cli 0.131.0"))
+          descriptor
+      with
+      | E2e_harness_config.Version_supported _ -> ()
+      | _ -> Alcotest.fail "baseline version probe was rejected")
+
 let test_fixture_schema_and_semantic_marker () =
   let fixtures = Media_web_schema_fixture.all in
   Alcotest.(check int) "one PNG and one JPEG fixture" 2 (List.length fixtures) ;
@@ -176,8 +387,68 @@ let test_fixture_schema_and_semantic_marker () =
     "JPEG end marker"
     "\xff\xd9"
     (String.sub jpeg.bytes (String.length jpeg.bytes - 2) 2) ;
-  Alcotest.(check string) "PNG content marker" "blue" png.expected_value ;
-  Alcotest.(check string) "JPEG content marker" "red" jpeg.expected_value ;
+  let check_inspected label expected_color
+      (fixture : Media_web_schema_fixture.t) =
+    match
+      Media_web_schema_fixture.inspect_image fixture.attachment.media_type
+        fixture.bytes
+    with
+    | Error _ -> Alcotest.fail (label ^ " fixture inspection failed")
+    | Ok semantics ->
+        Alcotest.(check int) (label ^ " width") 64 semantics.width ;
+        Alcotest.(check int) (label ^ " height") 64 semantics.height ;
+        Alcotest.(check string)
+          (label ^ " independently inspected color")
+          expected_color semantics.dominant_color
+  in
+  check_inspected "PNG" "blue" png ;
+  check_inspected "JPEG" "red" jpeg ;
+  Alcotest.(check string)
+    "JPEG bytes match the fixed golden digest"
+    "86bf3e5ac9402d1e210db8199d7fb4ea42e567cdf8097e2d18d527d0d77ae1e4"
+    jpeg.attachment.sha256 ;
+  Alcotest.(check int)
+    "JPEG bytes match the fixed golden size"
+    336 jpeg.attachment.size_bytes ;
+  List.iter
+    (fun fixture ->
+      match Media_web_schema_fixture.validate_fixture_semantics fixture with
+      | Ok () -> ()
+      | Error _ -> Alcotest.fail "fixture semantic provenance was rejected")
+    fixtures ;
+  let corrupted_png =
+    replace_byte png.bytes (String.length png.bytes - 16) '\x01'
+  in
+  (match Media_web_schema_fixture.inspect_image Png corrupted_png with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "corrupted PNG passed independent inspection") ;
+  let corrupted_jpeg = replace_byte jpeg.bytes 24 '\x01' in
+  (match Media_web_schema_fixture.inspect_image Jpeg corrupted_jpeg with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "corrupted JPEG passed golden provenance") ;
+  let red_png_bytes = Media_web_schema_fixture.solid_png 225 20 20 in
+  let red_png_attachment =
+    {
+      png.attachment with
+      sha256 = Digestif.SHA256.(to_hex (digest_string red_png_bytes));
+      size_bytes = String.length red_png_bytes;
+    }
+  in
+  let wrong_png =
+    {png with attachment = red_png_attachment; bytes = red_png_bytes}
+  in
+  (match Media_web_schema_fixture.validate_fixture_semantics wrong_png with
+  | Error _ -> ()
+  | Ok () -> Alcotest.fail "wrong-color PNG matched blue fixture provenance") ;
+  let wrong_jpeg =
+    {
+      jpeg with
+      semantics = {jpeg.semantics with dominant_color = "blue"};
+    }
+  in
+  (match Media_web_schema_fixture.validate_fixture_semantics wrong_jpeg with
+  | Error _ -> ()
+  | Ok () -> Alcotest.fail "arbitrary JPEG color assignment was accepted") ;
   let expected = Media_web_schema_fixture.expected_document_text fixtures in
   (match
      Json_schema_validator.validate
@@ -245,6 +516,141 @@ let result_cost : Backend_types.cost =
 
 let event seq attempt payload : Task_event.t =
   {seq; attempt; timestamp = Float.of_int seq; payload}
+
+let expect_invalid_tool_lifecycle label events =
+  match Media_web_schema_e2e_support.validate_tool_lifecycle events with
+  | Error Media_web_schema_e2e_support.Tool_lifecycle_disagreement -> ()
+  | Error _ -> Alcotest.fail (label ^ " produced the wrong trace error")
+  | Ok _ -> Alcotest.fail (label ^ " tool lifecycle was accepted")
+
+let test_tool_lifecycle_identity_pairing () =
+  let started ?id seq attempt name =
+    event seq attempt (Task_event.Tool_started {id; name})
+  in
+  let finished ?id ?name seq attempt =
+    event seq attempt (Task_event.Tool_finished {id; name})
+  in
+  let valid =
+    [
+      started ~id:"stable-a" 1 1 "read";
+      finished ~id:"stable-a" ~name:"renamed-but-id-is-stable" 2 1;
+      started 3 1 "fallback-name";
+      finished ~name:"fallback-name" 4 1;
+    ]
+  in
+  (match Media_web_schema_e2e_support.validate_tool_lifecycle valid with
+  | Ok 2 -> ()
+  | Ok _ -> Alcotest.fail "valid tool lifecycle returned the wrong start count"
+  | Error _ -> Alcotest.fail "valid stable-id/name fallback pairing was rejected") ;
+  expect_invalid_tool_lifecycle "mismatched stable id"
+    [
+      started ~id:"stable-a" 1 1 "read";
+      finished ~id:"stable-b" ~name:"read" 2 1;
+    ] ;
+  expect_invalid_tool_lifecycle "mismatched fallback name"
+    [started 1 1 "read"; finished ~name:"write" 2 1] ;
+  expect_invalid_tool_lifecycle "finish before start"
+    [finished ~id:"stable-a" ~name:"read" 1 1] ;
+  expect_invalid_tool_lifecycle "cross-attempt finish"
+    [
+      started ~id:"stable-a" 1 1 "read";
+      finished ~id:"stable-a" ~name:"read" 2 2;
+    ] ;
+  expect_invalid_tool_lifecycle "duplicate active start"
+    [started ~id:"stable-a" 1 1 "read"; started ~id:"stable-a" 2 1 "read"] ;
+  expect_invalid_tool_lifecycle "dangling active tool at terminal"
+    [started ~id:"stable-a" 1 1 "read"; event 2 1 (Terminal Succeeded)]
+
+let test_attempt_numbering_and_native_contract () =
+  let attachments =
+    List.map
+      (fun fixture -> fixture.Media_web_schema_fixture.attachment)
+      Media_web_schema_fixture.all
+  in
+  let success =
+    Backend_types.make_task_result ~status:Success ~agent_text:"{}" ()
+  in
+  let failed =
+    Backend_types.make_task_result ~status:(Failed "sanitized") ~agent_text:"" ()
+  in
+  let delivery attachment_delivery attachment_references =
+    Backend_types.
+      {
+        attachment_references;
+        attachment_delivery;
+        web_access_policy = Web_disabled;
+      }
+  in
+  let make_attempt ?(schema_validation_error = None) number kind result delivery =
+    Backend_types.
+      {
+        number;
+        kind;
+        result;
+        attempt_elapsed = 1.0;
+        schema_validation_error;
+        delivery;
+      }
+  in
+  let upload = delivery Upload_attachments attachments in
+  let reuse = delivery Reuse_session_attachments attachments in
+  let execution final_result attempts =
+    Backend_types.make_task_execution ~final_result ~attempts
+      ~cleanup_status:Cleanup_succeeded ()
+  in
+  let native_attempt = make_attempt 1 Initial_attempt success upload in
+  let valid_native = execution success [native_attempt] in
+  Alcotest.(check bool)
+    "exact native initial attempt"
+    true
+    (Media_web_schema_e2e_support.valid_attempts ~native:true ~attachments
+       valid_native) ;
+  let reject_native label attempt final_result =
+    Alcotest.(check bool)
+      label false
+      (Media_web_schema_e2e_support.valid_attempts ~native:true ~attachments
+         (execution final_result [attempt]))
+  in
+  reject_native "native attempt number starts at one"
+    {native_attempt with number = 2}
+    success ;
+  reject_native "native attempt is initial"
+    {native_attempt with kind = Fresh_attempt}
+    success ;
+  reject_native "native attempt uploads attachments"
+    {native_attempt with delivery = reuse}
+    success ;
+  reject_native "native attachment references match"
+    {
+      native_attempt with
+      delivery = delivery Upload_attachments [];
+    }
+    success ;
+  reject_native "native attempt has no local schema rejection"
+    {native_attempt with schema_validation_error = Some "sanitized"}
+    success ;
+  reject_native "native attempt result is final result" native_attempt
+    {success with agent_text = "different"} ;
+  reject_native "native attempt status succeeded"
+    {native_attempt with result = failed}
+    failed ;
+  let first = make_attempt 1 Initial_attempt failed upload in
+  let second = make_attempt 2 Fresh_attempt success upload in
+  Alcotest.(check bool)
+    "generic retry attempts are contiguous from one"
+    true
+    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments
+       (execution success [first; second])) ;
+  Alcotest.(check bool)
+    "generic retry attempt gap is rejected"
+    false
+    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments
+       (execution success [first; {second with number = 3}])) ;
+  Alcotest.(check bool)
+    "generic retry attempt reordering is rejected"
+    false
+    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments
+       (execution success [{first with number = 2}; {second with number = 1}]))
 
 let test_event_trace_contract () =
   let text = {|{"png_dominant_color":"blue","jpeg_dominant_color":"red"}|} in
@@ -399,6 +805,10 @@ let () =
             test_capability_driven_selection;
           Alcotest.test_case "filter/model env are credential-free" `Quick
             test_filter_and_model_env_are_credential_free;
+          Alcotest.test_case "runtime mismatch fails closed" `Quick
+            test_runtime_binding_mismatch_fails_closed;
+          Alcotest.test_case "binary lookup and version tri-state" `Quick
+            test_binary_lookup_and_version_probe_tri_state;
         ] );
       ( "fixtures and schema",
         [
@@ -411,6 +821,10 @@ let () =
         [
           Alcotest.test_case "terminal and attempts are consistent" `Quick
             test_event_trace_contract;
+          Alcotest.test_case "tool identity lifecycle is paired" `Quick
+            test_tool_lifecycle_identity_pairing;
+          Alcotest.test_case "attempt numbering and native contract" `Quick
+            test_attempt_numbering_and_native_contract;
         ] );
       ( "gating",
         [
