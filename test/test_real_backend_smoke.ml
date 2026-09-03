@@ -491,7 +491,7 @@ let test_copilot_command_preview_omits_model_when_none () =
   in
   Alcotest.(check bool) "omits --model" false (List.mem "--model" argv)
 
-let test_gemini_command_preview_includes_model_and_skip_trust () =
+let test_gemini_command_preview_includes_model_and_omits_skip_trust () =
   let argv =
     command_argv_or_fail
       (backend_case Gemini_cli.id)
@@ -500,8 +500,8 @@ let test_gemini_command_preview_includes_model_and_skip_trust () =
          ~model:(Some "gemini-3-flash-preview"))
   in
   Alcotest.(check bool)
-    "includes --skip-trust"
-    true
+    "omits unsupported --skip-trust"
+    false
     (List.mem "--skip-trust" argv) ;
   Alcotest.(check bool)
     "includes -m model"
@@ -513,9 +513,9 @@ let command_preview_tests =
     ( "Copilot default preview omits model flag",
       `Quick,
       test_copilot_command_preview_omits_model_when_none );
-    ( "Gemini preview includes smoke model and skip-trust",
+    ( "Gemini preview includes smoke model and omits skip-trust",
       `Quick,
-      test_gemini_command_preview_includes_model_and_skip_trust );
+      test_gemini_command_preview_includes_model_and_omits_skip_trust );
   ]
 
 let availability_with_timeout ~sw ~env case =
