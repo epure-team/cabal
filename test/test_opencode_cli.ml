@@ -438,6 +438,27 @@ let test_strict_stream_rejects_adversarial_user_text () =
   Alcotest.(check string) "user message is not assistant output" "" text ;
   Alcotest.(check bool) "invalid stream usage rejected" true (Option.is_none cost)
 
+let test_strict_stream_accepts_sequential_assistant_messages () =
+  let input =
+    String.concat "\n"
+      [
+        step_start ();
+        step_finish ~timestamp:(`Int 2) ();
+        step_start ~timestamp:(`Int 3) ~message_id:user_message_id ();
+        completed_text ~timestamp:(`Int 4) ~message_id:user_message_id
+          "assistant after tool turn";
+        step_finish ~timestamp:(`Int 5) ~message_id:user_message_id ();
+      ]
+  in
+  let text, cost = Opencode_cli.parse_json_events input in
+  Alcotest.(check string)
+    "later assistant text retained" "assistant after tool turn" text ;
+  Alcotest.(check bool) "both assistant usages retained" true (Option.is_some cost) ;
+  Alcotest.(check (option string))
+    "session remains stable"
+    (Some valid_session_id)
+    (Opencode_cli.parse_public_session_id input)
+
 let test_legacy_minimal_normalizer_is_not_runtime_public_text () =
   let line = {|{"type":"text","part":{"text":"legacy fixture"}}|} in
   Alcotest.(check bool)
@@ -553,6 +574,9 @@ let json_events_tests =
     ( "reject completed user text",
       `Quick,
       test_strict_stream_rejects_adversarial_user_text );
+    ( "accept sequential assistant messages",
+      `Quick,
+      test_strict_stream_accepts_sequential_assistant_messages );
     ( "isolate legacy minimal normalized text",
       `Quick,
       test_legacy_minimal_normalizer_is_not_runtime_public_text );
@@ -617,7 +641,7 @@ let web_permission_json = function
 let web_config_json policy =
   let permissions = web_permission_json policy in
   Printf.sprintf
-    {|{"share":"disabled","permission":%s,"agent":{"build":{"permission":%s}}}|}
+    {|{"share":"disabled","permission":%s,"agent":{"build":{"mode":"primary","permission":%s}}}|}
     permissions permissions
 
 let expected_root ?model ?(web_access = Backend_types.Web_disabled)
@@ -625,6 +649,8 @@ let expected_root ?model ?(web_access = Backend_types.Web_disabled)
   let project_config = if redacted then "<project-config>" else "/tmp/opencode.json" in
   [
     "env";
+    "-u";
+    "OPENCODE_DB";
     "OPENCODE_PERMISSION=" ^ web_permission_json web_access;
     "OPENCODE_CONFIG_CONTENT=" ^ web_config_json web_access;
     "OPENCODE_CONFIG=" ^ project_config;
@@ -1023,9 +1049,22 @@ let test_run_isolates_mutable_config_and_neutralizes_inherited_flags () =
         (Printf.sprintf
            {|#!/bin/sh
 MODE=$(stat -c '%%a' "$XDG_CONFIG_HOME" 2>/dev/null || printf missing)
+AGENT=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--agent' ]; then
+    shift
+    AGENT="$1"
+  fi
+  shift
+done
 {
   printf '%%s\n' "$XDG_CONFIG_HOME"
   printf '%%s\n' "$OPENCODE_TEST_HOME"
+  printf '%%s\n' "$OPENCODE_DB"
+  printf '%%s\n' "$OPENCODE_TEST_MANAGED_CONFIG_DIR"
+  printf '%%s\n' "$XDG_DATA_HOME"
+  printf '%%s\n' "$AGENT"
+  printf '%%s\n' "$OPENCODE_CONFIG_CONTENT"
   printf '%%s\n' "$MODE"
   printf '%%s\n' "$OPENCODE_EXPERIMENTAL"
   printf '%%s\n' "$OPENCODE_EXPERIMENTAL_EXA"
@@ -1051,7 +1090,10 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
           ("OPENCODE_DISABLE_PROJECT_CONFIG", "0");
           ("OPENCODE_CONFIG", "/private/attacker-config.json");
           ("OPENCODE_CONFIG_DIR", "/private/attacker-config-dir");
+          ("OPENCODE_DB", "/private/attacker-state.db");
+          ("OPENCODE_TEST_MANAGED_CONFIG_DIR", "/private/attacker-managed");
           ("XDG_CONFIG_HOME", "/private/attacker-xdg");
+          ("XDG_DATA_HOME", "/private/auth-data");
           ("OPENCODE_TEST_HOME", "/private/attacker-home");
         ]
         (fun () ->
@@ -1072,6 +1114,11 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
       match captured with
       | isolation_home
         :: test_home
+        :: isolated_db
+        :: managed_config_dir
+        :: data_home
+        :: runtime_agent
+        :: runtime_config
         :: mode
         :: experimental
         :: experimental_exa
@@ -1086,6 +1133,22 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
                isolation_home) ;
           Alcotest.(check string)
             "home config discovery uses same isolation" isolation_home test_home ;
+          Alcotest.(check string)
+            "inherited database override is removed" "" isolated_db ;
+          Alcotest.(check string)
+            "system managed config discovery is isolated"
+            (Filename.concat isolation_home "managed")
+            managed_config_dir ;
+          Alcotest.(check string)
+            "provider auth data remains available" "/private/auth-data" data_home ;
+          Alcotest.(check bool)
+            "runtime uses a private primary agent" true
+            (runtime_agent <> "build"
+            && String.starts_with ~prefix:"cabal-" runtime_agent) ;
+          Alcotest.(check bool)
+            "fixed policy names only the private runtime agent" true
+            (contains_str runtime_config (Printf.sprintf "\"%s\"" runtime_agent)
+            && not (contains_str runtime_config {|"build"|})) ;
           Alcotest.(check string) "private isolation mode" "700" mode ;
           Alcotest.(check (list string))
             "experimental network flags neutralized"

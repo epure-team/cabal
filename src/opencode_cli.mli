@@ -15,8 +15,11 @@
     OpenCode is expected to be installed and accessible in the PATH.
     The backend uses [opencode run --pure --format json] for non-interactive
     execution. It pins task-local web permissions through fixed environment
-    values passed as direct argv to [env]; caller-provided config fragments are
-    never interpolated.
+    values passed as direct argv to [env], isolates mutable config and
+    managed-policy discovery in a private temporary directory, selects an
+    invocation-specific primary agent, and preserves the default OpenCode data
+    and account database for provider authentication. Caller-provided config
+    fragments are never interpolated.
 
     {b Media and web transport:}
     PNG/JPEG upload uses repeated [--file] arguments containing only centrally
@@ -40,10 +43,12 @@
 (** @inline *)
 include Agentic_backend.S
 
-(** Extract canonical sessions, completed public assistant text, sanitized
-    completed tool lifecycle, and bounded usage from one OpenCode JSON event.
-    Raw event content, reasoning, user text, errors, and tool payloads are
-    otherwise omitted. The exact legacy synthetic shape
+(** Extract canonical identifiers, completed public text, sanitized completed
+    tool lifecycle, and bounded usage from one structurally valid OpenCode JSON
+    event. Runtime parsing additionally requires a preceding [step_start] and
+    retains only records with its assistant message ID. Raw event content,
+    reasoning, user text, errors, and tool payloads are otherwise omitted. The
+    exact legacy synthetic shape
     [{"type":"text","part":{"text":...}}] remains supported by this utility
     for source compatibility, but is excluded from runtime result/event parsing. *)
 val normalized_events_of_line : string -> Task_event.payload list
@@ -147,6 +152,7 @@ val build_invocation :
     is set. Web access is represented by fixed [env] assignments, [--pure], and
     [--agent build]. The command is otherwise identical for
     [read_only = true] and [read_only = false] (no native restriction model).
+    [codesearch] is always denied, including when web search/fetch is enabled.
 
     {violators}
     (none)
