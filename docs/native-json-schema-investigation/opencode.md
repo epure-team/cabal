@@ -249,12 +249,16 @@ than inferring the role from attacker-controlled text metadata.
 - Any attachment or enabled web request without matching central authorization
   fails before project config I/O and before process spawn.
 - `Web_disabled`, `Web_search`, and `Web_search_and_fetch` map to fixed
-  `websearch`/`webfetch` allow-or-deny documents, with `codesearch` always
-  denied, supplied through
+  `websearch`/`webfetch` allow-or-deny documents, with `codesearch` and `task`
+  delegation always denied, supplied through
   `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT`. The adapter invokes
   `env` directly (no shell), uses `--pure` with an invocation-specific primary
   agent, disables automatic sharing/update/LSP download, and never interpolates
   host config fragments.
+- This ceiling covers the native OpenCode tools only. It covers `websearch`,
+  `webfetch`, `codesearch`, and the `task` delegation path. This scope is not an OS shell network sandbox.
+  It does not claim to prevent a shell, plugin, MCP server, or other process from
+  making network requests.
 - Each process receives a private mode-`0700` config home and empty
   managed-config directory. Implicit home/global/project discovery is disabled;
   inherited config and experimental-network flags are replaced; only the exact
@@ -264,18 +268,29 @@ than inferring the role from attacker-controlled text metadata.
   work. The temporary directory is removed after the process.
 - The invocation replaces the public `build` agent with an invocation-specific
   primary agent whose fixed policy is supplied in `OPENCODE_CONFIG_CONTENT`.
-  Static project, account, or managed configuration therefore cannot append a
-  late allow rule to the selected agent. The final `OPENCODE_PERMISSION` merge
-  pins the same top-level rules after other config scopes.
+  Both that agent and the final top-level `OPENCODE_PERMISSION` deny `task`
+  delegation in every web mode. A hostile project, account, or file-based
+  managed config may define an `explore` subagent that allows `webfetch`, but the
+  selected agent cannot delegate to it. The final top-level permission merge
+  also pins the native-tool ceiling after other config scopes.
+- A relative `working_dir` is resolved lexically against Cabal's current
+  directory before process spawn, and the generated `OPENCODE_CONFIG` value is
+  absolute when the child changes to that working directory. This resolution
+  does not call `realpath`, stat, or open a working-directory component; invalid
+  path input produces a fixed redacted error.
 - At baseline, the explicit project file is loaded before
   `OPENCODE_CONFIG_CONTENT`, and `OPENCODE_PERMISSION` is applied after managed
-  config. The runtime additionally redirects `/etc/opencode`/MDM discovery with
-  `OPENCODE_TEST_MANAGED_CONFIG_DIR`; OS administrator policy is not assumed
-  trustworthy for this task's web boundary. Authenticated provider/account
-  credential sources are trusted as authentication inputs, but not as the
-  authority for the selected agent's web policy. See:
+  config. `OPENCODE_TEST_MANAGED_CONFIG_DIR` redirects only file-based managed
+  config discovery such as `/etc/opencode` on Linux and `/Library/Application
+  Support/opencode` on macOS. OpenCode separately reads macOS profiles from
+  `/Library/Managed Preferences`; that MDM channel is administrator-trusted and
+  outside Cabal's override boundary. Cabal does not claim full MDM isolation.
+  Authenticated provider/account credential sources are trusted as
+  authentication inputs, but not as the authority for the selected agent's
+  native-tool policy. See:
   https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/config/config.ts#L505-L584 and
-  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/config/config.ts#L626-L669
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/config/config.ts#L626-L669 and
+  https://github.com/sst/opencode/blob/3175a3c61853e4666acb24fa435783826596665d/packages/opencode/src/config/managed.ts#L23-L67
 - JSONL normalization admits only canonical session IDs, completed assistant
   text, sanitized completed tool lifecycle, and bounded non-negative usage.
   Reasoning, user text, error payloads, tool inputs/results, malformed records,

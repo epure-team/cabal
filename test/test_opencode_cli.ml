@@ -1447,6 +1447,11 @@ let test_media_web_addendum_records_non_evidence_provenance () =
       "not capability evidence";
       "tested_at_version must be greater than or equal to baseline_version";
       "Web_disabled` with `evidence = None";
+      "native OpenCode tools only";
+      "not an OS shell network sandbox";
+      "`task` delegation";
+      "`/Library/Managed Preferences`";
+      "administrator-trusted";
     ] ;
   List.iter
     (fun rejected ->
