@@ -674,30 +674,27 @@ def run_modes(
 
 def public_jsonl_fixture() -> str:
     session = "ses_123456789abcABCDEFGHIJKLMN"
+    message = "msg_123456789abcABCDEFGHIJKLMN"
     events = [
         {
             "type": "step_start",
-            "sessionID": session,
-            "part": {"type": "step-start"},
-        },
-        {
-            "type": "reasoning",
+            "timestamp": 1,
             "sessionID": session,
             "part": {
-                "type": "reasoning",
-                "text": "private reasoning",
-                "time": {"end": 2},
+                "id": "prt_123456789abcABCDEFGHIJKLMN",
+                "sessionID": session,
+                "messageID": message,
+                "type": "step-start",
             },
         },
         {
-            "type": "text",
-            "sessionID": session,
-            "part": {"type": "text", "text": "private user text"},
-        },
-        {
             "type": "tool_use",
+            "timestamp": 2,
             "sessionID": session,
             "part": {
+                "id": "prt_23456789abcdABCDEFGHIJKLMN",
+                "sessionID": session,
+                "messageID": message,
                 "type": "tool",
                 "tool": "webfetch",
                 "callID": "call-private",
@@ -705,30 +702,38 @@ def public_jsonl_fixture() -> str:
                     "status": "completed",
                     "input": {"url": "https://private.invalid/"},
                     "output": "private tool result",
+                    "title": "private title",
+                    "metadata": {},
+                    "time": {"start": 2, "end": 3},
                 },
             },
         },
         {
-            "type": "error",
-            "sessionID": session,
-            "error": {"message": "private error"},
-        },
-        {
             "type": "text",
+            "timestamp": 3,
             "sessionID": session,
             "part": {
+                "id": "prt_56789abcdef0ABCDEFGHIJKLMN",
+                "sessionID": session,
+                "messageID": message,
                 "type": "text",
                 "text": '{"probe_status":"ready"}',
-                "time": {"end": 3},
+                "time": {"start": 3, "end": 4},
             },
         },
         {
             "type": "step_finish",
+            "timestamp": 4,
             "sessionID": session,
             "part": {
+                "id": "prt_6789abcdef01ABCDEFGHIJKLMN",
+                "sessionID": session,
+                "messageID": message,
                 "type": "step-finish",
+                "reason": "stop",
                 "cost": 0.01,
                 "tokens": {
+                    "total": 114,
                     "input": 12,
                     "output": 3,
                     "reasoning": 99,
@@ -741,6 +746,30 @@ def public_jsonl_fixture() -> str:
 
 
 def run_self_test() -> None:
+    if (
+        AUTH_TESTED_VERSION != "1.2.24"
+        or DESCRIPTOR_BASELINE_VERSION != "1.14.20"
+        or version_at_least(AUTH_TESTED_VERSION, DESCRIPTOR_BASELINE_VERSION)
+    ):
+        raise ProbeFailure("offline version provenance self-test failed")
+    denied = fixed_env("deny", "deny")
+    expected_denials = {"websearch": "deny", "webfetch": "deny", "codesearch": "deny"}
+    if (
+        json.loads(denied.get("OPENCODE_PERMISSION", "null")) != expected_denials
+        or denied.get("OPENCODE_EXPERIMENTAL") != "0"
+        or denied.get("OPENCODE_EXPERIMENTAL_EXA") != "0"
+        or denied.get("OPENCODE_ENABLE_EXA") != "0"
+        or denied.get("OPENCODE_DISABLE_PROJECT_CONFIG") != "1"
+        or denied.get("OPENCODE_CONFIG_DIR") != ""
+    ):
+        raise ProbeFailure("offline disabled environment self-test failed")
+    if {name for name, _prompt in disabled_network_tool_prompts("http://127.0.0.1/")} != {
+        "websearch",
+        "webfetch",
+        "codesearch",
+    }:
+        raise ProbeFailure("offline network-tool marker self-test failed")
+
     with tempfile.TemporaryDirectory(prefix="cabal-opencode-probe-self-test-") as root:
         directory = Path(root)
         blue, red, green = write_fixtures(directory)
@@ -776,11 +805,8 @@ def run_self_test() -> None:
     ):
         raise ProbeFailure("offline public parser self-test failed")
     private_markers = (
-        "private reasoning",
-        "private user text",
         "private.invalid",
         "private tool result",
-        "private error",
     )
     public_projection = parsed.text + repr(parsed.tools)
     if any(marker in public_projection for marker in private_markers):
@@ -810,6 +836,83 @@ def run_self_test() -> None:
         pass
     else:
         raise ProbeFailure("offline malformed parser self-test failed")
+
+    private_error = "/private/provider-token=never-print"
+
+    def mutate_fixture(index: int, mutate: Any) -> str:
+        lines = public_jsonl_fixture().splitlines()
+        value = json.loads(lines[index])
+        mutate(value)
+        lines[index] = json.dumps(value, separators=(",", ":"))
+        return "\n".join(lines)
+
+    def change_session(value: dict[str, Any]) -> None:
+        value["sessionID"] = "ses_abcdef123456ABCDEFGHIJKLMN"
+        value["part"]["sessionID"] = "ses_abcdef123456ABCDEFGHIJKLMN"
+
+    def change_message(value: dict[str, Any]) -> None:
+        value["part"]["messageID"] = "msg_abcdef123456ABCDEFGHIJKLMN"
+
+    def remove_fixture_event(index: int) -> str:
+        lines = public_jsonl_fixture().splitlines()
+        del lines[index]
+        return "\n".join(lines)
+
+    invalid_streams = (
+        (
+            json.dumps(
+                {
+                    "type": "error",
+                    "timestamp": 1,
+                    "sessionID": "ses_123456789abcABCDEFGHIJKLMN",
+                    "error": {"data": {"message": private_error}},
+                },
+                separators=(",", ":"),
+            ),
+            "OpenCode emitted an error event",
+        ),
+        (
+            public_jsonl_fixture().replace('"timestamp":1,', "", 1),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
+            public_jsonl_fixture().replace('"timestamp":1', '"timestamp":-1', 1),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
+            mutate_fixture(2, change_session),
+            "OpenCode public JSONL changed session identifier",
+        ),
+        (
+            mutate_fixture(2, change_message),
+            "OpenCode emitted an invalid public JSONL envelope",
+        ),
+        (
+            remove_fixture_event(2),
+            "OpenCode emitted no completed public response text",
+        ),
+        (
+            remove_fixture_event(3),
+            "OpenCode emitted no valid public completion usage",
+        ),
+    )
+    for invalid, expected_message in invalid_streams:
+        try:
+            parse_public_output(invalid)
+        except ProbeFailure as error:
+            if str(error) != expected_message or private_error in str(error):
+                raise ProbeFailure("offline strict parser self-test failed") from error
+        else:
+            raise ProbeFailure("offline strict parser self-test failed")
+
+    marker_stderr = io.StringIO()
+    with MarkerServer() as marker, contextlib.redirect_stderr(marker_stderr):
+        try:
+            raise BrokenPipeError("/private/disconnected-client")
+        except BrokenPipeError:
+            marker.server.handle_error(None, ("/private/client", 1))
+    if marker_stderr.getvalue() != "":
+        raise ProbeFailure("offline marker-server sanitization self-test failed")
 
     def expect_process_failure(exception: Exception, expected_message: str) -> None:
         with patch("subprocess.run", side_effect=exception):

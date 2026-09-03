@@ -54,9 +54,47 @@ let with_env name value f =
     ~finally:(fun () -> Unix.putenv name (Option.value ~default:"" previous))
     f
 
+let rec with_env_bindings bindings f =
+  match bindings with
+  | [] -> f ()
+  | (name, value) :: rest ->
+      with_env name value (fun () -> with_env_bindings rest f)
+
 let write_executable path contents =
   write_file path contents ;
   Unix.chmod path 0o700
+
+let write_process_group_launcher path =
+  write_executable path
+    {|#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+os.setsid()
+handshake = os.fdopen(3, "w", buffering=1)
+control = os.fdopen(4, "r", buffering=1)
+status = os.fdopen(5, "w", buffering=1)
+handshake.write(f"PGID {os.getpid()}\n")
+if control.readline() != "ACK\n":
+    handshake.write("ERROR missing ACK\n")
+    sys.exit(1)
+process = subprocess.Popen(sys.argv[2:])
+os.close(0)
+os.close(1)
+os.close(2)
+handshake.write("EXEC\n")
+handshake.close()
+returncode = process.wait()
+if returncode >= 0:
+    status.write(f"EXIT {returncode}\n")
+else:
+    status.write(f"SIGNAL {-returncode}\n")
+status.close()
+for command in control:
+    if command == "RELEASE\n":
+        break
+|}
 
 let read_file path =
   let ic = open_in_bin path in
@@ -96,12 +134,94 @@ let identity_tests =
 
 (** {1 JSON Events Parsing Tests} *)
 
+let valid_session_id = "ses_123456789abcABCDEFGHIJKLMN"
+
+let second_session_id = "ses_abcdef123456ABCDEFGHIJKLMN"
+
+let valid_message_id = "msg_123456789abcABCDEFGHIJKLMN"
+
+let user_message_id = "msg_abcdef123456ABCDEFGHIJKLMN"
+
+let valid_part_id = "prt_123456789abcABCDEFGHIJKLMN"
+
+let second_part_id = "prt_abcdef123456ABCDEFGHIJKLMN"
+
+let event ?(timestamp = `Int 1) ?(session_id = valid_session_id) type_ part =
+  `Assoc
+    [
+      ("type", `String type_);
+      ("timestamp", timestamp);
+      ("sessionID", `String session_id);
+      ("part", part);
+    ]
+  |> Yojson.Safe.to_string
+
+let part ?(part_id = valid_part_id) ?(session_id = valid_session_id)
+    ?(message_id = valid_message_id) type_ fields =
+  `Assoc
+    (("id", `String part_id)
+    :: ("sessionID", `String session_id)
+    :: ("messageID", `String message_id)
+    :: ("type", `String type_)
+    :: fields)
+
+let step_start ?timestamp ?session_id ?part_id ?message_id () =
+  event ?timestamp ?session_id "step_start"
+    (part ?part_id ?session_id ?message_id "step-start" [])
+
+let completed_text ?timestamp ?session_id ?part_id ?message_id text =
+  event ?timestamp ?session_id "text"
+    (part ?part_id ?session_id ?message_id "text"
+       [
+         ("text", `String text);
+         ("time", `Assoc [("start", `Int 1); ("end", `Int 2)]);
+       ])
+
+let step_finish ?timestamp ?session_id ?part_id ?message_id ?(input = `Int 3)
+    ?(output = `Int 2) ?(reason = `String "stop") ?(cost = `Float 0.01) () =
+  event ?timestamp ?session_id "step_finish"
+    (part ?part_id ?session_id ?message_id "step-finish"
+       [
+         ("reason", reason);
+         ("cost", cost);
+         ( "tokens",
+           `Assoc
+             [
+               ("total", `Int 5);
+               ("input", input);
+               ("output", output);
+               ("reasoning", `Int 0);
+               ("cache", `Assoc [("read", `Int 0); ("write", `Int 0)]);
+             ] );
+       ])
+
 let test_parse_json_events_with_content () =
+  let finish =
+    event ~timestamp:(`Int 4) "step_finish"
+      (part ~part_id:"prt_3456789abcdeABCDEFGHIJKLMN" "step-finish"
+         [
+           ("reason", `String "stop");
+           ("cost", `Float 0.005);
+           ( "tokens",
+             `Assoc
+               [
+                 ("total", `Int 429);
+                 ("input", `Int 300);
+                 ("output", `Int 120);
+                 ("reasoning", `Int 9);
+                 ("cache", `Assoc [("read", `Int 40); ("write", `Int 10)]);
+               ] );
+         ])
+  in
   let input =
-    {|{"type":"step_start","sessionID":"ses_123456789abcABCDEFGHIJKLMN","part":{"type":"step-start"}}
-{"type":"text","sessionID":"ses_123456789abcABCDEFGHIJKLMN","part":{"type":"text","text":"First chunk","time":{"end":2}}}
-{"type":"text","sessionID":"ses_123456789abcABCDEFGHIJKLMN","part":{"type":"text","text":" second chunk","time":{"end":3}}}
-{"type":"step_finish","sessionID":"ses_123456789abcABCDEFGHIJKLMN","part":{"type":"step-finish","tokens":{"input":300,"output":120,"reasoning":9,"cache":{"read":40,"write":10}},"cost":0.005}}|}
+    String.concat "\n"
+      [
+        step_start ();
+        completed_text ~timestamp:(`Int 2) "First chunk";
+        completed_text ~timestamp:(`Int 3)
+          ~part_id:"prt_23456789abcdABCDEFGHIJKLMN" " second chunk";
+        finish;
+      ]
   in
   let text, cost = Opencode_cli.parse_json_events input in
   Alcotest.(check string) "concatenated text" "First chunk second chunk" text ;
@@ -123,16 +243,14 @@ let test_parse_json_events_with_content () =
 
 let test_parse_json_events_text_field () =
   let input =
-    {|{"type":"text","sessionID":"ses_123456789abcABCDEFGHIJKLMN","part":{"type":"text","text":"Hello from OpenCode","time":{"end":2}}}|}
+    String.concat "\n" [step_start (); completed_text "Hello from OpenCode"]
   in
   let text, cost = Opencode_cli.parse_json_events input in
   Alcotest.(check string) "text field" "Hello from OpenCode" text ;
   Alcotest.(check bool) "no cost" true (Option.is_none cost)
 
 let test_parse_json_events_no_usage () =
-  let input =
-    {|{"type":"text","sessionID":"ses_123456789abcABCDEFGHIJKLMN","part":{"type":"text","text":"Simple response","time":{"end":2}}}|}
-  in
+  let input = String.concat "\n" [step_start (); completed_text "Simple response"] in
   let text, cost = Opencode_cli.parse_json_events input in
   Alcotest.(check string) "content text" "Simple response" text ;
   Alcotest.(check bool) "no cost" true (Option.is_none cost)
@@ -156,23 +274,42 @@ let payload_kind = function
   | Token_usage _ -> "usage"
   | _ -> "other"
 
-let valid_session_id = "ses_123456789abcABCDEFGHIJKLMN"
-
 let test_normalized_events_public_protocol_records () =
   let lines =
     [
-      Printf.sprintf
-        {|{"type":"step_start","sessionID":"%s","part":{"type":"step-start"}}|}
-        valid_session_id;
-      Printf.sprintf
-        {|{"type":"text","sessionID":"%s","part":{"type":"text","text":"public answer","time":{"start":1,"end":2}}}|}
-        valid_session_id;
-      Printf.sprintf
-        {|{"type":"tool_use","sessionID":"%s","part":{"type":"tool","callID":"call-safe_1","tool":"webfetch","state":{"status":"completed","input":{"url":"private input"},"output":"private result"}}}|}
-        valid_session_id;
-      Printf.sprintf
-        {|{"type":"step_finish","sessionID":"%s","part":{"type":"step-finish","tokens":{"input":12,"output":3,"reasoning":99,"cache":{"read":4,"write":2}},"cost":0.01}}|}
-        valid_session_id;
+      step_start ();
+      completed_text "public answer";
+      event ~timestamp:(`Int 3) "tool_use"
+        (part ~part_id:second_part_id "tool"
+           [
+             ("callID", `String "call-safe_1");
+             ("tool", `String "webfetch");
+             ( "state",
+               `Assoc
+                 [
+                   ("status", `String "completed");
+                   ("input", `Assoc [("url", `String "private input")]);
+                   ("output", `String "private result");
+                   ("title", `String "private title");
+                   ("metadata", `Assoc []);
+                   ("time", `Assoc [("start", `Int 1); ("end", `Int 2)]);
+                 ] );
+           ]);
+      event ~timestamp:(`Int 4) "step_finish"
+        (part ~part_id:"prt_3456789abcdeABCDEFGHIJKLMN" "step-finish"
+           [
+             ("reason", `String "stop");
+             ("cost", `Float 0.01);
+             ( "tokens",
+               `Assoc
+                 [
+                   ("total", `Int 120);
+                   ("input", `Int 12);
+                   ("output", `Int 3);
+                   ("reasoning", `Int 99);
+                   ("cache", `Assoc [("read", `Int 4); ("write", `Int 2)]);
+                 ] );
+           ]);
     ]
   in
   let events = List.concat_map Opencode_cli.normalized_events_of_line lines in
@@ -238,6 +375,69 @@ let test_normalized_events_drop_private_and_raw_records () =
     ""
     (Opencode_cli.parse_stdout_text stdout)
 
+let test_strict_envelope_rejects_missing_or_invalid_fields () =
+  let missing_part_identity =
+    {|{"type":"text","timestamp":1,"sessionID":"ses_123456789abcABCDEFGHIJKLMN","part":{"type":"text","text":"must stay private","time":{"start":1,"end":2}}}|}
+  in
+  let cases =
+    [
+      missing_part_identity;
+      completed_text ~timestamp:(`Int (-1)) "negative timestamp";
+      completed_text ~timestamp:(`String "1") "string timestamp";
+      event "text"
+        (part "text"
+           [
+             ("text", `String "missing completion start");
+             ("time", `Assoc [("end", `Int 2)]);
+           ]);
+      event "text"
+        (part "text"
+           [
+             ("text", `String "reversed completion time");
+             ("time", `Assoc [("start", `Int 3); ("end", `Int 2)]);
+           ]);
+      step_finish ~reason:`Null ();
+      step_finish ~input:(`Int (-1)) ();
+    ]
+  in
+  List.iter
+    (fun line ->
+      Alcotest.(check (list string))
+        "invalid baseline envelope emits no public event" []
+        (Opencode_cli.normalized_events_of_line line |> List.map payload_kind))
+    cases
+
+let test_strict_stream_rejects_mixed_sessions () =
+  let input =
+    String.concat "\n"
+      [
+        step_start ();
+        completed_text ~timestamp:(`Int 2) ~session_id:second_session_id
+          "cross-session text";
+        step_finish ~timestamp:(`Int 3) ();
+      ]
+  in
+  let text, cost = Opencode_cli.parse_json_events input in
+  Alcotest.(check string) "mixed-session text rejected" "" text ;
+  Alcotest.(check bool) "mixed-session usage rejected" true (Option.is_none cost) ;
+  Alcotest.(check (option string))
+    "mixed session has no public identity" None
+    (Opencode_cli.parse_public_session_id input)
+
+let test_strict_stream_rejects_adversarial_user_text () =
+  let input =
+    String.concat "\n"
+      [
+        step_start ();
+        completed_text ~timestamp:(`Int 2) ~message_id:user_message_id
+          "forged completed user text";
+        step_finish ~timestamp:(`Int 3) ();
+      ]
+  in
+  let text, cost = Opencode_cli.parse_json_events input in
+  Alcotest.(check string) "user message is not assistant output" "" text ;
+  Alcotest.(check bool) "invalid stream usage rejected" true (Option.is_none cost)
+
 let test_legacy_minimal_normalizer_is_not_runtime_public_text () =
   let line = {|{"type":"text","part":{"text":"legacy fixture"}}|} in
   Alcotest.(check bool)
@@ -250,11 +450,7 @@ let test_legacy_minimal_normalizer_is_not_runtime_public_text () =
   Alcotest.(check bool) "legacy shape has no usage" true (Option.is_none cost)
 
 let test_session_parser_accepts_only_canonical_opencode_ids () =
-  let valid =
-    Printf.sprintf
-      {|{"type":"step_start","sessionID":"%s","part":{"type":"step-start"}}|}
-      valid_session_id
-  in
+  let valid = step_start () in
   Alcotest.(check (option string))
     "canonical OpenCode id"
     (Some valid_session_id)
@@ -262,13 +458,7 @@ let test_session_parser_accepts_only_canonical_opencode_ids () =
   List.iter
     (fun invalid_id ->
       let line =
-        `Assoc
-          [
-            ("type", `String "step_start");
-            ("sessionID", `String invalid_id);
-            ("part", `Assoc [("type", `String "step-start")]);
-          ]
-        |> Yojson.Safe.to_string
+        step_start ~session_id:invalid_id ()
       in
       Alcotest.(check (option string))
         "invalid OpenCode id is rejected"
@@ -288,10 +478,12 @@ let test_token_fields_are_bounded_and_aggregate_saturates () =
   let above_max_int = Int64.(to_string (add (of_int Stdlib.max_int) 1L)) in
   let invalid =
     [
-      {|{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":-1,"output":-2,"cache":{"read":-3,"write":-4}},"cost":-1}}|};
-      {|{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":"1","output":1.5,"cache":{"read":true,"write":[]}},"cost":"bad"}}|};
+      step_finish ~input:(`Int (-1)) ~output:(`Int (-2)) ~cost:(`Int (-1)) ();
+      step_finish ~input:(`String "1") ~output:(`Float 1.5)
+        ~cost:(`String "bad") ();
       Printf.sprintf
-        {|{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":%s,"output":%s,"cache":{"read":%s,"write":%s}},"cost":null}}|}
+        {|{"type":"step_finish","timestamp":2,"sessionID":"%s","part":{"id":"%s","sessionID":"%s","messageID":"%s","type":"step-finish","reason":"stop","tokens":{"total":0,"input":%s,"output":%s,"reasoning":0,"cache":{"read":%s,"write":%s}},"cost":null}}|}
+        valid_session_id valid_part_id valid_session_id valid_message_id
         above_max_int above_max_int above_max_int above_max_int;
     ]
   in
@@ -305,13 +497,26 @@ let test_token_fields_are_bounded_and_aggregate_saturates () =
       Alcotest.(check bool) "invalid usage emits no cost" true (Option.is_none cost))
     invalid ;
   let usage value =
-    Printf.sprintf
-      {|{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":%d,"output":%d,"cache":{"read":%d,"write":%d}},"cost":0}}|}
-      value value value value
+    event "step_finish"
+      (part "step-finish"
+         [
+           ("reason", `String "stop");
+           ("cost", `Int 0);
+           ( "tokens",
+             `Assoc
+               [
+                 ("total", `Int value);
+                 ("input", `Int value);
+                 ("output", `Int value);
+                 ("reasoning", `Int 0);
+                 ("cache", `Assoc [("read", `Int value); ("write", `Int value)]);
+               ] );
+         ])
   in
   let _, cost =
     Opencode_cli.parse_json_events
-      (String.concat "\n" [usage Stdlib.max_int; usage 1])
+      (String.concat "\n"
+         [step_start (); usage Stdlib.max_int; usage 1])
   in
   match cost with
   | Some cost ->
@@ -339,6 +544,15 @@ let json_events_tests =
     ( "drop private and raw records",
       `Quick,
       test_normalized_events_drop_private_and_raw_records );
+    ( "reject missing and invalid baseline envelopes",
+      `Quick,
+      test_strict_envelope_rejects_missing_or_invalid_fields );
+    ( "reject mixed-session streams",
+      `Quick,
+      test_strict_stream_rejects_mixed_sessions );
+    ( "reject completed user text",
+      `Quick,
+      test_strict_stream_rejects_adversarial_user_text );
     ( "isolate legacy minimal normalized text",
       `Quick,
       test_legacy_minimal_normalizer_is_not_runtime_public_text );
@@ -394,9 +608,11 @@ let test_build_command_includes_model_flag () =
 
 let web_permission_json = function
   | Backend_types.Web_disabled ->
-      {|{"websearch":"deny","webfetch":"deny"}|}
-  | Web_search -> {|{"websearch":"allow","webfetch":"deny"}|}
-  | Web_search_and_fetch -> {|{"websearch":"allow","webfetch":"allow"}|}
+      {|{"websearch":"deny","webfetch":"deny","codesearch":"deny"}|}
+  | Web_search ->
+      {|{"websearch":"allow","webfetch":"deny","codesearch":"deny"}|}
+  | Web_search_and_fetch ->
+      {|{"websearch":"allow","webfetch":"allow","codesearch":"deny"}|}
 
 let web_config_json policy =
   let permissions = web_permission_json policy in
@@ -404,11 +620,18 @@ let web_config_json policy =
     {|{"share":"disabled","permission":%s,"agent":{"build":{"permission":%s}}}|}
     permissions permissions
 
-let expected_root ?model ?(web_access = Backend_types.Web_disabled) () =
+let expected_root ?model ?(web_access = Backend_types.Web_disabled)
+    ?(redacted = false) () =
+  let project_config = if redacted then "<project-config>" else "/tmp/opencode.json" in
   [
     "env";
     "OPENCODE_PERMISSION=" ^ web_permission_json web_access;
     "OPENCODE_CONFIG_CONTENT=" ^ web_config_json web_access;
+    "OPENCODE_CONFIG=" ^ project_config;
+    "OPENCODE_CONFIG_DIR=";
+    "OPENCODE_DISABLE_PROJECT_CONFIG=1";
+    "OPENCODE_EXPERIMENTAL=0";
+    "OPENCODE_EXPERIMENTAL_EXA=0";
     ( "OPENCODE_ENABLE_EXA="
     ^ if web_access = Backend_types.Web_disabled then "0" else "1" );
     "OPENCODE_AUTO_SHARE=0";
@@ -479,7 +702,7 @@ let test_build_invocation_redacts_sensitive_values () =
   in
   Alcotest.(check (list string))
     "redacted argv retains only fixed values and placeholders"
-    (expected_root ~model:"<model>" ()
+    (expected_root ~model:"<model>" ~redacted:true ()
     @ ["--file"; "<attachment-1>"; "-"])
     invocation.redacted_argv ;
   let rendered = String.concat " " invocation.redacted_argv in
@@ -652,36 +875,7 @@ let test_schema_retry_reuploads_same_sealed_image_at_most_twice () =
           Unix.mkdir fake_dir 0o700 ;
           let fake = Filename.concat fake_dir "opencode" in
           let launcher = Filename.concat fake_dir "process-group-launcher" in
-          write_executable launcher
-            {|#!/usr/bin/env python3
-import os
-import subprocess
-import sys
-
-os.setsid()
-handshake = os.fdopen(3, "w", buffering=1)
-control = os.fdopen(4, "r", buffering=1)
-status = os.fdopen(5, "w", buffering=1)
-handshake.write(f"PGID {os.getpid()}\n")
-if control.readline() != "ACK\n":
-    handshake.write("ERROR missing ACK\n")
-    sys.exit(1)
-process = subprocess.Popen(sys.argv[2:])
-os.close(0)
-os.close(1)
-os.close(2)
-handshake.write("EXEC\n")
-handshake.close()
-returncode = process.wait()
-if returncode >= 0:
-    status.write(f"EXIT {returncode}\n")
-else:
-    status.write(f"SIGNAL {-returncode}\n")
-status.close()
-for command in control:
-    if command == "RELEASE\n":
-        break
-|} ;
+          write_process_group_launcher launcher ;
           write_executable fake
             (Printf.sprintf
                {|#!/bin/sh
@@ -695,9 +889,9 @@ else
   SESSION='ses_123456789abcABCDEFGHIJKLMN'
   TEXT='not-json'
 fi
-printf '%%s\n' "{\"type\":\"step_start\",\"sessionID\":\"$SESSION\",\"part\":{\"type\":\"step-start\"}}"
-printf '%%s\n' "{\"type\":\"text\",\"sessionID\":\"$SESSION\",\"part\":{\"type\":\"text\",\"text\":\"$TEXT\",\"time\":{\"end\":2}}}"
-printf '%%s\n' "{\"type\":\"step_finish\",\"sessionID\":\"$SESSION\",\"part\":{\"type\":\"step-finish\",\"tokens\":{\"input\":1,\"output\":1,\"cache\":{\"read\":0,\"write\":0}},\"cost\":0}}"
+printf '%%s\n' "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_123456789abcABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-start\"}}"
+printf '%%s\n' "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_23456789abcdABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"text\",\"text\":\"$TEXT\",\"time\":{\"start\":1,\"end\":2}}}"
+printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_3456789abcdeABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-finish\",\"reason\":\"stop\",\"tokens\":{\"total\":2,\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"cost\":0}}"
 |}
                (Filename.quote capture)
                (Filename.quote capture)
@@ -771,8 +965,143 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"sessionID\":\"$SESSION\",\"part\":{\
             (count_equal_line "--file" captured) ;
           Alcotest.(check bool)
             "workspace-relative source path is never passed"
-            false
-            (contains_str captured relative_path)))
+           false
+           (contains_str captured relative_path)))
+
+let test_exit_zero_error_jsonl_becomes_sanitized_failure () =
+  with_tmpdir (fun workspace ->
+      let fake_dir = Filename.concat workspace "fake-bin" in
+      Unix.mkdir fake_dir 0o700 ;
+      let private_payload = "/private/auth-token=must-not-escape" in
+      write_executable
+        (Filename.concat fake_dir "opencode")
+        (Printf.sprintf
+           {|#!/bin/sh
+printf '%%s\n' '{"type":"error","timestamp":1,"sessionID":"ses_123456789abcABCDEFGHIJKLMN","error":{"name":"ProviderAuthError","data":{"message":"%s"}}}'
+exit 0
+|}
+           private_payload) ;
+      let launcher = Filename.concat fake_dir "process-group-launcher" in
+      write_process_group_launcher launcher ;
+      with_env "CABAL_PROCESS_GROUP_LAUNCHER" launcher @@ fun () ->
+      with_path_prefix fake_dir @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let result =
+        Opencode_cli.run_task ~sw ~env
+          (Backend_types.make_task_spec ~prompt:"trigger error"
+             ~working_dir:workspace ())
+      in
+      (match result.status with
+      | Backend_types.Failed message ->
+          Alcotest.(check bool)
+            "fixed protocol failure" true
+            (contains_str message "OpenCode" && contains_str message "error") ;
+          Alcotest.(check bool)
+            "status omits error payload" false
+            (contains_str message private_payload)
+      | _ -> Alcotest.fail "exit-zero error JSONL was returned as success") ;
+      List.iter
+        (fun public_field ->
+          Alcotest.(check bool)
+            "returned public fields omit error payload" false
+            (contains_str public_field private_payload))
+        [result.stdout; result.agent_text; result.stderr] ;
+      Alcotest.(check string) "raw stdout discarded" "" result.stdout ;
+      Alcotest.(check string) "agent text discarded" "" result.agent_text ;
+      Alcotest.(check (option string))
+        "session discarded" None result.session_id ;
+      Alcotest.(check int) "real zero exit retained" 0 result.exit_code)
+
+let test_run_isolates_mutable_config_and_neutralizes_inherited_flags () =
+  with_tmpdir (fun workspace ->
+      let fake_dir = Filename.concat workspace "fake-bin" in
+      Unix.mkdir fake_dir 0o700 ;
+      let capture = Filename.concat workspace "captured-environment" in
+      write_executable
+        (Filename.concat fake_dir "opencode")
+        (Printf.sprintf
+           {|#!/bin/sh
+MODE=$(stat -c '%%a' "$XDG_CONFIG_HOME" 2>/dev/null || printf missing)
+{
+  printf '%%s\n' "$XDG_CONFIG_HOME"
+  printf '%%s\n' "$OPENCODE_TEST_HOME"
+  printf '%%s\n' "$MODE"
+  printf '%%s\n' "$OPENCODE_EXPERIMENTAL"
+  printf '%%s\n' "$OPENCODE_EXPERIMENTAL_EXA"
+  printf '%%s\n' "$OPENCODE_ENABLE_EXA"
+  printf '%%s\n' "$OPENCODE_DISABLE_PROJECT_CONFIG"
+  printf '%%s\n' "$OPENCODE_CONFIG_DIR"
+  printf '%%s\n' "$OPENCODE_CONFIG"
+} > %s
+SESSION='ses_123456789abcABCDEFGHIJKLMN'
+printf '%%s\n' "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_123456789abcABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-start\"}}"
+printf '%%s\n' "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_23456789abcdABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"text\",\"text\":\"ok\",\"time\":{\"start\":1,\"end\":2}}}"
+printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_3456789abcdeABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-finish\",\"reason\":\"stop\",\"tokens\":{\"total\":2,\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"cost\":0}}"
+|}
+           (Filename.quote capture)) ;
+      let launcher = Filename.concat fake_dir "process-group-launcher" in
+      write_process_group_launcher launcher ;
+      with_env_bindings
+        [
+          ("CABAL_PROCESS_GROUP_LAUNCHER", launcher);
+          ("OPENCODE_EXPERIMENTAL", "1");
+          ("OPENCODE_EXPERIMENTAL_EXA", "1");
+          ("OPENCODE_ENABLE_EXA", "1");
+          ("OPENCODE_DISABLE_PROJECT_CONFIG", "0");
+          ("OPENCODE_CONFIG", "/private/attacker-config.json");
+          ("OPENCODE_CONFIG_DIR", "/private/attacker-config-dir");
+          ("XDG_CONFIG_HOME", "/private/attacker-xdg");
+          ("OPENCODE_TEST_HOME", "/private/attacker-home");
+        ]
+        (fun () ->
+          with_path_prefix fake_dir @@ fun () ->
+          Eio_posix.run @@ fun env ->
+          Eio.Switch.run @@ fun sw ->
+          let result =
+            Opencode_cli.run_task ~sw ~env
+              (Backend_types.make_task_spec ~prompt:"config isolation"
+                 ~working_dir:workspace ())
+          in
+          match result.status with
+          | Backend_types.Success -> ()
+          | Failed message -> Alcotest.fail message
+          | Timeout -> Alcotest.fail "config isolation fake timed out"
+          | Cancelled -> Alcotest.fail "config isolation fake was cancelled") ;
+      let captured = String.split_on_char '\n' (read_file capture) in
+      match captured with
+      | isolation_home
+        :: test_home
+        :: mode
+        :: experimental
+        :: experimental_exa
+        :: enable_exa
+        :: disable_project
+        :: config_dir
+        :: config
+        :: _ ->
+          Alcotest.(check bool)
+            "isolated config home is outside workspace" false
+            (String.starts_with ~prefix:(workspace ^ Filename.dir_sep)
+               isolation_home) ;
+          Alcotest.(check string)
+            "home config discovery uses same isolation" isolation_home test_home ;
+          Alcotest.(check string) "private isolation mode" "700" mode ;
+          Alcotest.(check (list string))
+            "experimental network flags neutralized"
+            ["0"; "0"; "0"]
+            [experimental; experimental_exa; enable_exa] ;
+          Alcotest.(check string)
+            "project discovery disabled" "1" disable_project ;
+          Alcotest.(check string) "inherited config dir cleared" "" config_dir ;
+          Alcotest.(check string)
+            "only exact project config remains"
+            (Filename.concat workspace "opencode.json")
+            config ;
+          Alcotest.(check bool)
+            "temporary config isolation removed" false
+            (Sys.file_exists isolation_home)
+      | _ -> Alcotest.fail "fake OpenCode captured incomplete environment")
 
 let rec project_root_from path =
   if Sys.file_exists (Filename.concat path "dune-project") then path
@@ -792,6 +1121,53 @@ let test_media_web_probe_offline_self_test () =
     "offline probe validators pass"
     0
     (Sys.command (Printf.sprintf "%s --self-test" (Filename.quote path)))
+
+let test_media_web_addendum_records_non_evidence_provenance () =
+  let root = project_root_from (Sys.getcwd ()) in
+  let path =
+    Filename.concat root "docs/native-json-schema-investigation/opencode.md"
+  in
+  let content = read_file path in
+  List.iter
+    (fun required ->
+      Alcotest.(check bool)
+        ("provenance note contains: " ^ required) true
+        (contains_str content required))
+    [
+      "Authenticated observation version: OpenCode `1.2.24`";
+      "below the enforced descriptor baseline `1.14.20`";
+      "not capability evidence";
+      "tested_at_version must be greater than or equal to baseline_version";
+      "Web_disabled` with `evidence = None";
+    ] ;
+  List.iter
+    (fun rejected ->
+      Alcotest.(check bool)
+        ("false run claim absent: " ^ rejected) false
+        (contains_str content rejected))
+    [
+      "Content-dependent assertion at `1.14.20`";
+      "run successfully as a forward-compatibility advisory";
+      "installed OpenCode `1.18.25`";
+    ]
+
+let test_opencode_capabilities_remain_unpromoted () =
+  match Backend_registry.find "opencode" with
+  | None -> Alcotest.fail "OpenCode descriptor missing"
+  | Some descriptor ->
+      let capabilities = descriptor.capabilities in
+      Alcotest.(check bool)
+        "no advertised media" true
+        (capabilities.media_support.media_types = []) ;
+      Alcotest.(check bool)
+        "no media evidence" true
+        (Option.is_none capabilities.media_support.evidence) ;
+      Alcotest.(check bool)
+        "web remains disabled" true
+        (capabilities.web_support.maximum = Backend_types.Web_disabled) ;
+      Alcotest.(check bool)
+        "no web evidence" true
+        (Option.is_none capabilities.web_support.evidence)
 
 let command_tests =
   [
@@ -819,9 +1195,21 @@ let command_tests =
     ( "schema retry reuploads one sealed image twice",
       `Quick,
       test_schema_retry_reuploads_same_sealed_image_at_most_twice );
+    ( "exit-zero error JSONL is a sanitized failure",
+      `Quick,
+      test_exit_zero_error_jsonl_becomes_sanitized_failure );
+    ( "isolate mutable config and inherited experimental flags",
+      `Quick,
+      test_run_isolates_mutable_config_and_neutralizes_inherited_flags );
     ( "media/web probe offline self-test",
       `Quick,
       test_media_web_probe_offline_self_test );
+    ( "record below-baseline non-evidence provenance",
+      `Quick,
+      test_media_web_addendum_records_non_evidence_provenance );
+    ( "capabilities remain unpromoted",
+      `Quick,
+      test_opencode_capabilities_remain_unpromoted );
   ]
 
 (** {1 Backend Interface Compliance Tests} *)
