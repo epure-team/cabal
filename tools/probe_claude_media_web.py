@@ -316,6 +316,10 @@ def parse_public_output(stdout: str) -> tuple[str, dict[str, Any], set[str], set
                     or not SAFE_TOOL_ID.fullmatch(tool_id)
                     or tool_id not in tool_starts
                     or tool_id in tool_finishes
+                    or (
+                        "is_error" in block
+                        and block.get("is_error") is not False
+                    )
                 ):
                     raise ProbeFailure("Claude emitted an unexpected public tool result")
                 tool_finishes.add(tool_id)
@@ -717,6 +721,19 @@ def run_self_test() -> None:
         if '"type":"tool_result"' not in line
     )
     expect_public_parse_failure(unfinished_tool)
+
+    failed_completion_events = [
+        json.loads(line) for line in valid_search.splitlines()
+    ]
+    for event in failed_completion_events:
+        if event.get("type") == "user":
+            event["message"]["content"][0]["is_error"] = True
+    expect_public_parse_failure(
+        "\n".join(
+            json.dumps(event, separators=(",", ":"))
+            for event in failed_completion_events
+        )
+    )
 
     disabled_argv = probe_argv("web-disabled", settings=Path("private-settings"))
     search_argv = probe_argv("web-search")
