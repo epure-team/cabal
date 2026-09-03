@@ -72,11 +72,18 @@ let selected_backend_ids ?(getenv = Sys.getenv_opt) ~all_backend_ids () =
 let positive_media_descriptor (d : Cabal.Backend_registry.descriptor) =
   d.capabilities.media_support.media_types <> []
 
+let schema_compatible_descriptor (d : Cabal.Backend_registry.descriptor) =
+  d.capabilities.structured_output
+
 let positive_web_descriptor (d : Cabal.Backend_registry.descriptor) =
   d.capabilities.web_support.maximum <> Cabal.Backend_types.Web_disabled
 
 let media_schema_descriptors ~descriptors () =
-  List.filter positive_media_descriptor descriptors
+  List.filter
+    (fun descriptor ->
+      positive_media_descriptor descriptor
+      && schema_compatible_descriptor descriptor)
+    descriptors
 
 let web_descriptors ~descriptors () =
   List.filter positive_web_descriptor descriptors

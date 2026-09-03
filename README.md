@@ -655,9 +655,9 @@ the default backend set
 (`claude-code`, `codex`, `opencode`, `copilot-cli`), while
 `test_native_json_schema_backends` iterates every registry backend whose
 `native_json_schema_output = true`. The CBL-08 binary defaults to descriptors
-with positive media capability, currently Codex. `gemini-cli` has a default model
-and override env var, but is opt-in for the older generic E2Es via
-`CABAL_E2E_BACKEND=gemini-cli`.
+with positive media capability and structured-output support, currently Codex.
+`gemini-cli` has a default model and override env var, but is opt-in for the
+older generic E2Es via `CABAL_E2E_BACKEND=gemini-cli`.
 Managed host-owned artifacts created by these test harnesses use the test-only
 namespace `.cabal-tests/backend-config`; backend-fixed project config paths
 remain backend-owned (for example `.codex/config.toml`).
@@ -692,8 +692,11 @@ Run only the CBL-08 Codex image/schema proof:
 ```bash
 CABAL_E2E_TESTS=1 \
   CABAL_E2E_BACKEND=codex \
-  dune exec ./test/test_media_web_schema_backends.exe
+  dune build @e2e-cbl08
 ```
+
+The dedicated alias builds the process-group launcher and gated binary before
+running the proof, so the command also works from a clean build tree.
 
 The CBL-08 binary first distinguishes an absent executable on `PATH` (explicit
 skip) from an installed CLI whose version, availability, or authenticated call

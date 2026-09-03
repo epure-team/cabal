@@ -380,6 +380,13 @@
  (modules test_media_web_schema_e2e_structure))
 
 (rule
+ (alias e2e-cbl08)
+ (enabled_if
+  (= %{env:CABAL_E2E_TESTS=0} 1))
+ (deps ../bin/process_group_launcher.exe test_media_web_schema_backends.exe)
+ (action (run ./test_media_web_schema_backends.exe)))
+
+(rule
  (alias e2e)
  (enabled_if
   (= %{env:CABAL_E2E_TESTS=0} 1))

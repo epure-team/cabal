@@ -67,6 +67,26 @@ let test_capability_driven_selection () =
     "Codex P0 uses native schema"
     true
     codex.capabilities.native_json_schema_output ;
+  let media_without_schema =
+    {
+      codex with
+      id = "media-without-schema";
+      capabilities =
+        {
+          codex.capabilities with
+          structured_output = false;
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
+        };
+    }
+  in
+  Alcotest.(check (list string))
+    "media-only descriptors are not schema-compatible"
+    []
+    (E2e_harness_config.media_schema_descriptors
+       ~descriptors:[media_without_schema]
+       ()
+    |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
   let installed_floor =
     match Backend_version.of_string "0.131.0" with
     | Ok version -> version
@@ -303,17 +323,25 @@ let test_e2e_binary_is_credential_gated_and_sequential () =
     [
       "(name test_media_web_schema_backends)";
       "(= %{env:CABAL_E2E_TESTS=0} 1)";
+      "(alias e2e-cbl08)";
       "test_media_web_schema_backends.exe";
       "(run ./test_media_web_schema_backends.exe)";
     ] ;
-  let require_index needle =
-    match index_of dune needle with
+  let alias_stanza =
+    match index_of dune "(rule\n (alias e2e)\n" with
+    | None -> Alcotest.fail "missing named E2E alias"
+    | Some offset -> String.sub dune offset (String.length dune - offset)
+  in
+  let require_alias_index needle =
+    match index_of alias_stanza needle with
     | Some index -> index
     | None -> Alcotest.fail ("missing dune E2E entry: " ^ needle)
   in
-  let enforcer = require_index "(run ./test_demo_627.exe)" in
-  let native = require_index "(run ./test_native_json_schema_backends.exe)" in
-  let media = require_index "(run ./test_media_web_schema_backends.exe)" in
+  let enforcer = require_alias_index "(run ./test_demo_627.exe)" in
+  let native = require_alias_index "(run ./test_native_json_schema_backends.exe)" in
+  let media =
+    require_alias_index "(run ./test_media_web_schema_backends.exe)"
+  in
   Alcotest.(check bool)
     "@e2e runs existing prerequisites before media/schema"
     true
@@ -335,11 +363,6 @@ let test_e2e_binary_is_credential_gated_and_sequential () =
     true
     (contains binary_stanza
        "(enabled_if\n  (= %{env:CABAL_E2E_TESTS=0} 1))") ;
-  let alias_stanza =
-    match index_of dune "(rule\n (alias e2e)" with
-    | None -> Alcotest.fail "missing named E2E alias"
-    | Some offset -> String.sub dune offset (String.length dune - offset)
-  in
   Alcotest.(check bool)
     "the named E2E alias is inert unless CABAL_E2E_TESTS=1"
     true
