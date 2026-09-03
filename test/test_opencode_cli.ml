@@ -651,7 +651,9 @@ let web_config_json policy =
 
 let expected_root ?model ?(web_access = Backend_types.Web_disabled)
     ?(redacted = false) () =
-  let project_config = if redacted then "<project-config>" else "/tmp/opencode.json" in
+  let project_config =
+    if redacted then "<project-config>" else "opencode.json"
+  in
   [
     "env";
     "-u";
@@ -809,26 +811,23 @@ let test_fixed_policy_denies_hostile_subagent_delegation () =
       Backend_types.Web_search_and_fetch;
     ]
 
-let test_build_invocation_absolutizes_nested_relative_config_path () =
+let test_build_invocation_uses_child_relative_config_path () =
   with_tmpdir (fun root ->
       let relative_working_dir = Filename.concat "project" "./nested" in
       with_cwd root @@ fun () ->
       let invocation =
         build_invocation (minimal_spec ~working_dir:relative_working_dir ())
       in
-      let expected =
-        Filename.concat
-          (Filename.concat root (Filename.concat "project" "nested"))
-          "opencode.json"
-      in
       Alcotest.(check bool)
-        "explicit config path is absolute" true
+        "explicit config path resolves from child cwd" true
         (has_adjacent_args
-           ("OPENCODE_CONFIG=" ^ expected)
+           "OPENCODE_CONFIG=opencode.json"
            "OPENCODE_CONFIG_DIR=" invocation.argv) ;
       Alcotest.(check bool)
-        "redacted argv omits absolute workspace" false
-        (contains_str (String.concat " " invocation.redacted_argv) root))
+        "actual and redacted argv omit parent workspace" false
+        (contains_str
+           (String.concat " " (invocation.argv @ invocation.redacted_argv))
+           root))
 
 let test_build_invocation_rejects_invalid_working_dir_without_disclosure () =
   let private_path = "/private/attacker\000path" in
@@ -1333,12 +1332,61 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
           Alcotest.(check string) "inherited config dir cleared" "" config_dir ;
           Alcotest.(check string)
             "only exact project config remains"
-            (Filename.concat workspace "opencode.json")
+            "opencode.json"
             config ;
           Alcotest.(check bool)
             "temporary config isolation removed" false
             (Sys.file_exists isolation_home)
       | _ -> Alcotest.fail "fake OpenCode captured incomplete environment")
+
+let write_config_capture_opencode path capture =
+  write_executable path
+    (Printf.sprintf
+       {|#!/bin/sh
+{
+  pwd -P
+  printf '%%s\n' "$OPENCODE_CONFIG"
+  while IFS= read -r LINE; do printf '%%s\n' "$LINE"; done < "$OPENCODE_CONFIG"
+} > %s
+SESSION='ses_123456789abcABCDEFGHIJKLMN'
+printf '%%s\n' "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_123456789abcABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-start\"}}"
+printf '%%s\n' "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_23456789abcdABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"text\",\"text\":\"ok\",\"time\":{\"start\":1,\"end\":2}}}"
+printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_3456789abcdeABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-finish\",\"reason\":\"stop\",\"tokens\":{\"total\":2,\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"cost\":0}}"
+|}
+       (Filename.quote capture))
+
+let config_loading_spec working_dir =
+  let lsp_server : Backend_types.lsp_server_config =
+    {
+      name = "test-lsp";
+      command = "test-language-server";
+      args = ["--stdio"];
+      file_associations = [{extension = ".test"; language_id = "test"}];
+    }
+  in
+  Backend_types.make_task_spec ~prompt:"relative config" ~working_dir
+    ~mcp_servers:
+      [
+        Backend_types.make_mcp_server_config ~name:"epure" ~command:"epure"
+          ~args:["mcp"] ();
+      ]
+    ~lsp_servers:[lsp_server] ()
+
+let assert_captured_generated_config ~expected_cwd capture =
+  match String.split_on_char '\n' (read_file capture) with
+  | cwd :: config :: content ->
+      Alcotest.(check string) "child physical cwd" expected_cwd cwd ;
+      Alcotest.(check string)
+        "config resolves from child cwd" "opencode.json" config ;
+      let content = String.concat "\n" content in
+      Alcotest.(check bool)
+        "requested MCP config loaded" true
+        (contains_str content {|"epure"|}) ;
+      Alcotest.(check bool)
+        "requested LSP config loaded" true
+        (contains_str content {|"test-lsp"|}) ;
+      content
+  | _ -> Alcotest.fail "fake OpenCode captured incomplete config"
 
 let test_run_loads_mcp_lsp_config_from_nested_relative_working_dir () =
   with_tmpdir (fun root ->
@@ -1348,41 +1396,12 @@ let test_run_loads_mcp_lsp_config_from_nested_relative_working_dir () =
       let fake_dir = Filename.concat root "fake-bin" in
       Unix.mkdir fake_dir 0o700 ;
       let capture = Filename.concat root "captured-relative-config" in
-      write_executable
+      write_config_capture_opencode
         (Filename.concat fake_dir "opencode")
-        (Printf.sprintf
-           {|#!/bin/sh
-{
-  printf '%%s\n' "$PWD"
-  printf '%%s\n' "$OPENCODE_CONFIG"
-  while IFS= read -r LINE; do printf '%%s\n' "$LINE"; done < "$OPENCODE_CONFIG"
-} > %s
-SESSION='ses_123456789abcABCDEFGHIJKLMN'
-printf '%%s\n' "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_123456789abcABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-start\"}}"
-printf '%%s\n' "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_23456789abcdABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"text\",\"text\":\"ok\",\"time\":{\"start\":1,\"end\":2}}}"
-printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSION\",\"part\":{\"id\":\"prt_3456789abcdeABCDEFGHIJKLMN\",\"sessionID\":\"$SESSION\",\"messageID\":\"msg_123456789abcABCDEFGHIJKLMN\",\"type\":\"step-finish\",\"reason\":\"stop\",\"tokens\":{\"total\":2,\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"cost\":0}}"
-|}
-           (Filename.quote capture)) ;
+        capture ;
       let launcher = Filename.concat fake_dir "process-group-launcher" in
       write_process_group_launcher launcher ;
-      let lsp_server : Backend_types.lsp_server_config =
-        {
-          name = "test-lsp";
-          command = "test-language-server";
-          args = ["--stdio"];
-          file_associations = [{extension = ".test"; language_id = "test"}];
-        }
-      in
-      let spec =
-        Backend_types.make_task_spec ~prompt:"relative config"
-          ~working_dir:relative_working_dir
-          ~mcp_servers:
-            [
-              Backend_types.make_mcp_server_config ~name:"epure"
-                ~command:"epure" ~args:["mcp"] ();
-            ]
-          ~lsp_servers:[lsp_server] ()
-      in
+      let spec = config_loading_spec relative_working_dir in
       with_cwd root @@ fun () ->
       with_env "CABAL_PROCESS_GROUP_LAUNCHER" launcher @@ fun () ->
       with_path_prefix fake_dir @@ fun () ->
@@ -1394,22 +1413,54 @@ printf '%%s\n' "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"$SESSI
       | Failed message -> Alcotest.fail message
       | Timeout -> Alcotest.fail "relative config fake timed out"
       | Cancelled -> Alcotest.fail "relative config fake was cancelled") ;
-      let captured = read_file capture in
-      let expected_config = Filename.concat absolute_working_dir "opencode.json" in
+      ignore
+        (assert_captured_generated_config
+           ~expected_cwd:absolute_working_dir
+           capture))
+
+let test_symlink_parent_working_dir_does_not_select_lexical_decoy_config () =
+  with_tmpdir (fun root ->
+      let physical_container = Filename.concat root "physical/container" in
+      let link_target = Filename.concat physical_container "child" in
+      let intended_working_dir = Filename.concat physical_container "target" in
+      let decoy_working_dir = Filename.concat root "target" in
+      List.iter
+        (fun path -> ensure_parent_dir (Filename.concat path "placeholder"))
+        [link_target; intended_working_dir; decoy_working_dir] ;
+      Unix.symlink link_target (Filename.concat root "link") ;
+      let decoy_config = Filename.concat decoy_working_dir "opencode.json" in
+      let decoy_content = {|{"marker":"DECOY_CONFIG"}|} in
+      write_file decoy_config decoy_content ;
+      let fake_dir = Filename.concat root "fake-bin" in
+      Unix.mkdir fake_dir 0o700 ;
+      let capture = Filename.concat root "captured-symlink-config" in
+      write_config_capture_opencode
+        (Filename.concat fake_dir "opencode")
+        capture ;
+      let launcher = Filename.concat fake_dir "process-group-launcher" in
+      write_process_group_launcher launcher ;
+      let relative_working_dir = "link/../target" in
+      let spec = config_loading_spec relative_working_dir in
+      with_cwd root @@ fun () ->
+      with_env "CABAL_PROCESS_GROUP_LAUNCHER" launcher @@ fun () ->
+      with_path_prefix fake_dir @@ fun () ->
+      Eio_posix.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      let result = Opencode_cli.run_task ~sw ~env spec in
+      (match result.status with
+      | Backend_types.Success -> ()
+      | Failed message -> Alcotest.fail message
+      | Timeout -> Alcotest.fail "symlink config fake timed out"
+      | Cancelled -> Alcotest.fail "symlink config fake was cancelled") ;
+      let loaded =
+        assert_captured_generated_config ~expected_cwd:intended_working_dir capture
+      in
       Alcotest.(check bool)
-        "child cwd is nested project" true
-        (String.starts_with ~prefix:(absolute_working_dir ^ "\n") captured) ;
-      Alcotest.(check bool)
-        "child receives absolute config for its cwd" true
-        (contains_str captured ("\n" ^ expected_config ^ "\n")) ;
-      Alcotest.(check bool)
-        "requested MCP config loaded" true
-        (contains_str captured {|
-    "epure": {|}) ;
-      Alcotest.(check bool)
-        "requested LSP config loaded" true
-        (contains_str captured {|
-    "test-lsp": {|}))
+        "decoy config was not loaded" false
+        (contains_str loaded "DECOY_CONFIG") ;
+      Alcotest.(check string)
+        "decoy config remains untouched" decoy_content
+        (read_file decoy_config))
 
 let rec project_root_from path =
   if Sys.file_exists (Filename.concat path "dune-project") then path
@@ -1481,6 +1532,7 @@ let test_interface_documents_network_and_macos_trust_scope () =
       "/Library/Managed Preferences";
       "administrator-trusted";
       "OS shell network";
+      "resolved by the child from its actual";
     ]
 
 let test_opencode_capabilities_remain_unpromoted () =
@@ -1515,9 +1567,9 @@ let command_tests =
     ( "deny hostile subagent delegation",
       `Quick,
       test_fixed_policy_denies_hostile_subagent_delegation );
-    ( "absolutize nested relative config path",
+    ( "use child-relative config path",
       `Quick,
-      test_build_invocation_absolutizes_nested_relative_config_path );
+      test_build_invocation_uses_child_relative_config_path );
     ( "reject invalid working directory without disclosure",
       `Quick,
       test_build_invocation_rejects_invalid_working_dir_without_disclosure );
@@ -1545,6 +1597,9 @@ let command_tests =
     ( "load MCP/LSP config from nested relative working directory",
       `Quick,
       test_run_loads_mcp_lsp_config_from_nested_relative_working_dir );
+    ( "symlink parent cannot select lexical decoy config",
+      `Quick,
+      test_symlink_parent_working_dir_does_not_select_lexical_decoy_config );
     ( "media/web probe offline self-test",
       `Quick,
       test_media_web_probe_offline_self_test );

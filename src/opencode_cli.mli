@@ -134,9 +134,10 @@ type backend_invocation = {
     emit one [--file] pair per path. Session reuse and [resume_session_id] fail
     closed while the runtime capability remains disabled. Web policy maps only
     to fixed [websearch]/[webfetch]/[codesearch] permission documents, with
-    [task] delegation denied for every web mode. Relative working directories
-    are lexically resolved to an absolute [OPENCODE_CONFIG] path without
-    filesystem traversal.
+    [task] delegation denied for every web mode. [OPENCODE_CONFIG] is the exact
+    child-relative [opencode.json] name, resolved by the child from its actual
+    working directory after Cabal changes cwd. Cabal does not separately
+    normalize the config path and working directory.
 
     The result contains direct argv, stdin, and redacted argv. No filesystem or
     registry access occurs. *)

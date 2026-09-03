@@ -273,11 +273,12 @@ than inferring the role from attacker-controlled text metadata.
   managed config may define an `explore` subagent that allows `webfetch`, but the
   selected agent cannot delegate to it. The final top-level permission merge
   also pins the native-tool ceiling after other config scopes.
-- A relative `working_dir` is resolved lexically against Cabal's current
-  directory before process spawn, and the generated `OPENCODE_CONFIG` value is
-  absolute when the child changes to that working directory. This resolution
-  does not call `realpath`, stat, or open a working-directory component; invalid
-  path input produces a fixed redacted error.
+- `OPENCODE_CONFIG` is the exact child-relative name `opencode.json`. OpenCode
+  resolves it from the child's actual working directory after Cabal changes cwd,
+  so symlink-plus-`..` resolution cannot diverge from the directory where Cabal
+  generated the MCP/LSP config. Cabal does not lexically normalize the config
+  path separately from the process cwd. Invalid working-directory input still
+  produces a fixed redacted error.
 - At baseline, the explicit project file is loaded before
   `OPENCODE_CONFIG_CONTENT`, and `OPENCODE_PERMISSION` is applied after managed
   config. `OPENCODE_TEST_MANAGED_CONFIG_DIR` redirects only file-based managed
