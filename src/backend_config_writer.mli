@@ -158,9 +158,12 @@ val managed_body_hash :
 
     The project root is resolved once, absolute paths and traversal components
     are rejected, and every existing parent/target component is checked with
-    [lstat] immediately before reads, exclusive temporary-file creation, and
-    atomic replacement. Symlink components fail with [Unsafe_project_path]
-    before content is written. OCaml's portable Unix API exposes no
+    [lstat] immediately before reads, unique same-directory temporary files are
+    opened with [O_EXCL] at mode [0600], and successful writes use atomic
+    replacement. Only the exact temporary inode created by the current call is
+    eligible for cleanup on an unsuccessful exit; collisions and stale files
+    are never deleted. Symlink components fail with [Unsafe_project_path] before
+    content is written. OCaml's portable Unix API exposes no
     descriptor-relative [openat]/[renameat] write surface, so a hostile process
     with concurrent rename access retains a residual parent-component TOCTOU;
     callers should prevent concurrent workspace mutation during config setup. *)
@@ -192,4 +195,18 @@ module Private : sig
       unreadable, non-regular, or racy paths return [Unsafe]. *)
   val inspect_project_file :
     project_dir:string -> relative_path:string -> project_file_read
+
+  (** Deterministic failure/collision seam for the production atomic writer.
+      [nonce_for_attempt] controls only the validated basename suffix; temporary
+      files always remain beside the target. [after_write] runs after complete
+      write and [fsync], while the owned descriptor is still open. Every raised
+      exception closes it and removes only the matching owned inode. *)
+  val atomic_write_file_with_hooks :
+    ?managed_namespace:Backend_types.managed_namespace ->
+    ?nonce_for_attempt:(int -> string) ->
+    ?after_write:(string -> unit) ->
+    project_root:string ->
+    relative_path:string ->
+    string ->
+    unit
 end

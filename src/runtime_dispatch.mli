@@ -10,9 +10,10 @@
     Every call resolves one bound {!Registry.Validated} entry snapshot. Raw
     runtime-only registrations are rejected and no independent descriptor lookup
     can lend static claims to an override. Dispatch applies the caller's
-    explicit {!Task_preflight.limits}, checks the entry's effective capabilities
-    before allocating or reading sealed inputs, applies its installed-version
-    policy, checks availability, and only then invokes
+    explicit {!Task_preflight.limits}, rejects a typed entry quarantine before
+    any preflight or process side effect, checks the entry's effective
+    capabilities before allocating or reading sealed inputs, applies its
+    installed-version policy, checks availability, and only then invokes
     {!Json_schema_enforcer.run_task}. Whole-entry replacements
     installed after a dispatcher/completer is constructed are visible on the
     next invocation. The resolved entry and one sealed attachment set are
@@ -24,6 +25,8 @@ type error =
   | Invalid_timeout
   | Backend_not_registered
   | Runtime_registration_untrusted
+  | Backend_quarantined of Runtime_entry.quarantine_reason
+      (** The resolved validated entry disables central task dispatch. *)
   | Preflight_failed of Task_preflight.error
   | Backend_version_unsupported
   | Version_check_failed
@@ -75,12 +78,13 @@ val render_detailed_error : detailed_error -> string
     authorization before retryable physical cleanup begins. *)
 type prepared
 
-(** Resolve, validate capabilities, preflight and seal attachment bytes,
+(** Resolve, reject any typed quarantine, validate capabilities, preflight and
+    seal attachment bytes,
     version-check, and availability-check a task exactly once, returning the
-    entry snapshot used by execution and retries. Capability rejection occurs
-    before staging allocation or attachment reads. Abandoned pending values are
-    cleaned when [sw] releases; an executing owner retains sole cleanup
-    responsibility. *)
+    entry snapshot used by execution and retries. Quarantine rejection occurs
+    immediately after validated entry lookup; capability rejection occurs before
+    staging allocation or attachment reads. Abandoned pending values are cleaned
+    when [sw] releases; an executing owner retains sole cleanup responsibility. *)
 val prepare :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
@@ -135,6 +139,7 @@ module Private : sig
     limits:Task_preflight.limits ->
     backend_id:string ->
     ?context:Task_execution_context.t ->
+    ?on_prepare_inputs:(unit -> unit) ->
     ?on_staging_directory:(string -> unit) ->
     ?on_staged_file:(string -> Unix.file_descr -> unit) ->
     ?on_cleanup_attempt:(unit -> unit) ->
@@ -148,6 +153,7 @@ module Private : sig
     backend_id:string ->
     ?on_event:(Task_event.t -> unit) ->
     ?on_raw_line:(string -> unit) ->
+    ?on_prepare_inputs:(unit -> unit) ->
     ?on_staging_directory:(string -> unit) ->
     ?on_staged_file:(string -> Unix.file_descr -> unit) ->
     ?on_cleanup_attempt:(unit -> unit) ->

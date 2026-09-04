@@ -256,6 +256,49 @@ let replace_field name replacement fields =
       if field_name = name then (field_name, replacement) else (field_name, value))
     fields
 
+let remove_field name fields =
+  List.filter (fun (field_name, _) -> field_name <> name) fields
+
+let map_record_fields record_type transform = function
+  | `Assoc fields as record -> (
+      match List.assoc_opt "type" fields with
+      | Some (`String value) when value = record_type -> `Assoc (transform fields)
+      | _ -> record)
+  | record -> record
+
+let mutate_stream_records transform stream =
+  jsonl_records stream |> List.map transform |> jsonl_of_records
+
+let map_tool_requests transform fields =
+  List.map
+    (fun (field_name, value) ->
+      if field_name = "toolRequests" then
+        match value with
+        | `List requests -> (field_name, `List (List.map transform requests))
+        | _ -> (field_name, value)
+      else (field_name, value))
+    fields
+
+let map_result_usage transform fields =
+  List.map
+    (fun (field_name, value) ->
+      if field_name = "usage" then
+        match value with
+        | `Assoc usage -> (field_name, `Assoc (transform usage))
+        | _ -> (field_name, value)
+      else (field_name, value))
+    fields
+
+let map_usage_code_changes transform fields =
+  List.map
+    (fun (field_name, value) ->
+      if field_name = "codeChanges" then
+        match value with
+        | `Assoc code_changes -> (field_name, `Assoc (transform code_changes))
+        | _ -> (field_name, value)
+      else (field_name, value))
+    fields
+
 let replace_tool_name name stream =
   let replace_request = function
     | `Assoc fields -> `Assoc (replace_field "name" (`String name) fields)
@@ -676,6 +719,233 @@ let test_protocol_rejects_mcp_updates_and_workspace_changes () =
   in
   expect_protocol_rejection "workspace changes in terminal usage" changed_usage
 
+let test_protocol_rejects_non_exact_shape_mutations () =
+  let plain = successful_jsonl () in
+  let tool = successful_tool_jsonl () in
+  let mutate_data record_type transform stream =
+    mutate_stream_records (map_record_data record_type transform) stream
+  in
+  let mutate_fields record_type transform stream =
+    mutate_stream_records (map_record_fields record_type transform) stream
+  in
+  let prepend_aux record_type data =
+    jsonl_of_records
+      (event ~id:("aux-" ^ record_type) ~type_:record_type (`Assoc data)
+      :: jsonl_records plain)
+  in
+  let reasoning_with_extra =
+    jsonl_records plain
+    |> List.concat_map (fun record ->
+           match record with
+           | `Assoc fields
+             when List.assoc_opt "type" fields
+                  = Some (`String "assistant.turn_start") ->
+               [
+                 record;
+                 event ~id:"aux-reasoning" ~type_:"assistant.reasoning"
+                   (`Assoc
+                     [
+                       ("content", `String "private reasoning");
+                       ("reasoningId", `String "reason-1");
+                       ("privatePath", `String "/private/reasoning");
+                     ]);
+               ]
+           | _ -> [record])
+    |> jsonl_of_records
+  in
+  let request_transform transform = function
+    | `Assoc fields -> `Assoc (transform fields)
+    | value -> value
+  in
+  let cases =
+    [
+      ( "extra top-level envelope field",
+        mutate_fields "user.message"
+          (fun fields -> ("privatePath", `String "/private/top") :: fields)
+          plain );
+      ( "duplicate top-level envelope field",
+        mutate_fields "user.message"
+          (fun fields -> fields @ [("timestamp", `String "duplicate")])
+          plain );
+      ( "user payload extra field",
+        mutate_data "user.message"
+          (fun fields -> ("privatePath", `String "/private/user") :: fields)
+          plain );
+      ( "user payload missing field",
+        mutate_data "user.message" (remove_field "content") plain );
+      ( "turn-start payload extra field",
+        mutate_data "assistant.turn_start"
+          (fun fields -> ("status", `String "private") :: fields)
+          plain );
+      ( "assistant payload extra privatePath",
+        mutate_data "assistant.message"
+          (fun fields -> ("privatePath", `String "/private/assistant") :: fields)
+          plain );
+      ( "assistant payload missing field",
+        mutate_data "assistant.message" (remove_field "messageId") plain );
+      ( "tool request missing arguments",
+        mutate_data "assistant.message"
+          (map_tool_requests (request_transform (remove_field "arguments")))
+          tool );
+      ( "tool request arguments not object",
+        mutate_data "assistant.message"
+          (map_tool_requests
+             (request_transform
+                (replace_field "arguments" (`String "/private/argument"))))
+          tool );
+      ( "tool request duplicate field",
+        mutate_data "assistant.message"
+          (map_tool_requests
+             (request_transform (fun fields ->
+                  fields @ [("name", `String "view")])))
+          tool );
+      ( "tool-start payload extra field",
+        mutate_data "tool.execution_start"
+          (fun fields -> ("status", `String "started") :: fields)
+          tool );
+      ( "tool-complete payload error field",
+        mutate_data "tool.execution_complete"
+          (fun fields -> ("error", `String "private failure") :: fields)
+          tool );
+      ( "turn-end payload extra field",
+        mutate_data "assistant.turn_end"
+          (fun fields -> ("status", `String "finished") :: fields)
+          plain );
+      ( "result status field",
+        mutate_fields "result"
+          (fun fields -> ("status", `String "success") :: fields)
+          plain );
+      ( "result error field",
+        mutate_fields "result"
+          (fun fields -> ("error", `String "private error") :: fields)
+          plain );
+      ( "usage extra field",
+        mutate_fields "result"
+          (map_result_usage (fun fields -> ("status", `String "ok") :: fields))
+          plain );
+      ( "usage duplicate field",
+        mutate_fields "result"
+          (map_result_usage (fun fields ->
+               fields @ [("premiumRequests", `Float 1.0)]))
+          plain );
+      ( "MCP-loaded payload extra field",
+        prepend_aux "session.mcp_servers_loaded"
+          [("servers", `List []); ("status", `String "loaded")] );
+      ( "skills-loaded payload extra field",
+        prepend_aux "session.skills_loaded"
+          [("skills", `List []); ("privatePath", `String "/private/skill")] );
+      ( "session-info payload extra field",
+        prepend_aux "session.info"
+          [
+            ("infoType", `String "notice");
+            ("message", `String "message");
+            ("status", `String "private");
+          ] );
+      ( "tools-updated payload extra field",
+        prepend_aux "session.tools_updated"
+          [("model", `String "model"); ("tools", `List [`String "shell"])] );
+      ("reasoning payload extra field", reasoning_with_extra);
+    ]
+  in
+  List.iter
+    (fun (label, stream) -> expect_protocol_rejection label stream)
+    cases
+
+let test_protocol_rejects_unexpected_numeric_kinds_and_ranges () =
+  let plain = successful_jsonl () in
+  let mutate_data record_type transform stream =
+    mutate_stream_records (map_record_data record_type transform) stream
+  in
+  let mutate_fields record_type transform stream =
+    mutate_stream_records (map_record_fields record_type transform) stream
+  in
+  let mutate_usage transform =
+    mutate_fields "result" (map_result_usage transform) plain
+  in
+  let mutate_code_changes transform =
+    mutate_usage (map_usage_code_changes transform)
+  in
+  let cases =
+    [
+      ( "floating outputTokens",
+        mutate_data "assistant.message"
+          (replace_field "outputTokens" (`Float 7.0)) plain );
+      ( "negative outputTokens",
+        mutate_data "assistant.message" (replace_field "outputTokens" (`Int (-1)))
+          plain );
+      ( "oversized outputTokens",
+        mutate_data "assistant.message"
+          (replace_field "outputTokens" (`Intlit "4611686018427387904"))
+          plain );
+      ( "floating session duration",
+        mutate_usage (replace_field "sessionDurationMs" (`Float 1000.0)) );
+      ( "negative session duration",
+        mutate_usage (replace_field "sessionDurationMs" (`Int (-1))) );
+      ( "oversized session duration",
+        mutate_usage
+          (replace_field "sessionDurationMs" (`Intlit "4611686018427387904")) );
+      ( "floating API duration",
+        mutate_usage (replace_field "totalApiDurationMs" (`Float 500.0)) );
+      ( "negative API duration",
+        mutate_usage (replace_field "totalApiDurationMs" (`Int (-1))) );
+      ( "oversized API duration",
+        mutate_usage
+          (replace_field "totalApiDurationMs" (`Intlit "4611686018427387904")) );
+      ( "floating lines added",
+        mutate_code_changes (replace_field "linesAdded" (`Float 0.0)) );
+      ( "negative lines added",
+        mutate_code_changes (replace_field "linesAdded" (`Int (-1))) );
+      ( "floating lines removed",
+        mutate_code_changes (replace_field "linesRemoved" (`Float 0.0)) );
+      ( "negative lines removed",
+        mutate_code_changes (replace_field "linesRemoved" (`Int (-1))) );
+      ( "negative premium requests",
+        mutate_usage (replace_field "premiumRequests" (`Float (-1.0))) );
+      ( "oversized premium requests",
+        mutate_usage
+          (replace_field "premiumRequests" (`Intlit "4611686018427387904")) );
+      ( "floating exit code",
+        mutate_fields "result" (replace_field "exitCode" (`Float 0.0)) plain );
+      ( "negative exit code",
+        mutate_fields "result" (replace_field "exitCode" (`Int (-1))) plain );
+      ( "uppercase terminal session",
+        mutate_fields "result"
+          (replace_field "sessionId"
+             (`String "123E4567-E89B-12D3-A456-426614174000"))
+          plain );
+      ( "cumulative output token overflow",
+        successful_jsonl ~prior_text:"prior" ~output_tokens:max_int () );
+    ]
+  in
+  List.iter
+    (fun (label, stream) -> expect_protocol_rejection label stream)
+    cases
+
+let test_protocol_reconstructs_only_sanitized_callbacks () =
+  let private_path = "/private/image.png" in
+  match
+    Copilot_cli.Private.reconstructed_callback_lines_of_stdout
+      (successful_tool_jsonl ())
+  with
+  | Error message -> Alcotest.fail message
+  | Ok lines ->
+      Alcotest.(check int) "exact reconstructed callback count" 2
+        (List.length lines) ;
+      List.iter
+        (fun line ->
+          Alcotest.(check bool)
+            "callback omits private tool arguments" false
+            (contains_substr line private_path))
+        lines ;
+      Alcotest.(check (list string))
+        "callbacks contain only reconstructed public record types"
+        ["assistant.message"; "result"]
+        (List.map
+           (fun line ->
+             Yojson.Safe.from_string line |> Yojson.Safe.Util.member "type"
+             |> Yojson.Safe.Util.to_string)
+           lines)
+
 let rec ensure_dir path =
   if path <> "." && path <> Filename.dirname path then begin
     ensure_dir (Filename.dirname path) ;
@@ -1049,6 +1319,15 @@ let command_tests =
     ( "protocol rejects MCP updates and workspace changes",
       `Quick,
       test_protocol_rejects_mcp_updates_and_workspace_changes );
+    ( "protocol rejects non-exact envelope and payload shapes",
+      `Quick,
+      test_protocol_rejects_non_exact_shape_mutations );
+    ( "protocol rejects unexpected numeric kinds and ranges",
+      `Quick,
+      test_protocol_rejects_unexpected_numeric_kinds_and_ranges );
+    ( "protocol reconstructs only sanitized callbacks",
+      `Quick,
+      test_protocol_reconstructs_only_sanitized_callbacks );
     ( "sensitive request rejection precedes project writes",
       `Quick,
       test_sensitive_request_rejection_precedes_project_writes );

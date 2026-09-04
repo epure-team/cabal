@@ -128,11 +128,12 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `feature_evidence`. `E2e_test` evidence names its reproducible test in
   `notes`; `Manual_probe` stores the exact command in its payload.
 - Codex has a positive PNG/JPEG media claim at baseline `0.131.0`. Copilot CLI
-  `1.0.54` is media-disabled and its runtime fails before setup/spawn because no
-  flag disables user, workspace, plugin, built-in, and account-controlled ODR
-  MCP discovery together. Authenticated attachment behavior was observed at
-  `1.0.54`, but the media capability and evidence are withdrawn because complete
-  MCP discovery isolation is unproven. Every built-in remains `Web_disabled`.
+  `1.0.54` is media-disabled and centrally quarantined before preflight or
+  setup/spawn because no flag disables user, workspace, plugin, built-in, and
+  account-controlled ODR MCP discovery together. Authenticated attachment
+  behavior was observed at `1.0.54`, but no positive media evidence is recorded
+  because complete MCP discovery isolation is unproven. Every built-in remains
+  `Web_disabled`.
   The final cached probe produced search without fetch but failed its
   content-dependent official-result assertion; live fetch is not evidence for
   the lower search-only hierarchical level. Native JSON schema evidence remains
@@ -151,15 +152,21 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `--self-test` must exercise every validator and these negative CLI paths.
 - Copilot's quarantined candidate invocation builder would pin
   `--prefer-version 1.0.54`, use repeated `--attachment` flags in caller order,
-  and validate the complete public `--output-format json
-  --stream off` protocol before releasing text/session/usage/tool events or raw
-  callbacks. `--allow-all-tools` is required by Copilot prompt mode and is safe
+  and validate exact, non-duplicate public `--output-format json --stream off`
+  envelopes and payloads before reconstructing text/session/usage/tool events or
+  callbacks. Numeric kinds/ranges, object-valued tool arguments, and complete
+  allowlisted tool lifecycles fail closed; raw records and arguments are never
+  projected. `--allow-all-tools` is required by Copilot prompt mode and is safe
   only while bounded by `--available-tools=view,grep,glob`, explicit
   shell/write/memory/URL denials, no blanket path/URL grants, and isolated
   `COPILOT_HOME`. Because those controls do not disable every MCP discovery
-  source, every task remains unsupported and must fail before project config I/O
-  or backend spawn. Media, positive web, read-only, resume/reuse, and MCP claims
-  remain disabled. The bundled Copilot YAML runtime must stay non-executable.
+  source, hardened bootstrap binds a typed `Incomplete_mcp_isolation` quarantine
+  and every task must fail centrally immediately after validated registry lookup,
+  before capability/input preflight, version/availability processes, project
+  config I/O, or backend spawn. The direct adapter rejection remains defense in
+  depth. `structured_output`, media (with no positive evidence), positive web,
+  read-only, resume/reuse, and MCP claims remain disabled. The bundled Copilot
+  YAML runtime must stay non-executable.
 
 ## Central media/schema E2E — CBL-08 P0
 
@@ -457,11 +464,13 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `session_resume = false`.
 - `Runtime_dispatch.run_task` is the central invocation path. It requires caller
   limits and resolves exactly one `Registry.Validated` entry snapshot at each
-  call; it never joins a runtime to `Backend_registry.find`. It runs
-  input/capability preflight before any process or availability side effect,
-  applies the entry's version policy, checks availability, and passes the same
-  backend through schema retries. Raw `Registry.register` entries are rejected
-  before side effects. `Enforce_baseline` keeps the missing/unparseable skip
+  call; it never joins a runtime to `Backend_registry.find`. It rejects a typed
+  entry quarantine immediately after lookup, before capability/input preflight,
+  staging, version/availability processes, config, or execution. Enabled entries
+  then run capability/input preflight, apply the entry's version policy, check
+  availability, and pass the same backend through schema retries. Raw
+  `Registry.register` entries are rejected before side effects.
+  `Enforce_baseline` keeps the missing/unparseable skip
   policy and blocks parseable below-baseline versions; `No_version_gate` skips
   stability comparison. Ordinary exceptions are sanitized; Eio cancellation,
   `Out_of_memory`, `Stack_overflow`, and `Sys.Break` propagate.
@@ -481,6 +490,12 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - `Agentic_backend.S` deliberately has no origin field, preserving downstream
   custom module source compatibility. YAML package/config metadata is bounded to
   the latest package per id and cleared by `Registry.clear`.
+- Config artifact replacement uses unique same-directory `O_EXCL` temporary files
+  created as `0600`. Cleanup and rename proceed only while device/inode identity
+  still matches the file created by that call; stale/colliding/replaced paths are
+  never deleted or published. Portable OCaml lacks descriptor-relative
+  `openat`/`renameat`, so hosts must still exclude hostile concurrent parent
+  renames during setup.
 - Custom backends are registered additively as a validated descriptor/runtime
   pair through `Runtime_bootstrap.register_custom`; their explicit descriptor is
   the full host capability attestation and `Enforce_baseline` is the safe default.

@@ -227,6 +227,7 @@ capability_evidence = None                        (* unchanged *)
 - **Exact authenticated binary:** GitHub Copilot CLI `1.0.54`
 - **Current media outcome:** disabled; transport quarantined before spawn
 - **Current web outcome:** `Web_disabled`
+- **Current structured-output outcome:** false; the tested JSONL parser is dormant
 - **Unchanged schema outcome:** no native JSON Schema
 
 ### Authoritative public surfaces
@@ -251,21 +252,25 @@ capability_evidence = None                        (* unchanged *)
 The local npm distribution includes a bundled/minified `app.js` but not a
 maintainable upstream source tree. The adapter therefore treats the documented
 CLI and public JSONL contract as a strict boundary and fails closed on drift.
-The terminal record is exact: `type`, `timestamp`, `exitCode`, `sessionId`, and
-`usage`; `usage` is validated as `codeChanges`, `premiumRequests`,
-`sessionDurationMs`, and `totalApiDurationMs`. Nonterminal event envelopes require
-`type`, `id`, `parentId`, `timestamp`, and object `data`. Only documented session,
-user, assistant-turn/message/reasoning, tool-start, and successful tool-complete
-records are accepted. Event IDs, turn/interaction IDs, timestamp shapes,
-tool request/start/finish pairing, one canonical UUID terminal session, and one
-last zero-exit result are checked before any public projection.
+The terminal record is exact and non-duplicate: `type`, `timestamp`, `exitCode`,
+`sessionId`, and `usage`; `usage` and nested `codeChanges` use exact field sets,
+integer kinds/ranges where required, finite non-negative premium requests, and no
+workspace changes. Nonterminal event envelopes require exactly `type`, `id`,
+`parentId`, `timestamp`, and object `data`; every accepted session, user,
+assistant-turn/message/reasoning, tool-start, and successful tool-complete payload
+also has an exact field set. Event/turn/interaction/tool IDs, object-valued tool
+arguments, allowlisted request/start/finish pairing, cumulative token overflow,
+one lowercase canonical UUID terminal session, and one last zero-exit result are
+checked before projection. Raw records and tool arguments are discarded;
+callbacks are reconstructed only from validated assistant text, session identity,
+and output-token usage.
 
 ### Historical authenticated observations and offline proof
 
 Before the MCP isolation review, `tools/probe_copilot_media_web.py` produced a
 bounded, non-sensitive, exact-version authenticated observation. Attachment
-behavior was observed at `1.0.54`, but the media capability and evidence were
-withdrawn because complete MCP discovery isolation is unproven. Its `media` run
+behavior was observed at `1.0.54`, but no positive media evidence is recorded
+because complete MCP discovery isolation is unproven. Its `media` run
 used deterministic blue PNG and red JPEG fixtures
 with spaces in their paths, repeated `--attachment` flags in caller order,
 explicit `--add-dir`, and `--disallow-temp-dir`. It passed the ordered answer,
@@ -279,9 +284,10 @@ The probe's credential-free `--self-test` remains authoritative for its local
 mechanics. It exercises every mode validator, deterministic fixture magic and
 permissions, ordered/swapped/omitted media controls, exact URL web content,
 strict public record shapes, forbidden/failed/cross-turn/outstanding tools,
-nonempty MCP, workspace changes, extra fields, malformed output, timeouts,
-process start/decode failures, interruption, redaction, and a real subprocess
-invalid-argument check. Positional `selftest` remains a compatibility alias.
+nonempty MCP, workspace changes, missing/extra/duplicate fields, object-valued
+arguments, numeric kinds/ranges and overflow, malformed output, timeouts, process
+start/decode failures, interruption, redaction, and a real subprocess invalid-
+argument check. Positional `selftest` remains a compatibility alias.
 
 The live `web-disabled` investigation now runs an exact-URL `web_fetch` positive
 control first, proving credentials, network, and tool functionality, then a
@@ -306,11 +312,16 @@ ODR MCP sources, and `--additional-mcp-config` augments rather than replaces the
 effective configuration. Server names cannot be known safely in advance for
 per-server disable flags. Cabal therefore cannot establish an empty effective
 MCP set before process start. Every task fails with a fixed diagnostic before
-project setup or backend spawn; project MCP files are never generated or
-overwritten. The descriptor and independent runtime snapshot both advertise
-`media_types = []`, `media evidence = None`, and `Web_disabled`. CBL-08 excludes
-Copilot from authenticated media selection. Streaming, session resume,
-read-only, MCP, and native JSON Schema also remain false.
+capability/input preflight, attachment staging, version/availability subprocesses,
+project setup, or backend spawn: hardened bootstrap binds
+`Dispatch_quarantined Incomplete_mcp_isolation`, which central dispatch checks
+immediately after validated registry lookup. The direct adapter rejection remains
+defense in depth. Project MCP files are never generated or overwritten. The
+descriptor, effective entry, and independent runtime snapshot all advertise
+`structured_output = false`, `media_types = []`, `media evidence = None`, and
+`Web_disabled`. CBL-08 excludes Copilot from authenticated media selection.
+Streaming, session resume, read-only, MCP, and native JSON Schema also remain
+false.
 
 The launcher installed on the probe host reported `1.0.54` while its default
 cached application could select older behavior. The dormant candidate invocation

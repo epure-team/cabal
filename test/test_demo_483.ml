@@ -392,9 +392,13 @@ let test_ac4_limitations_documented () =
         (contains_str lower
            "authenticated copilot cli 1.0.54 attachment behavior was observed") ;
       Alcotest.(check bool)
-        "AC4: config records withdrawn media capability and evidence"
+        "AC4: config records no positive media evidence"
         true
-        (contains_str lower "media capability and evidence are withdrawn") ;
+        (contains_str lower "no positive media evidence is recorded") ;
+      Alcotest.(check bool)
+        "AC4: config says dormant JSONL is not a structured-output capability"
+        true
+        (contains_str lower "structured_output: disabled while quarantined") ;
       Alcotest.(check bool)
         "AC4: config does not claim active sealed PNG/JPEG transport"
         false
@@ -423,8 +427,8 @@ let test_ac4_capability_flags_reflect_stable_limits () =
         false
         caps.streaming_output ;
       Alcotest.(check bool)
-        "AC4: structured_output = true"
-        true
+        "AC4: structured_output = false while quarantined"
+        false
         caps.structured_output ;
       Alcotest.(check bool)
         "AC4: session_resume = false"

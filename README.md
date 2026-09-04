@@ -464,19 +464,22 @@ The `cleanup_status` field addition is intentionally source-breaking for direct
 `cleanup_status = Backend_types.Cleanup_not_required`. Consumers that inspect
 central cleanup must handle `Cleanup_not_required`, `Cleanup_succeeded`, and
 `Cleanup_failed`; patterns that deliberately ignore cleanup should end in `_`.
-After preflight,
-dispatch runs one bounded version command, rejects parseable versions below the
-descriptor baseline, and checks runtime availability before execution. Missing
-or unparseable version output keeps the compatibility skip policy; availability
-must still pass. Eio cancellation is normalized to `Cancelled` only after
-task-owned cleanup completes rather than becoming an ordinary dispatch error.
+Immediately after resolving a validated entry, central dispatch checks its typed
+execution policy. A quarantined entry stops before capability preflight, input
+preparation or staging, version and availability processes, project config, and
+backend execution. For dispatch-enabled entries, preflight is followed by one
+bounded version command, rejection of parseable versions below the descriptor
+baseline, and runtime availability before execution. Missing or unparseable
+version output keeps the compatibility skip policy; availability must still pass.
+Eio cancellation is normalized to `Cancelled` only after task-owned cleanup
+completes rather than becoming an ordinary dispatch error.
 
 Codex advertises evidence-backed PNG/JPEG media transport at its enforced
 `0.131.0` baseline using `tools/probe_codex_media_web.py`. Copilot CLI `1.0.54`
 is quarantined and advertises no media support. Authenticated attachment behavior
-was observed at that version, but the media capability and evidence were
-withdrawn because complete MCP discovery isolation is unproven. That release
-cannot disable all MCP discovery sources before process start. Every built-in
+was observed at that version, but no positive media evidence is recorded because
+complete MCP discovery isolation is unproven. That release cannot disable all
+MCP discovery sources before process start. Every built-in
 advertises `Web_disabled`. The final authenticated Codex cached-mode probe
 reported `search=yes`, `fetch=no`, and `official-page=no`, but repeatedly failed
 its content-dependent official-result assertion. Live fetch behavior cannot
@@ -494,10 +497,13 @@ flags. Its prompt mode would be pinned with `--prefer-version 1.0.54`,
 `view,grep,glob`, and explicitly deny shell, write, memory, and URL tools.
 Copilot requires `--allow-all-tools` for non-interactive mode; that approval is
 bounded by the explicit available-tool list and is not accompanied by
-`--allow-all-paths`, `--allow-all-urls`, `--allow-all`, or `--yolo`. Raw JSONL
-and stderr would be withheld from `task_result`; only fully verified assistant
-text, UUID session identity, output-token usage, and paired tool events would be
-projected.
+`--allow-all-paths`, `--allow-all-urls`, `--allow-all`, or `--yolo`. The dormant
+parser accepts only exact, non-duplicate envelopes and payload schemas, strict
+numeric kinds/ranges, object-valued tool arguments, and fully paired allowlisted
+tool lifecycles. Raw JSONL, tool arguments, and stderr would be withheld from
+`task_result`; callbacks are rebuilt only from verified assistant text, canonical
+UUID session identity, and checked output-token usage. Because this transport is
+quarantined and unreachable, Copilot advertises `structured_output = false`.
 However, `1.0.54` can also discover user, workspace, installed-plugin, built-in,
 and account-controlled ODR MCP servers. `--disable-builtin-mcps` covers only one
 source and isolated `COPILOT_HOME` covers only local user/plugin state; there is
@@ -529,8 +535,9 @@ For the retained Copilot investigation probe, run
 `python3 tools/probe_copilot_media_web.py --self-test` without credentials.
 It exercises every mode validator, ordered/swapped/omitted media fixtures,
 forbidden/failed/cross-turn/outstanding tools, nonempty MCP, code changes,
-extra public fields, process failures, interruption, redaction, and subprocess
-CLI sanitization. Positional `selftest` remains a compatibility alias. Live
+missing/extra/duplicate fields, invalid tool arguments, strict numeric kinds and
+ranges, process failures, interruption, redaction, and subprocess CLI sanitization.
+Positional `selftest` remains a compatibility alias. Live
 `media` and `web-disabled` modes are investigation-only and do not back a
 descriptor claim. The `web-disabled` mode first performs an exact-URL fetch as a
 positive authentication/network/tool control, then separately requires the
@@ -612,10 +619,12 @@ sequences themselves.
 Service hosts should use `Runtime_bootstrap.Hardened_builtins`: it requires an
 empty runtime registry, does not read `HOME` or project adapter directories,
 validates all six entries against an independent bootstrap-owned full capability
-mapping and their approved static descriptors before one atomic commit, keeps Pi
-as the approved embedded YAML backend, and installs the other five handwritten
-implementations. All six use `Enforce_baseline`. Model probes are disabled unless
-explicitly requested with both `sw` and `env`. Custom backends remain supported
+mapping, typed execution policy, and their approved static descriptors before one
+atomic commit, keeps Pi as the approved embedded YAML backend, and installs the
+other five handwritten implementations. All six use `Enforce_baseline`; Copilot
+alone is published as `Dispatch_quarantined Incomplete_mcp_isolation`, while the
+other five are dispatch-enabled. Model probes are disabled unless explicitly
+requested with both `sw` and `env`. Custom backends remain supported
 additively through `Runtime_bootstrap.register_custom ~descriptor ~backend`;
 their explicit descriptor is the host's full capability attestation and uses the
 safe `Enforce_baseline` default. Collisions and invalid capability/evidence pairs
@@ -633,9 +642,12 @@ must replace the whole validated entry.
 1. Provider model-discovery probes may pass credentials in subprocess argv or URL arguments. Avoid running probe-enabled providers with live API keys in shared or untrusted environments until this path is hardened.
 2. Config artifact paths must be workspace-relative. Cabal rejects absolute,
    empty, dot, traversal, symlinked-parent, and symlink-target paths before
-   writing. Hosts must still prevent hostile concurrent workspace renames during
-   config setup because portable OCaml does not expose the required
-   descriptor-relative write/rename primitives.
+   writing. Atomic replacement uses a unique same-directory `O_EXCL` temporary
+   file created as `0600`; failure cleanup and publication act only while its
+   device/inode identity still matches, so collisions and replacements are never
+   deleted or published. Hosts must still prevent hostile concurrent workspace
+   parent renames during config setup because portable OCaml does not expose the
+   required descriptor-relative `openat`/`renameat` primitives.
 3. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
 4. Timeout coverage is still incomplete for all subprocess phases, including spawn and stdin-write edge cases.
 5. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.

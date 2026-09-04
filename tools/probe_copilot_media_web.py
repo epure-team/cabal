@@ -41,6 +41,7 @@ MODES = (
     "web-disabled",
     "web-exact-url",
 )
+OCAML_MAX_INT = (1 << (struct.calcsize("P") * 8 - 2)) - 1
 
 
 RED_JPEG = (
@@ -182,7 +183,12 @@ def invocation_argv(
 
 
 def nonnegative_int(value: Any) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > OCAML_MAX_INT
+    ):
         return None
     return value
 
@@ -190,7 +196,12 @@ def nonnegative_int(value: Any) -> int | None:
 def finite_nonnegative(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    if isinstance(value, int) and value > OCAML_MAX_INT:
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     if number < 0 or not math.isfinite(number):
         return None
     return number
@@ -221,6 +232,19 @@ def require_safe_id(value: Any) -> str:
     return identifier
 
 
+def reject_duplicate_object_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for name, member in pairs:
+        if name in value:
+            raise ProbeFailure("Copilot emitted an invalid public JSONL record")
+        value[name] = member
+    return value
+
+
+def load_public_json(line: str) -> Any:
+    return json.loads(line, object_pairs_hook=reject_duplicate_object_fields)
+
+
 def validate_usage(value: Any) -> None:
     usage = require_object(value)
     if set(usage) != {
@@ -237,8 +261,8 @@ def validate_usage(value: Any) -> None:
     if files != []:
         raise ProbeFailure("Copilot emitted an invalid terminal result")
     if (
-        code_changes["linesAdded"] != 0
-        or code_changes["linesRemoved"] != 0
+        nonnegative_int(code_changes["linesAdded"]) != 0
+        or nonnegative_int(code_changes["linesRemoved"]) != 0
         or finite_nonnegative(usage["premiumRequests"]) is None
         or nonnegative_int(usage["sessionDurationMs"]) is None
         or nonnegative_int(usage["totalApiDurationMs"]) is None
@@ -313,7 +337,7 @@ def protocol_summary(stdout: str) -> tuple[str, ...]:
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
+            record = load_public_json(line)
         except (json.JSONDecodeError, UnicodeError) as error:
             raise ProbeFailure("Copilot emitted malformed public JSONL") from error
         if not isinstance(record, dict):
@@ -340,7 +364,7 @@ def parse_public_output(stdout: str) -> PublicOutput:
         if not line.strip():
             continue
         try:
-            records.append(require_object(json.loads(line)))
+            records.append(require_object(load_public_json(line)))
         except (json.JSONDecodeError, UnicodeError) as error:
             raise ProbeFailure("Copilot emitted malformed public JSONL") from error
     if not records:
@@ -376,7 +400,7 @@ def parse_public_output(stdout: str) -> PublicOutput:
             if set(record) != {"type", "timestamp", "exitCode", "sessionId", "usage"}:
                 raise ProbeFailure("Copilot emitted an invalid terminal result")
             if (
-                record.get("exitCode") != 0
+                nonnegative_int(record.get("exitCode")) != 0
                 or active_turn is not None
                 or turns_finished == 0
             ):
@@ -465,6 +489,8 @@ def parse_public_output(stdout: str) -> PublicOutput:
             tokens = nonnegative_int(data.get("outputTokens"))
             requests = data.get("toolRequests")
             if tokens is None or not isinstance(requests, list):
+                raise ProbeFailure("Copilot emitted an invalid public JSONL record")
+            if output_tokens > OCAML_MAX_INT - tokens:
                 raise ProbeFailure("Copilot emitted an invalid public JSONL record")
             output_tokens += tokens
             if requests:
@@ -918,7 +944,7 @@ def expect_probe_failure(action: Any, label: str) -> None:
 
 
 def mutate_public_fixture(fixture: str, mutation: Any) -> str:
-    records = [json.loads(line) for line in fixture.splitlines()]
+    records = [load_public_json(line) for line in fixture.splitlines()]
     mutation(records)
     return "\n".join(json.dumps(record, separators=(",", ":")) for record in records)
 
@@ -1055,12 +1081,74 @@ def selftest() -> None:
         )
         assistant["data"]["privatePath"] = sensitive_marker
 
+    def tool_request(records: list[dict[str, Any]]) -> dict[str, Any]:
+        assistant = next(
+            record
+            for record in records
+            if record.get("type") == "assistant.message"
+            and record["data"]["toolRequests"]
+        )
+        return assistant["data"]["toolRequests"][0]
+
+    def missing_arguments(records: list[dict[str, Any]]) -> None:
+        del tool_request(records)["arguments"]
+
+    def bad_arguments(records: list[dict[str, Any]]) -> None:
+        tool_request(records)["arguments"] = sensitive_marker
+
+    def result_status(records: list[dict[str, Any]]) -> None:
+        result = next(record for record in records if record.get("type") == "result")
+        result["status"] = "success"
+
+    def result_error(records: list[dict[str, Any]]) -> None:
+        result = next(record for record in records if record.get("type") == "result")
+        result["error"] = sensitive_marker
+
+    def floating_output_tokens(records: list[dict[str, Any]]) -> None:
+        assistant = next(
+            record for record in records if record.get("type") == "assistant.message"
+        )
+        assistant["data"]["outputTokens"] = 1.0
+
+    def floating_session_duration(records: list[dict[str, Any]]) -> None:
+        result = next(record for record in records if record.get("type") == "result")
+        result["usage"]["sessionDurationMs"] = 1000.0
+
+    def floating_exit_code(records: list[dict[str, Any]]) -> None:
+        result = next(record for record in records if record.get("type") == "result")
+        result["exitCode"] = 0.0
+
+    def oversized_session_duration(records: list[dict[str, Any]]) -> None:
+        result = next(record for record in records if record.get("type") == "result")
+        result["usage"]["sessionDurationMs"] = 1 << 62
+
+    def oversized_premium_requests(records: list[dict[str, Any]]) -> None:
+        result = next(record for record in records if record.get("type") == "result")
+        result["usage"]["premiumRequests"] = 1 << 62
+
+    def cumulative_output_token_overflow(records: list[dict[str, Any]]) -> None:
+        assistants = [
+            record for record in records if record.get("type") == "assistant.message"
+        ]
+        assistants[0]["data"]["outputTokens"] = (1 << 62) - 1
+        assistants[-1]["data"]["outputTokens"] = 1
+
     for label, mutation in (
         ("failed tool", fail_tool),
         ("cross-turn tool", cross_turn),
         ("outstanding tool", outstanding_tool),
         ("workspace change", workspace_change),
         ("extra public field", extra_public_field),
+        ("missing tool arguments", missing_arguments),
+        ("non-object tool arguments", bad_arguments),
+        ("terminal status field", result_status),
+        ("terminal error field", result_error),
+        ("floating output tokens", floating_output_tokens),
+        ("floating session duration", floating_session_duration),
+        ("floating exit code", floating_exit_code),
+        ("oversized session duration", oversized_session_duration),
+        ("oversized premium requests", oversized_premium_requests),
+        ("cumulative output token overflow", cumulative_output_token_overflow),
     ):
         expect_probe_failure(
             lambda mutation=mutation: parse_public_output(
@@ -1068,6 +1156,15 @@ def selftest() -> None:
             ),
             label,
         )
+
+    duplicate_field = tool_fixture.replace(
+        '"type":"user.message"',
+        '"type":"user.message","type":"user.message"',
+        1,
+    )
+    expect_probe_failure(
+        lambda: parse_public_output(duplicate_field), "duplicate JSON object field"
+    )
 
     validate_ignored_record("session.skills_loaded", {"skills": []})
     validate_ignored_record("session.info", {"infoType": "notice", "message": "public"})

@@ -43,16 +43,19 @@
     Épure renders host-provided LSP servers into that strict JSON artifact.
 
     {b Output Format:}
-    Copilot runs with [--output-format json --stream off]. The complete public
-    JSONL stream is validated before assistant text, UUID session identity,
-    output-token usage, tool lifecycle events, or synthesized callbacks are
-    released. Callback JSON is rebuilt only from validated public fields;
-    unknown/error/truncated/mixed/post-terminal streams fail closed.
-    Raw stdout and stderr are discarded from returned results because public
-    records can repeat prompts, attachment paths, and tool arguments.
+    Authenticated [--output-format json --stream off] JSONL was observed, and the
+    dormant parser validates exact non-duplicate envelope, payload, usage,
+    session, and tool fields before reconstructing public data. Tool requests
+    require an object [arguments] field that is validated structurally and then
+    discarded. Callback JSON is rebuilt only from validated assistant text,
+    session identity, and output-token usage; unknown/error/truncated/mixed/
+    post-terminal streams fail closed. Raw stdout and stderr are never projected.
+    Because central execution is quarantined, [structured_output] remains false
+    until this transport is usable.
 
-    Media, positive web access, read-only requests, resume/reuse, and MCP are
-    currently unsupported. Native JSON Schema stays false. *)
+    Media has no positive evidence. Positive web access, read-only requests,
+    resume/reuse, and MCP are currently unsupported. Native JSON Schema stays
+    false. *)
 
 (** @inline *)
 include Agentic_backend.S
@@ -119,6 +122,12 @@ module Private : sig
       validation. *)
   val normalized_events_of_stdout :
     string -> (Task_event.payload list, string) result
+
+  (** Return only whole-stream-validated callback JSON reconstructed from
+      public assistant text, session identity, and output-token usage. Raw
+      envelopes and tool arguments are never returned. *)
+  val reconstructed_callback_lines_of_stdout :
+    string -> (string list, string) result
 
   val parse_stdout_text : string -> string
   val cleanup_retry_limit : int

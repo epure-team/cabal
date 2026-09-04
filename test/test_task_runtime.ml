@@ -66,6 +66,7 @@ let register_backend ?(session_resume = false)
         ~descriptor
         ~runtime_capabilities:descriptor.capabilities
         ~origin:Runtime_entry.Custom
+        ~execution_policy:Runtime_entry.Dispatch_enabled
         ~version_policy
     with
     | Ok entry -> entry

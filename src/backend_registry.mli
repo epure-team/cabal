@@ -90,14 +90,16 @@ type web_support = {
       (** Reproducible evidence for a positive web claim. *)
 }
 
-(** Static capability flags for a backend at its stable baseline version.
+(** Static capability flags for usable Cabal behavior at a backend's stable
+    baseline version.
 
-    These are build-time facts about what Épure supports for each backend,
-    not runtime checks. *)
+    These are build-time facts about what Épure exposes through its approved
+    transport, not runtime checks or dormant upstream mechanics. *)
 type capabilities = {
   structured_output : bool;
-      (** True when the backend emits machine-readable structured output
-          (JSON or JSONL) that Épure can parse for cost, session IDs, etc. *)
+      (** True when the approved, dispatchable transport emits machine-readable
+          structured output (JSON or JSONL) that Épure parses for cost, session
+          IDs, etc. An unreachable parser behind a quarantine remains false. *)
   streaming_output : bool;
       (** True when the backend can emit output incrementally (stream-json or
           NDJSON), enabling real-time display. *)
@@ -153,8 +155,9 @@ type descriptor = {
           single source of truth for binary names — never hardcode them
           elsewhere. *)
   baseline_version : string;
-      (** Stable upstream version Épure requires as minimum.
-          Checked at backend startup; below-baseline → refuse to run. *)
+      (** Stable upstream version Épure requires as minimum for a dispatchable
+          transport. [Enforce_baseline] checks it before execution; a centrally
+          quarantined entry stops before probing the installed version. *)
   capabilities : capabilities;
       (** Static capability flags for this backend at baseline. *)
 }

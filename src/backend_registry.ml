@@ -219,7 +219,7 @@ let builtin_backends =
       baseline_version = "1.0.54";
       capabilities =
         {
-          structured_output = true;
+          structured_output = false;
           streaming_output = false;
           session_resume = false;
           mcp_support = Mcp_none;
@@ -329,8 +329,11 @@ let unsupported_capability_notes_data =
       evidence_url =
         "https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically";
       note =
-        "Copilot programmatic CLI docs document prompt forms and silent mode, \
-         but no JSON or schema-structured output mode is documented.";
+        "Authenticated Copilot CLI 1.0.54 JSONL was observed and its dormant \
+         parser remains tested, but Cabal exposes no usable structured output \
+         while central task execution is quarantined. Public capabilities \
+         describe usable Cabal behavior rather than unreachable upstream \
+         mechanics.";
     };
     {
       backend_id = "copilot-cli";
@@ -379,7 +382,8 @@ let unsupported_capability_notes_data =
         "https://github.com/github/copilot-cli/blob/v1.0.54/README.md";
       note =
         "Authenticated Copilot CLI 1.0.54 attachment behavior was observed, \
-         but its media capability and evidence were withdrawn. The CLI can \
+         but it is historical investigation data, not positive media evidence. \
+         The CLI can \
          discover MCP servers from user, workspace, installed-plugin, built-in, \
          and account-controlled ODR sources; --disable-builtin-mcps covers only \
          built-ins and no flag disables every source before process start. \

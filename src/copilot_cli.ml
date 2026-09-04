@@ -128,7 +128,7 @@ live at `.github/copilot-instructions.md`, repository settings live at
 ## Runtime Status
 
 Authenticated Copilot CLI 1.0.54 attachment behavior was observed during the
-bounded investigation. The media capability and evidence are withdrawn because
+bounded investigation. No positive media evidence is recorded because
 complete MCP discovery isolation is unproven. The runtime is quarantined, and
 Cabal starts no Copilot task process.
 
@@ -141,7 +141,7 @@ readiness is tracked by the host's own project hook layer.
 
 ## MCP Servers
 
-MCP servers are unsupported by the hardened task transport. Cabal does not
+MCP servers are unsupported by the quarantined task transport. Cabal does not
 write repository MCP configuration for Copilot, and the runtime quarantine
 applies even when a task requests no MCP server.
 
@@ -150,7 +150,8 @@ applies even when a task requests no MCP server.
 Cabal retains a tested candidate JSONL validator for future investigation, but
 does not execute it while the runtime is quarantined. The following capabilities
 are intentionally not supported:
-- media_support: disabled; authenticated observations are investigation-only
+- structured_output: disabled while quarantined; JSONL observations are dormant
+- media_support: disabled; no positive evidence is recorded
 - streaming_output: disabled; whole-stream verification is required
 - session_resume: unsupported by the hardened adapter
 - read_only_support: task requests fail closed
@@ -414,6 +415,16 @@ let initial_protocol_state =
 let protocol_error category =
   Error ("Copilot protocol rejected: " ^ category)
 
+let contains_substring value fragment =
+  let value_length = String.length value in
+  let fragment_length = String.length fragment in
+  let rec loop offset =
+    offset + fragment_length <= value_length
+    &&
+    (String.sub value offset fragment_length = fragment || loop (offset + 1))
+  in
+  fragment_length = 0 || loop 0
+
 let member name fields = List.assoc_opt name fields
 
 let json_string = function `String value -> Some value | _ -> None
@@ -421,15 +432,10 @@ let json_string = function `String value -> Some value | _ -> None
 let json_number = function
   | `Int value -> Some (float_of_int value)
   | `Float value -> Some value
-  | `Intlit value -> (try Some (float_of_string value) with _ -> None)
   | _ -> None
 
-let nonnegative_integer json =
-  match json_number json with
-  | Some value
-    when Float.is_finite value && value >= 0.0 && Float.floor value = value
-         && value <= float_of_int max_int ->
-      Some (int_of_float value)
+let nonnegative_integer = function
+  | `Int value when value >= 0 -> Some value
   | _ -> None
 
 let safe_identifier value =
@@ -442,7 +448,7 @@ let safe_identifier value =
 
 let canonical_uuid value =
   let hex = function
-    | '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' -> true
+    | '0' .. '9' | 'a' .. 'f' -> true
     | _ -> false
   in
   let rec characters_valid index =
@@ -455,15 +461,6 @@ let canonical_uuid value =
       valid && characters_valid (index + 1)
   in
   String.length value = 36 && characters_valid 0
-
-let valid_timestamp value =
-  let valid_character = function
-    | '0' .. '9' | '-' | ':' | '.' | 'T' | 'Z' | '+' -> true
-    | _ -> false
-  in
-  let length = String.length value in
-  length >= 20 && length <= 40 && String.contains value 'T'
-  && String.for_all valid_character value
 
 let string_field name fields =
   Option.bind (member name fields) json_string
@@ -482,10 +479,7 @@ let exact_fields expected fields =
 let validate_event_envelope state fields =
   let ( let* ) = Result.bind in
   let* () =
-    if
-      List.for_all
-        (fun name -> List.mem_assoc name fields)
-        ["type"; "id"; "parentId"; "timestamp"; "data"]
+    if exact_fields ["type"; "id"; "parentId"; "timestamp"; "data"] fields
     then Ok ()
     else protocol_error "invalid event envelope"
   in
@@ -501,12 +495,12 @@ let validate_event_envelope state fields =
   in
   let* _parent_id =
     match string_field "parentId" fields with
-    | Some value when safe_identifier value -> Ok value
+    | Some value -> Ok value
     | _ -> protocol_error "invalid parent event identifier"
   in
   let* _timestamp =
     match string_field "timestamp" fields with
-    | Some value when valid_timestamp value -> Ok value
+    | Some value -> Ok value
     | _ -> protocol_error "invalid event timestamp"
   in
   let* data =
@@ -534,11 +528,15 @@ let add_tool_requests state ~turn_id requests =
       | `Assoc request_fields -> (
           match
             ( string_field "toolCallId" request_fields,
-              string_field "name" request_fields )
+              string_field "name" request_fields,
+              object_field "arguments" request_fields )
           with
-          | Some identifier, Some name
+          | Some identifier, Some name, Some _arguments
             when safe_identifier identifier && safe_identifier name
                  && allowed_tool_name name
+                 && exact_fields
+                      ["toolCallId"; "name"; "arguments"]
+                      request_fields
                  && not (List.mem_assoc identifier state.requested_tools) ->
               Ok
                 {
@@ -606,22 +604,28 @@ let validate_ignored_record state record_type data =
         && exact_fields ["servers"] data
         && member "servers" data = Some (`List [])
     | "session.skills_loaded" ->
-        not state.seen_user_message && required "skills" list_value
+        not state.seen_user_message && exact_fields ["skills"] data
+        && required "skills" list_value
     | "session.info" ->
-        not state.seen_user_message && required "infoType" string_value
+        not state.seen_user_message
+        && exact_fields ["infoType"; "message"] data
+        && required "infoType" string_value
         && required "message" string_value
     | "session.tools_updated" ->
         not state.seen_user_message && exact_fields ["model"] data
         && required "model" string_value
     | "assistant.reasoning" ->
-        Option.is_some state.active_turn && required "content" string_value
+        Option.is_some state.active_turn
+        && exact_fields ["content"; "reasoningId"] data
+        && required "content" string_value
         && required "reasoningId" string_value
     | _ -> false
   in
   if valid then Ok state else protocol_error "invalid auxiliary event"
 
-let saturating_add left right =
-  if max_int - left < right then max_int else left + right
+let add_output_tokens left right =
+  if max_int - left < right then protocol_error "invalid assistant output tokens"
+  else Ok (left + right)
 
 let terminal_cost output_tokens =
   {
@@ -662,13 +666,14 @@ let parse_result state _raw_line fields =
   in
   let* _timestamp =
     match string_field "timestamp" fields with
-    | Some value when valid_timestamp value -> Ok value
+    | Some value -> Ok value
     | _ -> protocol_error "invalid terminal timestamp"
   in
   let* exit_code =
-    match Option.bind (member "exitCode" fields) nonnegative_integer with
-    | Some value -> Ok value
+    match member "exitCode" fields with
+    | Some (`Int value) -> Ok value
     | None -> protocol_error "invalid terminal exit code"
+    | Some _ -> protocol_error "invalid terminal exit code"
   in
   let* () =
     if exit_code = 0 then Ok ()
@@ -725,7 +730,9 @@ let parse_event state _raw_line fields record_type =
   | "user.message" ->
       let valid =
         not state.seen_user_message && Option.is_none state.active_turn
-        && state.turns_finished = 0 && Option.is_some (list_field "attachments" data)
+        && state.turns_finished = 0
+        && exact_fields ["attachments"; "content"; "interactionId"] data
+        && Option.is_some (list_field "attachments" data)
         && Option.is_some (string_field "content" data)
         &&
         match string_field "interactionId" data with
@@ -741,7 +748,8 @@ let parse_event state _raw_line fields record_type =
         match (turn_id, interaction_id) with
         | Some turn_id, Some interaction_id
           when state.seen_user_message && Option.is_none state.active_turn
-               && safe_identifier turn_id && safe_identifier interaction_id ->
+               && safe_identifier turn_id && safe_identifier interaction_id
+               && exact_fields ["interactionId"; "turnId"] data ->
              Ok
                {
                  state with
@@ -771,15 +779,28 @@ let parse_event state _raw_line fields record_type =
             Some requests )
           when state.active_turn = Some turn_id
                && state.active_interaction = Some interaction_id
-               && safe_identifier message_id ->
+               && safe_identifier message_id
+               && exact_fields
+                    [
+                      "content";
+                      "interactionId";
+                      "messageId";
+                      "outputTokens";
+                      "toolRequests";
+                      "turnId";
+                    ]
+                    data ->
             let* state = add_tool_requests state ~turn_id requests in
+            let* output_tokens =
+              add_output_tokens state.output_tokens output_tokens
+            in
             Ok
               {
                 state with
                 final_text =
                   (if requests = [] && String.trim content <> "" then Some content
                    else None);
-                output_tokens = saturating_add state.output_tokens output_tokens;
+                output_tokens;
                 callback_lines_rev = [];
               }
         | _ -> protocol_error "invalid assistant message"
@@ -793,6 +814,7 @@ let parse_event state _raw_line fields record_type =
         | Some turn_id, Some identifier, Some name
           when state.active_turn = Some turn_id
                && allowed_tool_name name
+               && exact_fields ["turnId"; "toolCallId"; "toolName"] data
                && List.assoc_opt identifier state.requested_tools
                   = Some (name, turn_id)
                && not (List.mem (identifier, turn_id) state.started_tools) ->
@@ -814,16 +836,21 @@ let parse_event state _raw_line fields record_type =
         match (turn_id, identifier) with
         | Some turn_id, Some identifier
           when state.active_turn = Some turn_id && succeeded
+               && (exact_fields ["turnId"; "toolCallId"; "success"] data
+                  || exact_fields
+                       ["turnId"; "toolCallId"; "toolName"; "success"]
+                       data)
                && List.mem (identifier, turn_id) state.started_tools
                && not (List.mem (identifier, turn_id) state.completed_tools) -> (
             match List.assoc_opt identifier state.requested_tools with
             | Some (name, request_turn)
               when request_turn = turn_id && allowed_tool_name name
                    &&
-                   (match string_field "toolName" data with
-                   | None -> true
-                   | Some completed_name ->
-                       completed_name = name && allowed_tool_name completed_name) ->
+                    (match member "toolName" data with
+                    | None -> true
+                    | Some (`String completed_name) ->
+                        completed_name = name && allowed_tool_name completed_name
+                    | Some _ -> false) ->
                 Ok
                   {
                     state with
@@ -842,6 +869,7 @@ let parse_event state _raw_line fields record_type =
         match string_field "turnId" data with
         | Some turn_id
           when state.active_turn = Some turn_id
+               && exact_fields ["turnId"] data
                && List.for_all
                     (fun (identifier, (_name, request_turn)) ->
                       request_turn <> turn_id
@@ -873,8 +901,8 @@ let parse_record state raw_line json =
         protocol_error "record follows terminal result"
       else if String.equal record_type "result" then parse_result state raw_line fields
       else if
-        String.ends_with ~suffix:"result" record_type
-        || String.ends_with ~suffix:"error" record_type
+        contains_substring record_type "result"
+        || contains_substring record_type "error"
       then protocol_error "backend error record"
       else parse_event state raw_line fields record_type
   | _ -> protocol_error "record is not an object"
@@ -913,6 +941,9 @@ let verify_terminal_stdout stdout =
 
 let normalized_events_of_stdout stdout =
   Result.map (fun verified -> verified.events) (verify_stream_stdout stdout)
+
+let reconstructed_callback_lines_of_stdout stdout =
+  Result.map (fun verified -> verified.callback_lines) (verify_stream_stdout stdout)
 
 let parse_stdout_text stdout =
   match verify_terminal_stdout stdout with
@@ -1376,6 +1407,8 @@ module Private = struct
   let build_command = build_command
   let verify_terminal_stdout = verify_terminal_stdout
   let normalized_events_of_stdout = normalized_events_of_stdout
+  let reconstructed_callback_lines_of_stdout =
+    reconstructed_callback_lines_of_stdout
   let parse_stdout_text = parse_stdout_text
   let cleanup_retry_limit = cleanup_retry_limit
 

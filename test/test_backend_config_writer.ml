@@ -212,30 +212,133 @@ let test_invalid_managed_namespace_refuses_write () =
             | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> assert false))
 
-let test_existing_temp_file_is_not_removed_on_collision () =
+let test_stale_legacy_temp_does_not_poison_atomic_write () =
   with_project_dir (fun project ->
       let config_dir = Filename.concat project "config" in
       Unix.mkdir config_dir 0o755 ;
       let temp_path = Filename.concat config_dir "test.cfg.cabal-tmp" in
-      let sentinel = "concurrent writer data\n" in
+      let sentinel = "stale legacy temporary data\n" in
       let channel = open_out_bin temp_path in
       output_string channel sentinel ;
       close_out channel ;
       let artifact = make_artifact ~ownership:Epure_owned "new data\n" in
-      let collision_rejected =
-        try
-          ignore (W.write_artifact ~project_dir:project ~force:false artifact) ;
-          false
-        with Unix.Unix_error (Unix.EEXIST, _, _) -> true
-      in
+      (match W.write_artifact ~project_dir:project ~force:false artifact with
+      | W.Written path ->
+          Alcotest.(check string) "target content" "new data\n" (read_file path)
+      | _ -> Alcotest.fail "stale legacy temp poisoned a fresh atomic write") ;
       Alcotest.(check bool)
-        "exclusive temporary-file collision is rejected" true collision_rejected ;
-      Alcotest.(check bool)
-        "another writer's temporary file is preserved" true
+        "unowned legacy temporary file is preserved" true
         (Sys.file_exists temp_path) ;
       Alcotest.(check string)
-        "another writer's temporary content is unchanged" sentinel
+        "unowned legacy temporary content is unchanged" sentinel
         (read_file temp_path))
+
+let test_post_write_failure_cleans_only_owned_temp () =
+  with_project_dir (fun project ->
+      let observed_temp = ref None in
+      let observed_mode = ref None in
+      let injected = Failure "injected post-write failure" in
+      let propagated =
+        try
+          W.Private.atomic_write_file_with_hooks ~project_root:project
+            ~relative_path:"config/test.cfg"
+            ~after_write:(fun temp_path ->
+              observed_temp := Some temp_path ;
+              observed_mode := Some ((Unix.lstat temp_path).st_perm land 0o777) ;
+              raise injected)
+            "new data\n" ;
+          false
+        with Failure message -> message = "injected post-write failure"
+      in
+      Alcotest.(check bool) "injected failure propagated" true propagated ;
+      Alcotest.(check (option int))
+        "owned temporary file is created with mode 0600" (Some 0o600)
+        !observed_mode ;
+      Option.iter
+        (fun temp_path ->
+          Alcotest.(check bool)
+            "owned temporary file is removed after failure" false
+            (Sys.file_exists temp_path))
+        !observed_temp ;
+      Alcotest.(check bool)
+        "failed write never publishes target" false
+        (Sys.file_exists (Filename.concat project "config/test.cfg")))
+
+let test_unique_temp_collision_retries_without_deleting_unowned_file () =
+  with_project_dir (fun project ->
+      let config_dir = Filename.concat project "config" in
+      Unix.mkdir config_dir 0o755 ;
+      let target = Filename.concat config_dir "test.cfg" in
+      let collision = target ^ ".cabal-tmp-collision" in
+      let winner = target ^ ".cabal-tmp-winner" in
+      let sentinel = "concurrent writer data\n" in
+      let channel = open_out_bin collision in
+      output_string channel sentinel ;
+      close_out channel ;
+      let attempts = ref 0 in
+      W.Private.atomic_write_file_with_hooks ~project_root:project
+        ~relative_path:"config/test.cfg"
+        ~nonce_for_attempt:(fun attempt ->
+          incr attempts ;
+          if attempt = 0 then "collision" else "winner")
+        "new data\n" ;
+      Alcotest.(check int) "one O_EXCL collision was retried" 2 !attempts ;
+      Alcotest.(check string)
+        "colliding unowned file is unchanged" sentinel (read_file collision) ;
+      Alcotest.(check bool)
+        "successful owned temp was renamed" false (Sys.file_exists winner) ;
+      Alcotest.(check string) "target content" "new data\n" (read_file target))
+
+let test_replaced_owned_temp_is_not_published_or_deleted () =
+  with_project_dir (fun project ->
+      let replacement_path = ref None in
+      let sentinel = "replacement owned by another writer\n" in
+      let rejected =
+        try
+          W.Private.atomic_write_file_with_hooks ~project_root:project
+            ~relative_path:"config/test.cfg"
+            ~nonce_for_attempt:(fun _ -> "replaced")
+            ~after_write:(fun temp_path ->
+              Unix.unlink temp_path ;
+              let channel = open_out_bin temp_path in
+              output_string channel sentinel ;
+              close_out channel ;
+              replacement_path := Some temp_path)
+            "new data\n" ;
+          false
+        with Unix.Unix_error (Unix.EAGAIN, _, _) -> true
+      in
+      Alcotest.(check bool) "replacement is rejected before publish" true rejected ;
+      Alcotest.(check bool)
+        "target is not published" false
+        (Sys.file_exists (Filename.concat project "config/test.cfg")) ;
+      Option.iter
+        (fun path ->
+          Alcotest.(check bool) "unowned replacement is preserved" true
+            (Sys.file_exists path) ;
+          Alcotest.(check string) "unowned replacement is unchanged" sentinel
+            (read_file path))
+        !replacement_path)
+
+let test_symlink_target_never_writes_outside_workspace () =
+  with_project_dir (fun project ->
+      let outside = Filename.temp_file "cabal-cw-outside-target-" ".cfg" in
+      Fun.protect
+        ~finally:(fun () -> if Sys.file_exists outside then Unix.unlink outside)
+        (fun () ->
+          let sentinel = "outside sentinel\n" in
+          let channel = open_out_bin outside in
+          output_string channel sentinel ;
+          close_out channel ;
+          let config_dir = Filename.concat project "config" in
+          Unix.mkdir config_dir 0o755 ;
+          Unix.symlink outside (Filename.concat config_dir "test.cfg") ;
+          let artifact = make_artifact ~ownership:Epure_owned "new data\n" in
+          (match W.write_artifact ~project_dir:project ~force:false artifact with
+          | W.Unsafe_project_path _ -> ()
+          | _ -> Alcotest.fail "symlink target was accepted") ;
+          Alcotest.(check string)
+            "outside symlink target is unchanged" sentinel (read_file outside)))
 
 let test_symlinked_parent_never_writes_outside_workspace () =
   let run_case label target_for_symlink =
@@ -301,10 +404,21 @@ let () =
             `Quick
             test_invalid_managed_namespace_refuses_write;
           Alcotest.test_case
-            "temporary collision preserves the existing file" `Quick
-            test_existing_temp_file_is_not_removed_on_collision;
+            "stale legacy temporary file does not poison writes" `Quick
+            test_stale_legacy_temp_does_not_poison_atomic_write;
+          Alcotest.test_case
+            "post-write failure cleans only the owned temporary file" `Quick
+            test_post_write_failure_cleans_only_owned_temp;
+          Alcotest.test_case
+            "unique temporary collision retries safely" `Quick
+            test_unique_temp_collision_retries_without_deleting_unowned_file;
+          Alcotest.test_case
+            "replaced owned temporary file is not published or deleted" `Quick
+            test_replaced_owned_temp_is_not_published_or_deleted;
           Alcotest.test_case
             "relative and absolute parent symlinks cannot escape"
             `Quick test_symlinked_parent_never_writes_outside_workspace;
+          Alcotest.test_case "target symlink cannot escape" `Quick
+            test_symlink_target_never_writes_outside_workspace;
         ] );
     ]

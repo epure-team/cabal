@@ -134,7 +134,8 @@ let test_file_reading_capabilities () =
         d.Backend_registry.capabilities.Backend_registry.file_reading)
     ["codex"; "gemini-cli"; "copilot-cli"]
 
-(* structured_output: all built-ins expose a validated machine-readable form *)
+(* structured_output describes usable Cabal behavior. Quarantined Copilot does
+   not expose its observed dormant JSONL parser as a capability. *)
 let test_structured_output_capabilities () =
   List.iter
     (fun id ->
@@ -143,7 +144,11 @@ let test_structured_output_capabilities () =
         (id ^ " has structured_output")
         true
         d.Backend_registry.capabilities.Backend_registry.structured_output)
-    ["claude-code"; "codex"; "opencode"; "gemini-cli"; "copilot-cli"]
+    ["claude-code"; "codex"; "opencode"; "gemini-cli"] ;
+  let copilot = find_desc "copilot-cli" in
+  Alcotest.(check bool)
+    "quarantined copilot-cli has no usable structured output" false
+    copilot.capabilities.structured_output
 
 (* session_resume: claude-code, codex, and gemini-cli *)
 let test_session_resume_capabilities () =
@@ -705,7 +710,7 @@ let () =
             `Quick
             test_file_reading_capabilities;
           Alcotest.test_case
-            "structured_output: all built-ins"
+            "structured_output: usable non-quarantined transports"
             `Quick
             test_structured_output_capabilities;
           Alcotest.test_case

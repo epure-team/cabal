@@ -143,6 +143,7 @@ let diagnostic_messages events =
 let register_pair ?session_resume ?native ?read_only ?binary_name
     ?baseline_version ?media_types ?mcp_support ?web_maximum
     ?(origin = Runtime_entry.Custom)
+    ?(execution_policy = Runtime_entry.Dispatch_enabled)
     ?(version_policy = Runtime_entry.Enforce_baseline) ~id backend =
   let descriptor =
     descriptor_for ?session_resume ?native ?read_only ?binary_name
@@ -151,7 +152,8 @@ let register_pair ?session_resume ?native ?read_only ?binary_name
   let entry =
     match
       Runtime_entry.create ~backend ~descriptor
-        ~runtime_capabilities:descriptor.capabilities ~origin ~version_policy
+        ~runtime_capabilities:descriptor.capabilities ~origin ~execution_policy
+        ~version_policy
     with
     | Ok entry -> entry
     | Error error -> Alcotest.fail (Runtime_entry.render_validation_error error)
@@ -254,11 +256,12 @@ let test_runtime_descriptor_mismatches_cannot_be_registered () =
   Alcotest.(check bool)
     "session mismatch cannot produce a validated entry" true
     (Result.is_error
-       (Runtime_entry.create ~backend:session_backend
-          ~descriptor:session_descriptor
-          ~runtime_capabilities:session_descriptor.capabilities
-          ~origin:Runtime_entry.Custom
-          ~version_policy:Runtime_entry.Enforce_baseline));
+        (Runtime_entry.create ~backend:session_backend
+           ~descriptor:session_descriptor
+           ~runtime_capabilities:session_descriptor.capabilities
+           ~origin:Runtime_entry.Custom
+           ~execution_policy:Runtime_entry.Dispatch_enabled
+           ~version_policy:Runtime_entry.Enforce_baseline));
   Alcotest.(check bool)
     "session mismatch leaves registry empty" true
     (Option.is_none (Registry.find_entry session_id));
@@ -276,11 +279,12 @@ let test_runtime_descriptor_mismatches_cannot_be_registered () =
   Alcotest.(check bool)
     "native mismatch cannot produce a validated entry" true
     (Result.is_error
-       (Runtime_entry.create ~backend:native_backend
-          ~descriptor:native_descriptor
-          ~runtime_capabilities:native_descriptor.capabilities
-          ~origin:Runtime_entry.Custom
-          ~version_policy:Runtime_entry.Enforce_baseline));
+        (Runtime_entry.create ~backend:native_backend
+           ~descriptor:native_descriptor
+           ~runtime_capabilities:native_descriptor.capabilities
+           ~origin:Runtime_entry.Custom
+           ~execution_policy:Runtime_entry.Dispatch_enabled
+           ~version_policy:Runtime_entry.Enforce_baseline));
   Alcotest.(check int) "native mismatch call count" 0 !native_calls
 
 let test_raw_claude_override_invalidates_validated_pair () =
@@ -337,6 +341,77 @@ let test_raw_claude_override_invalidates_validated_pair () =
     (Sys.file_exists version_marker);
   Alcotest.(check int) "raw override availability calls" 0 !availability_calls;
   Alcotest.(check int) "raw override backend calls" 0 !backend_calls
+
+let test_quarantined_copilot_stops_before_every_dispatch_side_effect () =
+  with_registry @@ fun () ->
+  with_temp_dir "copilot-quarantine-order" @@ fun temp_dir ->
+  let version_marker = Filename.concat temp_dir "version-process" in
+  let fake_copilot = Filename.concat temp_dir "copilot" in
+  write_executable fake_copilot
+    (Printf.sprintf
+       "#!/bin/sh\nprintf 'version process ran\\n' >> %s\nprintf '%%s\\n' \
+        '1.0.54'\n"
+       (Filename.quote version_marker)) ;
+  let descriptor =
+    match Backend_registry.find "copilot-cli" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Copilot descriptor missing"
+  in
+  let availability_calls = ref 0 in
+  let preparation_calls = ref 0 in
+  let config_setup_calls = ref 0 in
+  let task_process_calls = ref 0 in
+  let backend =
+    make_backend ~id:"copilot-cli" ~calls:task_process_calls
+      ~availability:(fun ~sw:_ ~env:_ ->
+        incr availability_calls ;
+        true)
+      (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+        incr config_setup_calls ;
+        success ())
+  in
+  let entry =
+    match
+      Runtime_entry.create ~backend ~descriptor
+        ~runtime_capabilities:descriptor.capabilities
+        ~origin:Runtime_entry.Handwritten
+        ~execution_policy:
+          (Runtime_entry.Dispatch_quarantined
+             Runtime_entry.Incomplete_mcp_isolation)
+        ~version_policy:Runtime_entry.Enforce_baseline
+    with
+    | Ok entry -> entry
+    | Error error -> Alcotest.fail (Runtime_entry.render_validation_error error)
+  in
+  Registry.register_validated entry ;
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let handle =
+    Runtime_dispatch.Private.start_task_with_input_hooks ~sw ~env ~limits
+      ~backend_id:"copilot-cli"
+      ~on_prepare_inputs:(fun () -> incr preparation_calls)
+      (spec ~working_dir:temp_dir ~mcp_servers:[] ())
+  in
+  (match Runtime_dispatch.Private.await handle with
+  | Error
+      (Runtime_dispatch.Backend_quarantined
+         Runtime_entry.Incomplete_mcp_isolation) ->
+      ()
+  | Error error ->
+      Alcotest.failf "unexpected quarantine error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "quarantined Copilot task reached execution") ;
+  Alcotest.(check bool)
+    "no version subprocess" false (Sys.file_exists version_marker) ;
+  Alcotest.(check int) "no availability check" 0 !availability_calls ;
+  Alcotest.(check int)
+    "no attachment preparation or staging" 0 !preparation_calls ;
+  Alcotest.(check int) "no project config setup" 0 !config_setup_calls ;
+  Alcotest.(check int) "no backend task process" 0 !task_process_calls ;
+  Alcotest.(check bool)
+    "no project config artifact" false
+    (Sys.file_exists (Filename.concat temp_dir ".github"))
 
 let test_invalid_preflight_never_spawns_or_calls_backend () =
   with_registry @@ fun () ->
@@ -2473,6 +2548,9 @@ let () =
             `Quick test_runtime_descriptor_mismatches_cannot_be_registered;
           Alcotest.test_case "raw Claude override invalidates validated pairing"
             `Quick test_raw_claude_override_invalidates_validated_pair;
+          Alcotest.test_case
+            "quarantined Copilot stops before every dispatch side effect" `Quick
+            test_quarantined_copilot_stops_before_every_dispatch_side_effect;
           Alcotest.test_case "invalid preflight never spawns or calls" `Quick
             test_invalid_preflight_never_spawns_or_calls_backend;
           Alcotest.test_case

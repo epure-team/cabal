@@ -422,43 +422,129 @@ let uses_sidecar_metadata artifact =
           ~managed_namespace:artifact.managed_namespace
           artifact.content)
 
-let atomic_write_file ?(managed_namespace = default_namespace) ~project_root
-    ~relative_path content =
+type owned_temp = {path : string; device : int; inode : int}
+
+let temp_create_attempt_limit = 32
+
+let valid_temp_nonce nonce =
+  let length = String.length nonce in
+  length > 0 && length <= 128
+  && String.for_all
+       (function
+         | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' -> true
+         | _ -> false)
+       nonce
+
+let default_nonce_generator () =
+  let state = Random.State.make_self_init () in
+  fun attempt ->
+    Printf.sprintf "%08x%08x%08x-%02x" (Random.State.bits state)
+      (Random.State.bits state) (Random.State.bits state) attempt
+
+let rec fstat_no_intr descriptor =
+  try Unix.fstat descriptor
+  with Unix.Unix_error (Unix.EINTR, _, _) -> fstat_no_intr descriptor
+
+let create_unique_temp ?nonce_for_attempt ~managed_namespace path =
+  let nonce_for_attempt =
+    Option.value ~default:(default_nonce_generator ()) nonce_for_attempt
+  in
+  let rec create attempt =
+    if attempt >= temp_create_attempt_limit then
+      raise (Unix.Unix_error (Unix.EEXIST, "open", path)) ;
+    let nonce = nonce_for_attempt attempt in
+    if not (valid_temp_nonce nonce) then invalid_arg "invalid temporary nonce" ;
+    let temp_path = path ^ temp_suffix managed_namespace ^ "-" ^ nonce in
+    match
+      Unix.openfile temp_path
+        [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC]
+        0o600
+    with
+    | descriptor ->
+        let opened =
+          try fstat_no_intr descriptor
+          with error ->
+            Unix.close descriptor ;
+            raise error
+        in
+        let created =
+          {path = temp_path; device = opened.st_dev; inode = opened.st_ino}
+        in
+        (try
+           Unix.fchmod descriptor 0o600 ;
+           (descriptor, created)
+         with error ->
+           Unix.close descriptor ;
+           (try
+              let current = Unix.lstat created.path in
+              if
+                current.st_kind = Unix.S_REG
+                && current.st_dev = created.device
+                && current.st_ino = created.inode
+              then Unix.unlink created.path
+            with _ -> ()) ;
+           raise error)
+    | exception Unix.Unix_error (Unix.EEXIST, _, _) -> create (attempt + 1)
+  in
+  create 0
+
+let unlink_if_owned owned =
+  try
+    let current = Unix.lstat owned.path in
+    if
+      current.st_kind = Unix.S_REG && current.st_dev = owned.device
+      && current.st_ino = owned.inode
+    then Unix.unlink owned.path
+  with Unix.Unix_error (Unix.ENOENT, _, _) -> ()
+
+let temp_is_owned owned =
+  try
+    let current = Unix.lstat owned.path in
+    current.st_kind = Unix.S_REG && current.st_dev = owned.device
+    && current.st_ino = owned.inode
+  with Unix.Unix_error (Unix.ENOENT, _, _) -> false
+
+let atomic_write_file_with_hooks ?(managed_namespace = default_namespace)
+    ?nonce_for_attempt ?after_write ~project_root ~relative_path content =
   let path, _ = safe_full_path ~project_root ~create_parent:true relative_path in
   reject_symlink_target path ;
-  let tmp_path = path ^ temp_suffix managed_namespace in
   let existing_perm =
     try Some ((Unix.lstat path).Unix.st_perm land 0o777)
     with Unix.Unix_error (Unix.ENOENT, _, _) -> None
   in
-  let descriptor =
-    Unix.openfile tmp_path
-      [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC]
-      0o600
-  in
-  (try
-     Fun.protect
-       ~finally:(fun () -> Unix.close descriptor)
-       (fun () ->
-         (match existing_perm with
-         | Some perm -> Unix.fchmod descriptor perm
-         | None -> ()) ;
-         let rec write offset =
-           if offset < String.length content then
-             let count =
-               Unix.write_substring descriptor content offset
-                 (String.length content - offset)
-             in
-             if count = 0 then raise End_of_file else write (offset + count)
-         in
-         write 0 ;
-         Unix.fsync descriptor)
-   with e ->
-     (try Unix.unlink tmp_path with _ -> ()) ;
-     raise e) ;
-  ignore (safe_full_path ~project_root ~create_parent:false relative_path) ;
-  reject_symlink_target path ;
-  Sys.rename tmp_path path
+  let owned = ref None in
+  Fun.protect
+    ~finally:(fun () -> Option.iter unlink_if_owned !owned)
+    (fun () ->
+      let descriptor, created =
+        create_unique_temp ?nonce_for_attempt ~managed_namespace path
+      in
+      owned := Some created ;
+      Fun.protect
+        ~finally:(fun () -> Unix.close descriptor)
+        (fun () ->
+          let rec write offset =
+            if offset < String.length content then
+              let count =
+                Unix.write_substring descriptor content offset
+                  (String.length content - offset)
+              in
+              if count = 0 then raise End_of_file else write (offset + count)
+          in
+          write 0 ;
+          Unix.fsync descriptor ;
+          Option.iter (fun hook -> hook created.path) after_write ;
+          Option.iter (Unix.fchmod descriptor) existing_perm) ;
+      ignore (safe_full_path ~project_root ~create_parent:false relative_path) ;
+      reject_symlink_target path ;
+      if not (temp_is_owned created) then
+        raise (Unix.Unix_error (Unix.EAGAIN, "rename", created.path)) ;
+      Unix.rename created.path path ;
+      owned := None)
+
+let atomic_write_file ?managed_namespace ~project_root ~relative_path content =
+  atomic_write_file_with_hooks ?managed_namespace ~project_root ~relative_path
+    content
 
 let relative_to_root ~project_root path =
   let prefix = project_root ^ Filename.dir_sep in
@@ -851,4 +937,5 @@ module Private = struct
     | Unsafe
 
   let inspect_project_file = inspect_project_file
+  let atomic_write_file_with_hooks = atomic_write_file_with_hooks
 end
