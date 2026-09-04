@@ -31,6 +31,7 @@ type trace_error =
 let protocol_requirements_for_backend = function
   | "codex" -> {session = true; usage = true; exact_tools = []}
   | "copilot-cli" ->
+      (* Investigation-only oracle retained for the quarantined transport. *)
       {session = true; usage = true; exact_tools = [("view", 2)]}
   | _ -> {session = false; usage = false; exact_tools = []}
 

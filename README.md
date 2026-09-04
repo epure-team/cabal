@@ -473,8 +473,10 @@ task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
 Codex advertises evidence-backed PNG/JPEG media transport at its enforced
 `0.131.0` baseline using `tools/probe_codex_media_web.py`. Copilot CLI `1.0.54`
-is quarantined and advertises no media support because that release cannot
-disable all MCP discovery sources before process start. Every built-in
+is quarantined and advertises no media support. Authenticated attachment behavior
+was observed at that version, but the media capability and evidence were
+withdrawn because complete MCP discovery isolation is unproven. That release
+cannot disable all MCP discovery sources before process start. Every built-in
 advertises `Web_disabled`. The final authenticated Codex cached-mode probe
 reported `search=yes`, `fetch=no`, and `official-page=no`, but repeatedly failed
 its content-dependent official-result assertion. Live fetch behavior cannot
@@ -484,16 +486,18 @@ attachments plus `Web_disabled`; sensitive media/web calls fail before config
 I/O or spawn unless central dispatch installed the matching sealed authorization.
 The adapters never consult mutable global registry state for that decision.
 
-Copilot's retained candidate transport accepts only centrally sealed absolute
-attachment paths, in caller order, through repeated `--attachment` flags. Prompt mode is pinned with
-`--prefer-version 1.0.54`, `--output-format json`, and `--stream off`. It uses a
-fresh private `COPILOT_HOME`, adds only the sealed staging directory, provides
-only `view,grep,glob`, and explicitly denies shell, write, memory, and URL tools.
+Copilot's retained candidate transport would accept only centrally sealed
+absolute attachment paths, in caller order, through repeated `--attachment`
+flags. Its prompt mode would be pinned with `--prefer-version 1.0.54`,
+`--output-format json`, and `--stream off`. It would use a fresh private
+`COPILOT_HOME`, add only the sealed staging directory, provide only
+`view,grep,glob`, and explicitly deny shell, write, memory, and URL tools.
 Copilot requires `--allow-all-tools` for non-interactive mode; that approval is
 bounded by the explicit available-tool list and is not accompanied by
 `--allow-all-paths`, `--allow-all-urls`, `--allow-all`, or `--yolo`. Raw JSONL
-and stderr are withheld from `task_result`; only fully verified assistant text,
-UUID session identity, output-token usage, and paired tool events are projected.
+and stderr would be withheld from `task_result`; only fully verified assistant
+text, UUID session identity, output-token usage, and paired tool events would be
+projected.
 However, `1.0.54` can also discover user, workspace, installed-plugin, built-in,
 and account-controlled ODR MCP servers. `--disable-builtin-mcps` covers only one
 source and isolated `COPILOT_HOME` covers only local user/plugin state; there is

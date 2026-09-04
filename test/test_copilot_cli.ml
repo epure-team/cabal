@@ -349,7 +349,7 @@ let media_attachment ?(id = "image") ?(path = "media/source image.png")
     size_bytes = 128;
   }
 
-let test_build_invocation_uses_exact_hardened_media_argv () =
+let test_build_invocation_builds_dormant_media_candidate () =
   let png = media_attachment Backend_types.Png in
   let jpeg =
     media_attachment ~id:"second" ~path:"media/second.jpg" Backend_types.Jpeg
@@ -731,7 +731,7 @@ let test_sensitive_request_rejection_precedes_project_writes () =
         "no project config mutation" false
         (Sys.file_exists (Filename.concat workspace ".github")))
 
-let test_project_mcp_config_rejected_before_spawn () =
+let test_runtime_quarantine_preserves_project_mcp_config_without_spawn () =
   List.iter
     (fun project_path ->
       with_tmpdir @@ fun project_dir ->
@@ -1028,10 +1028,10 @@ let command_tests =
     ( "build_command passes prompt as argument",
       `Quick,
       test_build_command_passes_prompt_as_argument );
-    ( "hardened invocation uses sealed repeated attachments",
+    ( "dormant candidate builds sealed repeated attachments",
       `Quick,
-      test_build_invocation_uses_exact_hardened_media_argv );
-    ( "hardened invocation rejects unsupported requests",
+      test_build_invocation_builds_dormant_media_candidate );
+    ( "dormant candidate rejects unsupported requests",
       `Quick,
       test_build_invocation_rejects_unsupported_requests );
     ( "terminal JSONL extracts exact public records",
@@ -1052,9 +1052,9 @@ let command_tests =
     ( "sensitive request rejection precedes project writes",
       `Quick,
       test_sensitive_request_rejection_precedes_project_writes );
-    ( "project MCP config is rejected before spawn",
+    ( "runtime quarantine preserves project MCP config without spawn",
       `Quick,
-      test_project_mcp_config_rejected_before_spawn );
+      test_runtime_quarantine_preserves_project_mcp_config_without_spawn );
     ( "isolated config cleanup is structurally reported",
       `Quick,
       test_isolated_config_cleanup_is_structural_for_all_results );

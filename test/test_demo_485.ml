@@ -205,7 +205,7 @@ let test_ac3_copilot_read_only_no_write_amplification () =
        (Copilot_cli.Private.build_invocation ~config_home:"/isolated"
           ~mcp_config_path:None (spec_ro ()))) ;
   Alcotest.(check bool)
-    "AC3: copilot still accepts its narrowed default transport"
+    "AC3: dormant Copilot builder accepts its narrowed default request"
     true
     (Result.is_ok
        (Copilot_cli.Private.build_invocation ~config_home:"/isolated"

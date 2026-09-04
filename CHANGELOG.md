@@ -15,19 +15,22 @@ by the date a change merged to `main`.
   user, workspace, installed-plugin, built-in, and account-controlled ODR MCP
   discovery; `--disable-builtin-mcps` and isolated `COPILOT_HOME` do not cover
   every source, and upstream exposes no complete disable flag. The retained
-  candidate adapter consumes only centrally sealed attachment paths,
-  preserves caller order with repeated `--attachment` flags, isolates and
-  removes `COPILOT_HOME`, and narrows prompt mode to `view,grep,glob` with
+  candidate adapter would consume only centrally sealed attachment paths,
+  preserve caller order with repeated `--attachment` flags, isolate and
+  remove `COPILOT_HOME`, and narrow prompt mode to `view,grep,glob` with
   explicit shell/write/memory/URL denial and no blanket path or URL approval.
-  Complete public JSONL is validated before text, UUID session, usage, paired
-  successful tool events, or synthesized callbacks are released; returned raw
-  stdout/stderr are withheld. Project MCP artifacts are neither generated nor
-  overwritten.
+  Complete public JSONL would be validated before text, UUID session, usage,
+  paired successful tool events, or synthesized callbacks would be released;
+  returned raw stdout/stderr would be withheld. Project MCP artifacts are
+  neither generated nor overwritten.
   Media, positive web, read-only, resume/reuse, and MCP claims remain disabled;
-  the bundled YAML route is non-executable. The credential-free `--self-test`
-  exhaustively covers mode validators, protocol failures, process faults,
-  interruption, and output sanitization. Historical authenticated media and web
-  observations remain investigation data only and do not back capability claims.
+  the bundled YAML route is non-executable. Authenticated `1.0.54` attachment
+  behavior was observed, but the media capability and evidence were withdrawn
+  because complete MCP discovery isolation is unproven. The credential-free
+  `--self-test` exhaustively covers mode validators, protocol failures, process
+  faults, interruption, and output sanitization. Historical authenticated media
+  and web observations remain investigation data only and do not back capability
+  claims.
 - **Central media + schema E2E proof (CBL-08 P0).** A new authenticated,
   `CABAL_E2E_TESTS=1`-gated harness selects evidence-backed media descriptors and
   exercises Codex PNG/JPEG upload plus native JSON Schema in one hardened

@@ -378,11 +378,13 @@ let unsupported_capability_notes_data =
       evidence_url =
         "https://github.com/github/copilot-cli/blob/v1.0.54/README.md";
       note =
-        "Copilot CLI 1.0.54 can discover MCP servers from user, workspace, \
-         installed-plugin, built-in, and account-controlled ODR sources. Its \
-         --disable-builtin-mcps flag covers only built-ins and no flag disables \
-         every source before process start, so the hardened runtime is \
-         quarantined and advertises no media support.";
+        "Authenticated Copilot CLI 1.0.54 attachment behavior was observed, \
+         but its media capability and evidence were withdrawn. The CLI can \
+         discover MCP servers from user, workspace, installed-plugin, built-in, \
+         and account-controlled ODR sources; --disable-builtin-mcps covers only \
+         built-ins and no flag disables every source before process start. \
+         Complete MCP discovery isolation is therefore unproven, so the \
+         hardened runtime is quarantined and advertises no media support.";
     };
   ]
 

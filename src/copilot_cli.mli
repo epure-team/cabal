@@ -14,12 +14,14 @@
 
     {b Configuration:}
     Copilot CLI is expected to be installed and accessible in the PATH.
-    The dormant transport builds the prompt as one argv value and supplies each
-    centrally prepared PNG/JPEG
-    once with a repeated [--attachment] flag and its private staging directory
-    is explicitly added without a blanket path grant. The invocation pins
-    [--prefer-version 1.0.54], disables remote/update/experimental behavior,
-    and limits visible tools to [view], [grep], and [glob]. Copilot requires
+    Authenticated 1.0.54 attachment behavior was observed, but the media
+    capability and evidence were withdrawn because complete MCP discovery
+    isolation is unproven. The dormant candidate builds the prompt as one argv
+    value and would supply each centrally prepared PNG/JPEG once with a repeated
+    [--attachment] flag; its private staging directory would be explicitly added
+    without a blanket path grant. The candidate invocation would pin
+    [--prefer-version 1.0.54], disable remote/update/experimental behavior, and
+    limit visible tools to [view], [grep], and [glob]. Copilot requires
     [--allow-all-tools] in prompt mode; that candidate approval is bounded by
     the visible list and explicit shell/write/memory/URL denials. User
     configuration and logs are routed through a fresh private [COPILOT_HOME]

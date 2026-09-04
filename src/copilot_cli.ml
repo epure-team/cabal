@@ -125,6 +125,13 @@ live at `.github/copilot-instructions.md`, repository settings live at
 
     Configured by the host application for this project.
 
+## Runtime Status
+
+Authenticated Copilot CLI 1.0.54 attachment behavior was observed during the
+bounded investigation. The media capability and evidence are withdrawn because
+complete MCP discovery isolation is unproven. The runtime is quarantined, and
+Cabal starts no Copilot task process.
+
 ## LSP Configuration
 
 Copilot CLI uses Language Server Protocol (LSP) for enhanced code analysis. The
@@ -135,12 +142,15 @@ readiness is tracked by the host's own project hook layer.
 ## MCP Servers
 
 MCP servers are unsupported by the hardened task transport. Cabal does not
-write repository MCP configuration for Copilot.
+write repository MCP configuration for Copilot, and the runtime quarantine
+applies even when a task requests no MCP server.
 
 ## Stable Limitations (Copilot CLI 1.0.54)
 
-Cabal validates Copilot's public JSONL and transports sealed PNG/JPEG
-attachments. The following capabilities are intentionally not supported:
+Cabal retains a tested candidate JSONL validator for future investigation, but
+does not execute it while the runtime is quarantined. The following capabilities
+are intentionally not supported:
+- media_support: disabled; authenticated observations are investigation-only
 - streaming_output: disabled; whole-stream verification is required
 - session_resume: unsupported by the hardened adapter
 - read_only_support: task requests fail closed

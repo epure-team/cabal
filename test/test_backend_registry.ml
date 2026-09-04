@@ -196,7 +196,7 @@ let test_streaming_output_capability () =
         d.Backend_registry.capabilities.Backend_registry.streaming_output)
     ["codex"; "copilot-cli"]
 
-(* The narrowed Copilot transport excludes all MCP tools. *)
+(* The quarantined Copilot descriptor exposes no MCP transport. *)
 let test_mcp_support_modes () =
   let open Backend_registry in
   let d_claude = find_desc "claude-code" in

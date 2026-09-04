@@ -776,7 +776,7 @@ let test_event_trace_contract () =
   | Error _ -> ()
   | Ok () -> Alcotest.fail "attempt start/finish disagreement was accepted"
 
-let test_copilot_requires_exactly_two_view_lifecycles () =
+let test_historical_copilot_oracle_requires_two_view_lifecycles () =
   let text = {|{"png_dominant_color":"blue","jpeg_dominant_color":"red"}|} in
   let result =
     Backend_types.make_task_result ~status:Success ~agent_text:text
@@ -838,7 +838,8 @@ let test_copilot_requires_exactly_two_view_lifecycles () =
         events
     with
     | Error _ -> ()
-    | Ok () -> Alcotest.fail (label ^ " satisfied Copilot media evidence")
+    | Ok () ->
+        Alcotest.fail (label ^ " satisfied the historical Copilot oracle")
   in
   expect_ok
     (trace
@@ -1126,8 +1127,9 @@ let () =
         [
           Alcotest.test_case "terminal and attempts are consistent" `Quick
             test_event_trace_contract;
-          Alcotest.test_case "Copilot requires exactly two view lifecycles"
-            `Quick test_copilot_requires_exactly_two_view_lifecycles;
+          Alcotest.test_case
+            "historical Copilot oracle requires exactly two view lifecycles"
+            `Quick test_historical_copilot_oracle_requires_two_view_lifecycles;
           Alcotest.test_case "tools stay within attempt boundaries" `Quick
             test_tool_events_respect_attempt_boundaries;
           Alcotest.test_case "multi-attempt tools remain isolated" `Quick

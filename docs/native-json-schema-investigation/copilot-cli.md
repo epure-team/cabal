@@ -263,7 +263,9 @@ last zero-exit result are checked before any public projection.
 ### Historical authenticated observations and offline proof
 
 Before the MCP isolation review, `tools/probe_copilot_media_web.py` produced a
-bounded, non-sensitive, exact-version authenticated observation. Its `media` run
+bounded, non-sensitive, exact-version authenticated observation. Attachment
+behavior was observed at `1.0.54`, but the media capability and evidence were
+withdrawn because complete MCP discovery isolation is unproven. Its `media` run
 used deterministic blue PNG and red JPEG fixtures
 with spaces in their paths, repeated `--attachment` flags in caller order,
 explicit `--add-dir`, and `--disallow-temp-dir`. It passed the ordered answer,
@@ -288,7 +290,7 @@ hierarchical and the probe does not implement a complete negative unrelated-URL
 matrix. Consequently the descriptor remains `Web_disabled`; the positive
 control is not promoted to capability evidence.
 
-### Hardened invocation decision
+### Runtime quarantine decision
 
 Copilot prompt mode documents `--allow-all-tools` as required. The retained
 candidate invocation bounds it with `--available-tools=view,grep,glob`, explicit
@@ -311,7 +313,7 @@ Copilot from authenticated media selection. Streaming, session resume,
 read-only, MCP, and native JSON Schema also remain false.
 
 The launcher installed on the probe host reported `1.0.54` while its default
-cached application could select older behavior. Every hardened invocation uses
-`--prefer-version 1.0.54`; the descriptor baseline is therefore `1.0.54`, the
-exact authenticated and transport-selected version, rather than an inferred
-minimum from earlier changelog entries.
+cached application could select older behavior. The dormant candidate invocation
+builder therefore pins `--prefer-version 1.0.54`; the descriptor baseline remains
+the exact authenticated and investigated version rather than an inferred minimum
+from earlier changelog entries.

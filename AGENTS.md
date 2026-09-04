@@ -130,7 +130,9 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Codex has a positive PNG/JPEG media claim at baseline `0.131.0`. Copilot CLI
   `1.0.54` is media-disabled and its runtime fails before setup/spawn because no
   flag disables user, workspace, plugin, built-in, and account-controlled ODR
-  MCP discovery together. Every built-in remains `Web_disabled`.
+  MCP discovery together. Authenticated attachment behavior was observed at
+  `1.0.54`, but the media capability and evidence are withdrawn because complete
+  MCP discovery isolation is unproven. Every built-in remains `Web_disabled`.
   The final cached probe produced search without fetch but failed its
   content-dependent official-result assertion; live fetch is not evidence for
   the lower search-only hierarchical level. Native JSON schema evidence remains
@@ -147,9 +149,9 @@ standalone OCaml library and as the backend abstraction layer vendored under
   Keep subprocesses bounded and all diagnostics fixed/sanitized; argparse errors
   and interruption must emit no usage, traceback, supplied value, or path.
   `--self-test` must exercise every validator and these negative CLI paths.
-- Copilot's quarantined candidate transport pins `--prefer-version 1.0.54`,
-  uses repeated `--attachment` flags in caller order, and validates the complete
-  public `--output-format json
+- Copilot's quarantined candidate invocation builder would pin
+  `--prefer-version 1.0.54`, use repeated `--attachment` flags in caller order,
+  and validate the complete public `--output-format json
   --stream off` protocol before releasing text/session/usage/tool events or raw
   callbacks. `--allow-all-tools` is required by Copilot prompt mode and is safe
   only while bounded by `--available-tools=view,grep,glob`, explicit
