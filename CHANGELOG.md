@@ -9,10 +9,25 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Hardened Copilot CLI media transport (CBL-07E).** Copilot CLI now enforces
+  baseline `1.0.54` and advertises evidence-backed PNG/JPEG attachments while
+  remaining `Web_disabled`, non-resumable, non-streaming, and without native
+  JSON Schema. The adapter consumes only centrally sealed attachment paths,
+  preserves caller order with repeated `--attachment` flags, isolates and
+  removes `COPILOT_HOME`, and narrows prompt mode to `view,grep,glob` with
+  explicit shell/write/memory/URL denial and no blanket path or URL approval.
+  Complete public JSONL is validated before text, UUID session, usage, paired
+  successful tool events, or callbacks are released; returned raw stdout/stderr
+  are withheld. Positive web, read-only, resume/reuse, and MCP requests fail
+  before config mutation or spawn. The bundled YAML route is non-executable.
+  Authenticated deterministic blue-PNG/red-JPEG, swapped-order, omitted-media,
+  and disabled-web controls back the claim; CBL-08 now selects Copilot media
+  without inventing a native-schema claim.
 - **Central media + schema E2E proof (CBL-08 P0).** A new authenticated,
   `CABAL_E2E_TESTS=1`-gated harness selects evidence-backed media descriptors and
-  exercises Codex PNG/JPEG upload plus native JSON Schema in one hardened
-  `Task_runtime` invocation. Runtime-generated 64×64 fixtures carry computed
+  exercises Codex PNG/JPEG upload plus native JSON Schema and Copilot PNG/JPEG
+  upload without schema, each in one hardened `Task_runtime` invocation.
+  Runtime-generated 64×64 fixtures carry computed
   size/SHA-256 metadata; a strict schema plus an exact semantic assertion makes
   the response image-dependent. The proof checks the validated descriptor/runtime
   binding, enforced baseline, explicit limits, sealed upload intent, exactly one
@@ -20,7 +35,8 @@ by the date a change merged to `main`.
   normalized output, session/usage protocol events, exactly one terminal, and
   attempt/tool lifecycle pairing by attempt and stable identity, with tool events
   confined between the exact attempt's start and finish. It selects only
-  positive-media descriptors with valid native draft 2020-12 evidence, skips
+  evidence-valid positive-media descriptors and attaches draft 2020-12 schema
+  only to independently evidence-valid native-schema backends. It skips
   genuine absent binaries only, and fails other lookup or installed
   probe/authentication errors. Credential-free PNG pixel inspection and fixed
   JPEG golden/dimension provenance reject corruption and arbitrary color labels.

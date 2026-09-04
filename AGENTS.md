@@ -127,8 +127,8 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Positive `media_support` and `web_support` claims require versioned
   `feature_evidence`. `E2e_test` evidence names its reproducible test in
   `notes`; `Manual_probe` stores the exact command in its payload.
-- Codex is the only built-in with a positive media claim: exactly PNG/JPEG at
-  baseline `0.131.0`. Every built-in, including Codex, remains `Web_disabled`.
+- Codex and Copilot CLI have positive PNG/JPEG media claims at baselines
+  `0.131.0` and `1.0.54`, respectively. Every built-in remains `Web_disabled`.
   The final cached probe produced search without fetch but failed its
   content-dependent official-result assertion; live fetch is not evidence for
   the lower search-only hierarchical level. Native JSON schema evidence remains
@@ -145,6 +145,15 @@ standalone OCaml library and as the backend abstraction layer vendored under
   Keep subprocesses bounded and all diagnostics fixed/sanitized; argparse errors
   and interruption must emit no usage, traceback, supplied value, or path.
   `--self-test` must exercise every validator and these negative CLI paths.
+- Copilot pins `--prefer-version 1.0.54`, uses repeated `--attachment` flags in
+  caller order, and validates the complete public `--output-format json
+  --stream off` protocol before releasing text/session/usage/tool events or raw
+  callbacks. `--allow-all-tools` is required by Copilot prompt mode and is safe
+  only while bounded by `--available-tools=view,grep,glob`, explicit
+  shell/write/memory/URL denials, no blanket path/URL grants, and isolated
+  `COPILOT_HOME`. Positive web, read-only, resume/reuse, and MCP requests remain
+  unsupported and must fail before config I/O or spawn. The bundled Copilot YAML
+  runtime must stay non-executable.
 
 ## Central media/schema E2E — CBL-08 P0
 
@@ -153,12 +162,13 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `test/test_media_web_schema_e2e_structure.ml` guards selection, fixtures,
   schema/semantic validation, event invariants, credential-free environment
   lookup, and Dune alias/gate wiring.
-- Select media cases only when media support is positive, native JSON Schema is
-  true, descriptor evidence is valid, and its draft is the fixture's 2020-12;
-  generic `structured_output` is insufficient. Apply the comma-separated
-  `CABAL_E2E_BACKEND` filter afterward. P0 is one central
-  `Task_runtime.start_task` invocation for Codex carrying both a runtime-generated
-  blue PNG and red JPEG with computed size/SHA-256 metadata and native schema.
+- Select every descriptor whose media support and evidence are positive and
+  valid, then apply the comma-separated `CABAL_E2E_BACKEND` filter. Supply the
+  fixture's 2020-12 schema only when native JSON Schema is independently true
+  with matching evidence; generic `structured_output` is insufficient. Each
+  selected backend gets one central `Task_runtime.start_task` invocation carrying
+  both a runtime-generated blue PNG and red JPEG with computed size/SHA-256
+  metadata. Codex receives native schema; Copilot does not.
   Never call `Agentic_backend.run_task`, `Json_schema_enforcer.run_task`, or a CLI
   directly from this proof.
 - Mirror hosts with `Runtime_bootstrap.Hardened_builtins` and fail closed on any
@@ -167,8 +177,9 @@ standalone OCaml library and as the backend abstraction layer vendored under
   detailed requested delivery plus `Cleanup_succeeded`.
 - Await normalized event delivery and require one last terminal, no post-terminal
   event, exact attempt start/finish agreement, and final public agent output.
-  Codex's public JSONL protocol additionally guarantees session and usage events;
-  a tool event is not mandatory for this image-only prompt, but any emitted tool
+  Codex's public JSONL protocol additionally guarantees session and usage events.
+  Copilot guarantees session, usage, and paired successful `view` events. A tool
+  event is not mandatory for Codex's image-only prompt, but any emitted tool
   lifecycle is valid only after that exact attempt starts and before it finishes,
   and must pair within the attempt by stable id or, only without an id, by name.
   Reject tools on unknown/pending/finished attempts, finish-before-start,
@@ -186,7 +197,7 @@ standalone OCaml library and as the backend abstraction layer vendored under
   errors, and installed CLIs with failed/malformed version, availability, or
   authentication probes are failures. Reuse `Backend_version.check_gate` for the
   enforced baseline; above-evidence versions get only a fixed advisory.
-- The native P0 execution is exactly attempt number 1, `Initial_attempt`, with
+- A native-schema execution is exactly attempt number 1, `Initial_attempt`, with
   upload delivery, exact attachment references, `Web_disabled`, no local schema
   rejection, and a successful attempt result equal to the final result. Generic
   multi-attempt validation remains capped at two and numbered contiguously from 1.
