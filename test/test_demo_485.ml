@@ -202,13 +202,13 @@ let test_ac3_copilot_read_only_no_write_amplification () =
     "AC3: copilot rejects unsupported read-only execution"
     true
     (Result.is_error
-       (Copilot_cli.build_invocation ~config_home:"/isolated"
+       (Copilot_cli.Private.build_invocation ~config_home:"/isolated"
           ~mcp_config_path:None (spec_ro ()))) ;
   Alcotest.(check bool)
     "AC3: copilot still accepts its narrowed default transport"
     true
     (Result.is_ok
-       (Copilot_cli.build_invocation ~config_home:"/isolated"
+       (Copilot_cli.Private.build_invocation ~config_home:"/isolated"
           ~mcp_config_path:None (spec_rw ())))
 
 (** {4 AC4 — Validators do not gain mutable powers accidentally} *)

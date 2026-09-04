@@ -100,6 +100,7 @@ let test_write_fresh_file_succeeds () =
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Backed_up_and_written _ -> "Backed_up_and_written"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> "Invalid_managed_namespace"
             | Written _ -> assert false))
 
@@ -117,6 +118,7 @@ let test_write_twice_is_idempotent () =
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Backed_up_and_written _ -> "Backed_up_and_written"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> "Invalid_managed_namespace"
             | Written _ | Already_current -> assert false))
 
@@ -142,7 +144,8 @@ let test_backend_project_refuses_hash_mismatch_then_force_overwrites () =
           Alcotest.fail
             "expected refusal or skip on user-modified file without force"
       | Refused_hash_mismatch _ | Skipped_user_content _ | Already_current
-      | Backed_up_and_written _ | Invalid_managed_namespace _ ->
+      | Backed_up_and_written _ | Unsafe_project_path _
+      | Invalid_managed_namespace _ ->
           ()) ;
       let forced =
         W.write_artifact ~project_dir:project ~force:true artifact_v2
@@ -174,6 +177,7 @@ let test_backend_project_refuses_hash_mismatch_then_force_overwrites () =
             | Already_current -> "Already_current"
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> "Invalid_managed_namespace"
             | Written _ | Backed_up_and_written _ -> assert false))
 
@@ -205,7 +209,62 @@ let test_invalid_managed_namespace_refuses_write () =
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Backed_up_and_written _ -> "Backed_up_and_written"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> assert false))
+
+let test_existing_temp_file_is_not_removed_on_collision () =
+  with_project_dir (fun project ->
+      let config_dir = Filename.concat project "config" in
+      Unix.mkdir config_dir 0o755 ;
+      let temp_path = Filename.concat config_dir "test.cfg.cabal-tmp" in
+      let sentinel = "concurrent writer data\n" in
+      let channel = open_out_bin temp_path in
+      output_string channel sentinel ;
+      close_out channel ;
+      let artifact = make_artifact ~ownership:Epure_owned "new data\n" in
+      let collision_rejected =
+        try
+          ignore (W.write_artifact ~project_dir:project ~force:false artifact) ;
+          false
+        with Unix.Unix_error (Unix.EEXIST, _, _) -> true
+      in
+      Alcotest.(check bool)
+        "exclusive temporary-file collision is rejected" true collision_rejected ;
+      Alcotest.(check bool)
+        "another writer's temporary file is preserved" true
+        (Sys.file_exists temp_path) ;
+      Alcotest.(check string)
+        "another writer's temporary content is unchanged" sentinel
+        (read_file temp_path))
+
+let test_symlinked_parent_never_writes_outside_workspace () =
+  let run_case label target_for_symlink =
+    with_project_dir (fun project ->
+        let outside = Filename.temp_dir ("cabal-cw-outside-" ^ label) "" in
+        Fun.protect
+          ~finally:(fun () -> rm_rf outside)
+          (fun () ->
+            let target = target_for_symlink ~project ~outside in
+            Unix.symlink target (Filename.concat project ".github") ;
+            let artifact =
+              {
+                W.backend_id = "test-backend";
+                ownership = W.Backend_project;
+                managed_namespace = BT.default_managed_namespace;
+                project_relative_path = ".github/mcp.json";
+                content = {|{"mcpServers":{"hostile":{"command":"run"}}}|};
+              }
+            in
+            (match W.write_artifact ~project_dir:project ~force:false artifact with
+            | W.Unsafe_project_path _ -> ()
+            | _ -> Alcotest.fail (label ^ " parent symlink was accepted")) ;
+            Alcotest.(check bool)
+              (label ^ " wrote nothing outside") false
+              (Sys.file_exists (Filename.concat outside "mcp.json"))))
+  in
+  run_case "relative" (fun ~project:_ ~outside ->
+      Filename.concat ".." (Filename.basename outside)) ;
+  run_case "absolute" (fun ~project:_ ~outside -> outside)
 
 let () =
   Random.self_init () ;
@@ -241,5 +300,11 @@ let () =
             "invalid managed namespace refuses to write"
             `Quick
             test_invalid_managed_namespace_refuses_write;
+          Alcotest.test_case
+            "temporary collision preserves the existing file" `Quick
+            test_existing_temp_file_is_not_removed_on_collision;
+          Alcotest.test_case
+            "relative and absolute parent symlinks cannot escape"
+            `Quick test_symlinked_parent_never_writes_outside_workspace;
         ] );
     ]

@@ -127,8 +127,10 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Positive `media_support` and `web_support` claims require versioned
   `feature_evidence`. `E2e_test` evidence names its reproducible test in
   `notes`; `Manual_probe` stores the exact command in its payload.
-- Codex and Copilot CLI have positive PNG/JPEG media claims at baselines
-  `0.131.0` and `1.0.54`, respectively. Every built-in remains `Web_disabled`.
+- Codex has a positive PNG/JPEG media claim at baseline `0.131.0`. Copilot CLI
+  `1.0.54` is media-disabled and its runtime fails before setup/spawn because no
+  flag disables user, workspace, plugin, built-in, and account-controlled ODR
+  MCP discovery together. Every built-in remains `Web_disabled`.
   The final cached probe produced search without fetch but failed its
   content-dependent official-result assertion; live fetch is not evidence for
   the lower search-only hierarchical level. Native JSON schema evidence remains
@@ -145,15 +147,17 @@ standalone OCaml library and as the backend abstraction layer vendored under
   Keep subprocesses bounded and all diagnostics fixed/sanitized; argparse errors
   and interruption must emit no usage, traceback, supplied value, or path.
   `--self-test` must exercise every validator and these negative CLI paths.
-- Copilot pins `--prefer-version 1.0.54`, uses repeated `--attachment` flags in
-  caller order, and validates the complete public `--output-format json
+- Copilot's quarantined candidate transport pins `--prefer-version 1.0.54`,
+  uses repeated `--attachment` flags in caller order, and validates the complete
+  public `--output-format json
   --stream off` protocol before releasing text/session/usage/tool events or raw
   callbacks. `--allow-all-tools` is required by Copilot prompt mode and is safe
   only while bounded by `--available-tools=view,grep,glob`, explicit
   shell/write/memory/URL denials, no blanket path/URL grants, and isolated
-  `COPILOT_HOME`. Positive web, read-only, resume/reuse, and MCP requests remain
-  unsupported and must fail before config I/O or spawn. The bundled Copilot YAML
-  runtime must stay non-executable.
+  `COPILOT_HOME`. Because those controls do not disable every MCP discovery
+  source, every task remains unsupported and must fail before project config I/O
+  or backend spawn. Media, positive web, read-only, resume/reuse, and MCP claims
+  remain disabled. The bundled Copilot YAML runtime must stay non-executable.
 
 ## Central media/schema E2E — CBL-08 P0
 
@@ -168,7 +172,8 @@ standalone OCaml library and as the backend abstraction layer vendored under
   with matching evidence; generic `structured_output` is insufficient. Each
   selected backend gets one central `Task_runtime.start_task` invocation carrying
   both a runtime-generated blue PNG and red JPEG with computed size/SHA-256
-  metadata. Codex receives native schema; Copilot does not.
+  metadata. Codex is currently the only selected media backend and receives
+  native schema; quarantined Copilot is not invoked.
   Never call `Agentic_backend.run_task`, `Json_schema_enforcer.run_task`, or a CLI
   directly from this proof.
 - Mirror hosts with `Runtime_bootstrap.Hardened_builtins` and fail closed on any
@@ -178,8 +183,10 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - Await normalized event delivery and require one last terminal, no post-terminal
   event, exact attempt start/finish agreement, and final public agent output.
   Codex's public JSONL protocol additionally guarantees session and usage events.
-  Copilot guarantees session, usage, and paired successful `view` events. A tool
-  event is not mandatory for Codex's image-only prompt, but any emitted tool
+  The retained historical Copilot validator requires session, usage, and exactly
+  two paired successful `view` events, but it is not executable evidence while
+  Copilot is quarantined. A tool event is not mandatory for Codex's image-only
+  prompt, but any emitted tool
   lifecycle is valid only after that exact attempt starts and before it finishes,
   and must pair within the attempt by stable id or, only without an id, by name.
   Reject tools on unknown/pending/finished attempts, finish-before-start,
@@ -398,17 +405,17 @@ standalone OCaml library and as the backend abstraction layer vendored under
   binary is neither built nor executed when `CABAL_E2E_TESTS` is unset.
 - `CABAL_E2E_TESTS=1` builds and runs the E2E binaries.  With no other env vars,
   `test_demo_627` is a multi-backend run over the default backend ids in
-  `libs/cabal/test/e2e_harness_config.ml` (`claude-code`, `codex`, `opencode`,
-  `copilot-cli`).  `CABAL_E2E_BACKEND` is an optional comma-separated filter for
-  manual debugging, not a required gate; `gemini-cli` is opt-in through that
-  filter.
+  `libs/cabal/test/e2e_harness_config.ml` (`claude-code`, `codex`, `opencode`).
+  Quarantined Copilot CLI 1.0.54 is excluded. `CABAL_E2E_BACKEND` is an optional
+  comma-separated filter for manual debugging, not a required gate;
+  `gemini-cli` is opt-in through that filter.
 - The shared `CABAL_E2E_MODEL` contract is removed.  Model overrides are
   backend-specific: `CABAL_E2E_MODEL_CLAUDE_CODE`, `CABAL_E2E_MODEL_CODEX`,
-  `CABAL_E2E_MODEL_COPILOT_CLI`, `CABAL_E2E_MODEL_OPENCODE`, and
-  `CABAL_E2E_MODEL_GEMINI_CLI`.  Defaults live in
+  `CABAL_E2E_MODEL_OPENCODE`, and `CABAL_E2E_MODEL_GEMINI_CLI`. Defaults live in
   `e2e_harness_config.ml`: Claude Code uses `haiku`; Codex passes no model and
-  keeps the CLI default; Copilot uses `claude-haiku-4.5`; OpenCode uses
-  `openai/gpt-5.4-mini`; Gemini uses `gemini-3-flash-preview`.
+  keeps the CLI default; OpenCode uses `openai/gpt-5.4-mini`; Gemini uses
+  `gemini-3-flash-preview`. Quarantined Copilot has no executable E2E model
+  contract.
 - The generic native-path E2E test (Story #628) lives in
   `libs/cabal/test/test_native_json_schema_backends.ml`, also gated by
   `CABAL_E2E_TESTS=1`.  It iterates every backend in `Backend_registry.all ()`

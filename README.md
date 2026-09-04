@@ -471,11 +471,11 @@ or unparseable version output keeps the compatibility skip policy; availability
 must still pass. Eio cancellation is normalized to `Cancelled` only after
 task-owned cleanup completes rather than becoming an ordinary dispatch error.
 
-Codex and Copilot CLI advertise evidence-backed PNG/JPEG media transport.
-Codex uses its enforced `0.131.0` baseline and
-`tools/probe_codex_media_web.py`; Copilot uses the enforced `1.0.54` baseline
-and `tools/probe_copilot_media_web.py`. Every built-in advertises
-`Web_disabled`. The final authenticated Codex cached-mode probe
+Codex advertises evidence-backed PNG/JPEG media transport at its enforced
+`0.131.0` baseline using `tools/probe_codex_media_web.py`. Copilot CLI `1.0.54`
+is quarantined and advertises no media support because that release cannot
+disable all MCP discovery sources before process start. Every built-in
+advertises `Web_disabled`. The final authenticated Codex cached-mode probe
 reported `search=yes`, `fetch=no`, and `official-page=no`, but repeatedly failed
 its content-dependent official-result assertion. Live fetch behavior cannot
 establish the lower search-only level in a hierarchical gate, so Cabal makes no
@@ -484,8 +484,8 @@ attachments plus `Web_disabled`; sensitive media/web calls fail before config
 I/O or spawn unless central dispatch installed the matching sealed authorization.
 The adapters never consult mutable global registry state for that decision.
 
-Copilot receives only centrally sealed absolute attachment paths, in caller
-order, through repeated `--attachment` flags. Prompt mode is pinned with
+Copilot's retained candidate transport accepts only centrally sealed absolute
+attachment paths, in caller order, through repeated `--attachment` flags. Prompt mode is pinned with
 `--prefer-version 1.0.54`, `--output-format json`, and `--stream off`. It uses a
 fresh private `COPILOT_HOME`, adds only the sealed staging directory, provides
 only `view,grep,glob`, and explicitly denies shell, write, memory, and URL tools.
@@ -494,9 +494,13 @@ bounded by the explicit available-tool list and is not accompanied by
 `--allow-all-paths`, `--allow-all-urls`, `--allow-all`, or `--yolo`. Raw JSONL
 and stderr are withheld from `task_result`; only fully verified assistant text,
 UUID session identity, output-token usage, and paired tool events are projected.
-Positive web, read-only, resume/reuse, and MCP requests fail before config I/O or
-spawn. Native JSON Schema remains false, so a schema miss uses the shared
-at-most-two-call fresh retry and resends the same sealed attachments.
+However, `1.0.54` can also discover user, workspace, installed-plugin, built-in,
+and account-controlled ODR MCP servers. `--disable-builtin-mcps` covers only one
+source and isolated `COPILOT_HOME` covers only local user/plugin state; there is
+no complete disable flag. Consequently every Copilot task fails before project
+setup or backend spawn, and media, positive web, read-only, resume/reuse, MCP,
+and native JSON Schema remain unsupported. Generated project configuration never
+contains or overwrites an MCP artifact.
 
 For authenticated media verification, install and authenticate exactly
 `codex-cli 0.131.0`, then run
@@ -517,21 +521,26 @@ search/fetch/official-page booleans. The probe
 never prints fixture, workspace, authentication, session, tool-argument, or raw
 backend data.
 
-For Copilot, authenticate exactly CLI `1.0.54`, then run
-`python3 tools/probe_copilot_media_web.py selftest`, followed by the `media` and
-`web-disabled` modes. `media` checks ordered blue-PNG/red-JPEG recognition,
-swaps the order as a causal control, removes both fixtures for an omitted-media
-control, and requires paired successful public `view` lifecycles. The disabled
-web control requires no web tool lifecycle. The probe uses the same bounded
-tool/path/config policy as the adapter and emits only sanitized summaries.
+For the retained Copilot investigation probe, run
+`python3 tools/probe_copilot_media_web.py --self-test` without credentials.
+It exercises every mode validator, ordered/swapped/omitted media fixtures,
+forbidden/failed/cross-turn/outstanding tools, nonempty MCP, code changes,
+extra public fields, process failures, interruption, redaction, and subprocess
+CLI sanitization. Positional `selftest` remains a compatibility alias. Live
+`media` and `web-disabled` modes are investigation-only and do not back a
+descriptor claim. The `web-disabled` mode first performs an exact-URL fetch as a
+positive authentication/network/tool control, then separately requires the
+denied invocation to emit no web lifecycle. All subprocesses are bounded and
+only sanitized summaries are emitted.
 
 CBL-08 adds the host-shaped proof in
 [`test/test_media_web_schema_backends.ml`](test/test_media_web_schema_backends.ml).
 It generates tiny, deterministic 64×64 blue PNG and red JPEG fixtures at runtime,
 computes attachment size and SHA-256 metadata from those bytes, and submits both
-in **one** `Task_runtime` invocation per evidence-backed media backend. Native
-schema backends such as Codex receive the strict draft 2020-12 schema; Copilot is
-tested without one and does not gain a schema claim. The response validator
+in **one** `Task_runtime` invocation per evidence-backed media backend. Codex is
+currently the only selected backend and receives the strict draft 2020-12
+schema; quarantined Copilot is excluded by its disabled media capability. The
+response validator
 requires the exact image-derived blue/red result, so constant structural
 compliance cannot pass. A
 credential-free inspector parses PNG chunks, stored DEFLATE scanlines, dimensions,
@@ -618,7 +627,11 @@ must replace the whole validated entry.
 ### Known limitations
 
 1. Provider model-discovery probes may pass credentials in subprocess argv or URL arguments. Avoid running probe-enabled providers with live API keys in shared or untrusted environments until this path is hardened.
-2. Config artifact paths are treated as trusted project-relative paths. Hosts should sanitize and validate user-supplied paths before passing artifacts into Cabal.
+2. Config artifact paths must be workspace-relative. Cabal rejects absolute,
+   empty, dot, traversal, symlinked-parent, and symlink-target paths before
+   writing. Hosts must still prevent hostile concurrent workspace renames during
+   config setup because portable OCaml does not expose the required
+   descriptor-relative write/rename primitives.
 3. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
 4. Timeout coverage is still incomplete for all subprocess phases, including spawn and stdin-write edge cases.
 5. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.
@@ -677,17 +690,16 @@ run in CI:
 
 | Binary | Purpose |
 |---|---|
-| [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the enforcer path against all default backends, or an optional filtered backend |
+| [`test/test_demo_627.ml`](test/test_demo_627.ml) | Exercises the enforcer path against all executable default backends, or an optional filtered backend |
 | [`test/test_native_json_schema_backends.ml`](test/test_native_json_schema_backends.ml) | Iterates every backend in the registry with `native_json_schema_output = true`, uses hardened runtime bootstrap, and exercises the native schema path (Story #628) |
 | [`test/test_media_web_schema_backends.ml`](test/test_media_web_schema_backends.ml) | Selects every evidence-backed positive-media descriptor, adds native draft 2020-12 schema only when advertised, and proves media through one central detailed runtime invocation per backend (CBL-08) |
 
 All three are built and run sequentially via `@e2e`. With only
 `CABAL_E2E_TESTS=1`, the alias is a multi-backend run: `test_demo_627` iterates
-the default backend set
-(`claude-code`, `codex`, `opencode`, `copilot-cli`), while
-`test_native_json_schema_backends` iterates every registry backend whose
+the default backend set (`claude-code`, `codex`, `opencode`), with quarantined
+Copilot CLI excluded, while `test_native_json_schema_backends` iterates every registry backend whose
 `native_json_schema_output = true`. The CBL-08 binary defaults to all descriptors
-with evidence-backed positive media capability, currently Codex and Copilot CLI.
+with evidence-backed positive media capability, currently Codex only.
 It supplies the fixture's draft 2020-12 schema only to descriptors carrying the
 matching native-schema claim and evidence; generic `structured_output` never
 creates a native-schema claim.
@@ -705,7 +717,6 @@ remain backend-owned (for example `.codex/config.toml`).
 | `CABAL_E2E_BACKEND` | Optional backend id filter for debugging. Omit it for the default multi-backend run. Comma-separated values are accepted. |
 | `CABAL_E2E_MODEL_CLAUDE_CODE` | Optional `claude-code` model override; default is `haiku` |
 | `CABAL_E2E_MODEL_CODEX` | Optional `codex` model override; unset means omit `-m` and keep the Codex CLI default model |
-| `CABAL_E2E_MODEL_COPILOT_CLI` | Optional `copilot-cli` model override; default is `claude-haiku-4.5` |
 | `CABAL_E2E_MODEL_OPENCODE` | Optional `opencode` model override; default is `openai/gpt-5.4-mini` |
 | `CABAL_E2E_MODEL_GEMINI_CLI` | Optional `gemini-cli` model override; default is `gemini-3-flash-preview` |
 
@@ -722,8 +733,7 @@ CABAL_E2E_TESTS=1 \
   dune build @e2e
 ```
 
-Run only one CBL-08 backend (`codex` for image/schema or `copilot-cli` for image
-transport without native schema):
+Run the current CBL-08 image/schema backend:
 
 ```bash
 CABAL_E2E_TESTS=1 \

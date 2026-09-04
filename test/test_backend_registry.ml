@@ -318,7 +318,7 @@ let test_codex_media_and_disabled_web_capabilities () =
 let test_non_codex_media_and_web_remain_disabled () =
   Backend_registry.all ()
   |> List.filter (fun (d : Backend_registry.descriptor) ->
-         d.id <> "codex" && d.id <> "copilot-cli")
+         d.id <> "codex")
   |> List.iter (fun (d : Backend_registry.descriptor) ->
          Alcotest.(check (list bool))
            (d.id ^ " remains media/web-disabled")
@@ -330,30 +330,14 @@ let test_non_codex_media_and_web_remain_disabled () =
              d.capabilities.web_support.evidence = None;
             ])
 
-let test_copilot_media_and_disabled_web_capabilities () =
+let test_copilot_media_and_web_capabilities_are_disabled () =
   let descriptor = find_desc "copilot-cli" in
   let media = descriptor.capabilities.media_support in
   Alcotest.(check bool)
-    "Copilot supports exactly PNG and JPEG"
+    "Copilot media and web remain disabled without complete MCP isolation"
     true
-    (media.media_types = [Backend_types.Png; Backend_types.Jpeg]) ;
-  (match media.evidence with
-  | None -> Alcotest.fail "Copilot media evidence is missing"
-  | Some evidence ->
-      Alcotest.(check string)
-        "Copilot media evidence version" "1.0.54" evidence.tested_at_version ;
-      Alcotest.(check bool)
-        "Copilot evidence names its reproducible proof"
-        true
-        (match evidence.test_method with
-        | Backend_types.E2e_test ->
-            contains_substring evidence.notes "test_media_web_schema_backends"
-            && contains_substring evidence.notes "probe_copilot_media_web.py"
-        | Backend_types.Manual_probe _ -> false)) ;
-  Alcotest.(check bool)
-    "Copilot web remains disabled"
-    true
-    (descriptor.capabilities.web_support.maximum = Backend_types.Web_disabled
+    (media.media_types = [] && media.evidence = None
+    && descriptor.capabilities.web_support.maximum = Backend_types.Web_disabled
     && descriptor.capabilities.web_support.evidence = None)
 
 (** {1 AC4 — backend_supports_file_reading routed through registry} *)
@@ -757,9 +741,9 @@ let () =
             `Quick
             test_codex_media_and_disabled_web_capabilities;
           Alcotest.test_case
-            "copilot media evidence and disabled web"
+            "copilot media and web remain disabled"
             `Quick
-            test_copilot_media_and_disabled_web_capabilities;
+            test_copilot_media_and_web_capabilities_are_disabled;
           Alcotest.test_case
             "other media and web support remains disabled"
             `Quick

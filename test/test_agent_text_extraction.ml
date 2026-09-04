@@ -123,14 +123,14 @@ let test_copilot_rejects_plain_stdout () =
   Alcotest.(check string)
     "plain output is not public agent text"
     ""
-    (Copilot_cli.parse_stdout_text stdout)
+    (Copilot_cli.Private.parse_stdout_text stdout)
 
 let test_copilot_rejects_truncated_stdout () =
   let stdout = "Hello world\n\n  " in
   Alcotest.(check string)
     "truncated output is not public agent text"
     ""
-    (Copilot_cli.parse_stdout_text stdout)
+    (Copilot_cli.Private.parse_stdout_text stdout)
 
 (** {1 task_result wiring}
 

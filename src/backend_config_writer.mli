@@ -41,6 +41,7 @@ type write_result =
   | Refused_hash_mismatch of string
   | Backed_up_and_written of {path : string; backup_path : string}
   | Skipped_user_content of string
+  | Unsafe_project_path of string
   | Invalid_managed_namespace of string
 
 (** Per-artifact result produced by [setup_artifacts]. *)
@@ -155,14 +156,14 @@ val managed_body_hash :
 (** [write_artifact ~project_dir ~force artifact] writes [artifact] using the
     generic ownership policy.
 
-    {b Path-traversal contract:} [artifact.project_relative_path] is appended
-    to [project_dir] verbatim. Cabal does not normalise [..] segments. The
-    caller (host application) is responsible for ensuring the path stays
-    within [project_dir]; passing a value containing [..] or an absolute
-    path will silently write outside the project tree. Use
-    {!Backend_types.validate_namespace} for the [managed_namespace] half of
-    the contract — that side is enforced here and returns
-    [Invalid_managed_namespace _]. *)
+    The project root is resolved once, absolute paths and traversal components
+    are rejected, and every existing parent/target component is checked with
+    [lstat] immediately before reads, exclusive temporary-file creation, and
+    atomic replacement. Symlink components fail with [Unsafe_project_path]
+    before content is written. OCaml's portable Unix API exposes no
+    descriptor-relative [openat]/[renameat] write surface, so a hostile process
+    with concurrent rename access retains a residual parent-component TOCTOU;
+    callers should prevent concurrent workspace mutation during config setup. *)
 val write_artifact :
   project_dir:string -> force:bool -> artifact -> write_result
 
@@ -181,3 +182,14 @@ val setup_artifacts :
     config precedence over user-global config. *)
 val precedence_warning_for :
   backend_id:string -> write_outcome:write_result option -> string option
+
+(** Security-only project path inspection shared with hardened adapters. *)
+module Private : sig
+  type project_file_read = Missing | File of string | Unsafe
+
+  (** Inspect a workspace-relative regular file without following any existing
+      parent or target symlink. Missing components return [Missing]; malformed,
+      unreadable, non-regular, or racy paths return [Unsafe]. *)
+  val inspect_project_file :
+    project_dir:string -> relative_path:string -> project_file_read
+end

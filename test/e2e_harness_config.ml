@@ -14,12 +14,11 @@ let managed_namespace : Cabal.Backend_types.managed_namespace =
     config_dir = ".cabal-tests/backend-config";
   }
 
-let all_backend_ids = ["claude-code"; "codex"; "opencode"; "copilot-cli"]
+let all_backend_ids = ["claude-code"; "codex"; "opencode"]
 
 let default_model_for_backend = function
   | "claude-code" -> Some "haiku"
   | "codex" -> None
-  | "copilot-cli" -> Some "claude-haiku-4.5"
   | "opencode" -> Some "openai/gpt-5.4-mini"
   | "gemini-cli" -> Some "gemini-3-flash-preview"
   | _ -> None
@@ -28,7 +27,6 @@ let known_model_env_vars =
   [
     ("claude-code", "CABAL_E2E_MODEL_CLAUDE_CODE");
     ("codex", "CABAL_E2E_MODEL_CODEX");
-    ("copilot-cli", "CABAL_E2E_MODEL_COPILOT_CLI");
     ("opencode", "CABAL_E2E_MODEL_OPENCODE");
     ("gemini-cli", "CABAL_E2E_MODEL_GEMINI_CLI");
   ]

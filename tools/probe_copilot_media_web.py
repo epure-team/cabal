@@ -21,19 +21,18 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-
 EXPECTED_VERSION = "1.0.54"
 PROBE_TIMEOUT_SECONDS = 180
 VERSION_TIMEOUT_SECONDS = 15
 OFFICIAL_PAGE = (
-    "https://raw.githubusercontent.com/github/copilot-cli/"
-    "v1.0.54/LICENSE.md"
+    "https://raw.githubusercontent.com/github/copilot-cli/" "v1.0.54/LICENSE.md"
 )
 OFFICIAL_PAGE_MARKER = "right-title-interest"
 SESSION_ID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 SAFE_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+PUBLIC_TOOL_NAMES = frozenset(("view", "grep", "glob", "web_fetch"))
 MODES = (
     "protocol",
     "media-png",
@@ -125,7 +124,9 @@ def require_version() -> None:
         raise ProbeFailure("Copilot version process could not start") from error
     except UnicodeError as error:
         raise ProbeFailure("Copilot version output could not be decoded") from error
-    match = re.search(r"GitHub Copilot CLI ([0-9]+\.[0-9]+\.[0-9]+)\.", completed.stdout)
+    match = re.search(
+        r"GitHub Copilot CLI ([0-9]+\.[0-9]+\.[0-9]+)\.", completed.stdout
+    )
     if completed.returncode != 0 or match is None or match.group(1) != EXPECTED_VERSION:
         raise ProbeFailure(f"probe requires exactly Copilot CLI {EXPECTED_VERSION}")
 
@@ -169,7 +170,9 @@ def invocation_argv(
         argv.append("--deny-tool=url")
     else:
         argv.append(f"--allow-url={allowed_url}")
-    for directory in sorted({attachment.resolve().parent for attachment in attachments}):
+    for directory in sorted(
+        {attachment.resolve().parent for attachment in attachments}
+    ):
         argv.extend(("--add-dir", str(directory)))
     argv.extend(("--model", "claude-haiku-4.5"))
     for attachment in attachments:
@@ -231,11 +234,11 @@ def validate_usage(value: Any) -> None:
     if set(code_changes) != {"filesModified", "linesAdded", "linesRemoved"}:
         raise ProbeFailure("Copilot emitted an invalid terminal result")
     files = code_changes["filesModified"]
-    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
+    if files != []:
         raise ProbeFailure("Copilot emitted an invalid terminal result")
     if (
-        nonnegative_int(code_changes["linesAdded"]) is None
-        or nonnegative_int(code_changes["linesRemoved"]) is None
+        code_changes["linesAdded"] != 0
+        or code_changes["linesRemoved"] != 0
         or finite_nonnegative(usage["premiumRequests"]) is None
         or nonnegative_int(usage["sessionDurationMs"]) is None
         or nonnegative_int(usage["totalApiDurationMs"]) is None
@@ -245,19 +248,26 @@ def validate_usage(value: Any) -> None:
 
 def validate_ignored_record(record_type: str, data: dict[str, Any]) -> None:
     if record_type == "session.mcp_servers_loaded":
-        servers = data.get("servers")
-        if not isinstance(servers, list):
+        if set(data) != {"servers"} or data["servers"] != []:
             raise ProbeFailure("Copilot emitted an invalid public JSONL record")
     elif record_type == "session.skills_loaded":
+        if set(data) != {"skills"}:
+            raise ProbeFailure("Copilot emitted an invalid public JSONL record")
         skills = data.get("skills")
         if not isinstance(skills, list):
             raise ProbeFailure("Copilot emitted an invalid public JSONL record")
     elif record_type == "session.info":
+        if set(data) != {"infoType", "message"}:
+            raise ProbeFailure("Copilot emitted an invalid public JSONL record")
         require_string(data.get("infoType"))
         require_string(data.get("message"))
     elif record_type == "session.tools_updated":
+        if set(data) != {"model"}:
+            raise ProbeFailure("Copilot emitted an invalid public JSONL record")
         require_string(data.get("model"))
     elif record_type == "assistant.reasoning":
+        if set(data) != {"content", "reasoningId"}:
+            raise ProbeFailure("Copilot emitted an invalid public JSONL record")
         require_string(data.get("content"))
         require_string(data.get("reasoningId"))
     else:
@@ -266,6 +276,7 @@ def validate_ignored_record(record_type: str, data: dict[str, Any]) -> None:
 
 def protocol_summary(stdout: str) -> tuple[str, ...]:
     """Return only safe record-shape metadata for initial protocol inspection."""
+
     def shape(value: Any, key: str = "") -> str:
         if value is None:
             return "null"
@@ -345,9 +356,9 @@ def parse_public_output(stdout: str) -> PublicOutput:
     turns_finished = 0
     final_text: str | None = None
     output_tokens = 0
-    requested_tools: dict[str, str] = {}
-    started_tools: dict[str, str] = {}
-    finished_tools: set[str] = set()
+    requested_tools: dict[str, tuple[str, str]] = {}
+    started_tools: dict[str, tuple[str, str]] = {}
+    finished_tools: set[tuple[str, str]] = set()
     observations: list[ToolObservation] = []
 
     ignored = {
@@ -364,7 +375,11 @@ def parse_public_output(stdout: str) -> PublicOutput:
                 raise ProbeFailure("Copilot emitted records after terminal success")
             if set(record) != {"type", "timestamp", "exitCode", "sessionId", "usage"}:
                 raise ProbeFailure("Copilot emitted an invalid terminal result")
-            if record.get("exitCode") != 0 or active_turn is not None or turns_finished == 0:
+            if (
+                record.get("exitCode") != 0
+                or active_turn is not None
+                or turns_finished == 0
+            ):
                 raise ProbeFailure("Copilot emitted no exact terminal success")
             session_id = require_string(record.get("sessionId"))
             if not SESSION_ID.fullmatch(session_id):
@@ -372,8 +387,17 @@ def parse_public_output(stdout: str) -> PublicOutput:
             validate_usage(record.get("usage"))
             if final_text is None or not final_text.strip():
                 raise ProbeFailure("Copilot emitted no final public assistant text")
-            if set(requested_tools) != set(started_tools) or set(started_tools) != finished_tools:
-                raise ProbeFailure("Copilot emitted an incomplete public tool lifecycle")
+            if (
+                set(requested_tools) != set(started_tools)
+                or {
+                    (call_id, turn_id)
+                    for call_id, (_name, turn_id) in started_tools.items()
+                }
+                != finished_tools
+            ):
+                raise ProbeFailure(
+                    "Copilot emitted an incomplete public tool lifecycle"
+                )
             return PublicOutput(
                 session_id=session_id,
                 text=final_text,
@@ -384,7 +408,7 @@ def parse_public_output(stdout: str) -> PublicOutput:
         if "result" in record_type or "error" in record_type:
             raise ProbeFailure("Copilot emitted an error record")
         required_top = {"type", "id", "parentId", "timestamp", "data"}
-        if not required_top.issubset(record):
+        if set(record) != required_top:
             raise ProbeFailure("Copilot emitted an invalid public JSONL record")
         event_id = require_safe_id(record.get("id"))
         if event_id in seen_event_ids:
@@ -404,6 +428,8 @@ def parse_public_output(stdout: str) -> PublicOutput:
         if record_type == "user.message":
             if seen_user_message or active_turn is not None or turns_finished != 0:
                 raise ProbeFailure("Copilot emitted an invalid public JSONL order")
+            if set(data) != {"attachments", "content", "interactionId"}:
+                raise ProbeFailure("Copilot emitted an invalid public JSONL record")
             attachments = data.get("attachments")
             if not isinstance(attachments, list):
                 raise ProbeFailure("Copilot emitted an invalid public JSONL record")
@@ -414,6 +440,8 @@ def parse_public_output(stdout: str) -> PublicOutput:
         if record_type == "assistant.turn_start":
             if not seen_user_message or active_turn is not None:
                 raise ProbeFailure("Copilot emitted an invalid public JSONL order")
+            if set(data) != {"interactionId", "turnId"}:
+                raise ProbeFailure("Copilot emitted an invalid public JSONL record")
             active_turn = require_safe_id(data.get("turnId"))
             active_interaction = require_safe_id(data.get("interactionId"))
             final_text = None
@@ -421,6 +449,15 @@ def parse_public_output(stdout: str) -> PublicOutput:
         if record_type == "assistant.message":
             if active_turn is None or data.get("turnId") != active_turn:
                 raise ProbeFailure("Copilot emitted an invalid public JSONL order")
+            if set(data) != {
+                "content",
+                "interactionId",
+                "messageId",
+                "outputTokens",
+                "toolRequests",
+                "turnId",
+            }:
+                raise ProbeFailure("Copilot emitted an invalid public JSONL record")
             if data.get("interactionId") != active_interaction:
                 raise ProbeFailure("Copilot emitted an invalid public JSONL record")
             content = require_string(data.get("content"))
@@ -434,11 +471,22 @@ def parse_public_output(stdout: str) -> PublicOutput:
                 final_text = None
                 for request_value in requests:
                     request = require_object(request_value)
+                    if set(request) != {"toolCallId", "name", "arguments"}:
+                        raise ProbeFailure(
+                            "Copilot emitted an invalid public tool lifecycle"
+                        )
                     call_id = require_safe_id(request.get("toolCallId"))
                     name = require_safe_id(request.get("name"))
+                    if name not in PUBLIC_TOOL_NAMES:
+                        raise ProbeFailure(
+                            "Copilot emitted an invalid public tool lifecycle"
+                        )
+                    require_object(request.get("arguments"))
                     if call_id in requested_tools:
-                        raise ProbeFailure("Copilot emitted a duplicate public tool call")
-                    requested_tools[call_id] = name
+                        raise ProbeFailure(
+                            "Copilot emitted a duplicate public tool call"
+                        )
+                    requested_tools[call_id] = (name, active_turn)
             elif content.strip():
                 final_text = content
             else:
@@ -447,27 +495,55 @@ def parse_public_output(stdout: str) -> PublicOutput:
         if record_type == "tool.execution_start":
             if active_turn is None or data.get("turnId") != active_turn:
                 raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
+            if set(data) != {"turnId", "toolCallId", "toolName"}:
+                raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
             call_id = require_safe_id(data.get("toolCallId"))
             name = require_safe_id(data.get("toolName"))
-            if requested_tools.get(call_id) != name or call_id in started_tools:
+            if name not in PUBLIC_TOOL_NAMES:
                 raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
-            started_tools[call_id] = name
+            if (
+                requested_tools.get(call_id) != (name, active_turn)
+                or call_id in started_tools
+            ):
+                raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
+            started_tools[call_id] = (name, active_turn)
             continue
         if record_type == "tool.execution_complete":
             if active_turn is None or data.get("turnId") != active_turn:
                 raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
+            if set(data) not in (
+                {"turnId", "toolCallId", "success"},
+                {"turnId", "toolCallId", "toolName", "success"},
+            ):
+                raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
             call_id = require_safe_id(data.get("toolCallId"))
             success = data.get("success")
-            if call_id not in started_tools or call_id in finished_tools:
+            started = started_tools.get(call_id)
+            if started is None or (call_id, active_turn) in finished_tools:
+                raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
+            name, started_turn = started
+            if started_turn != active_turn or (
+                "toolName" in data and data["toolName"] != name
+            ):
                 raise ProbeFailure("Copilot emitted an invalid public tool lifecycle")
             if success is not True:
                 raise ProbeFailure("Copilot emitted a failed public tool result")
-            finished_tools.add(call_id)
-            observations.append(ToolObservation(call_id, started_tools[call_id], True))
+            finished_tools.add((call_id, active_turn))
+            observations.append(ToolObservation(call_id, name, True))
             continue
         if record_type == "assistant.turn_end":
             if active_turn is None or data.get("turnId") != active_turn:
                 raise ProbeFailure("Copilot emitted an invalid public JSONL order")
+            if set(data) != {"turnId"}:
+                raise ProbeFailure("Copilot emitted an invalid public JSONL record")
+            if any(
+                request_turn == active_turn
+                and (call_id, active_turn) not in finished_tools
+                for call_id, (_name, request_turn) in requested_tools.items()
+            ):
+                raise ProbeFailure(
+                    "Copilot emitted an incomplete public tool lifecycle"
+                )
             active_turn = None
             active_interaction = None
             turns_finished += 1
@@ -566,7 +642,9 @@ def validate_public_output(mode: str, output: PublicOutput) -> None:
         if parse_answer(output.text) != expected:
             raise ProbeFailure("Copilot swapped-media control failed")
         if completed_tool_names != ["view", "view"]:
-            raise ProbeFailure("Copilot swapped-media control had no exact tool lifecycles")
+            raise ProbeFailure(
+                "Copilot swapped-media control had no exact tool lifecycles"
+            )
         return
     if mode == "media-omitted-control":
         if output.text.strip().lower() != "no-attachments" or completed_tool_names:
@@ -577,7 +655,7 @@ def validate_public_output(mode: str, output: PublicOutput) -> None:
             raise ProbeFailure("Copilot Web_disabled control failed")
         return
     if mode == "web-exact-url":
-        if OFFICIAL_PAGE_MARKER not in output.text.lower():
+        if parse_answer(output.text) != {"reservation_triplet": OFFICIAL_PAGE_MARKER}:
             raise ProbeFailure("Copilot exact-URL answer failed the content assertion")
         if completed_tool_names != ["web_fetch"]:
             raise ProbeFailure("Copilot exact-URL mode had no exact tool lifecycle")
@@ -655,9 +733,7 @@ def run_invocation(workspace: Path, argv: list[str], debug_protocol: bool) -> st
         )
         detail = redacted_diagnostic(completed.stderr, workspace, argv)
         suffix = f": {detail}" if debug_protocol and detail else ""
-        raise ProbeFailure(
-            f"Copilot probe exited unsuccessfully ({category}){suffix}"
-        )
+        raise ProbeFailure(f"Copilot probe exited unsuccessfully ({category}){suffix}")
     return completed.stdout
 
 
@@ -675,12 +751,9 @@ def run_mode(mode: str, debug_protocol: bool) -> None:
         (github_config / "copilot" / "settings.json").write_text(
             "{}\n", encoding="utf-8"
         )
-        (github_config / "lsp.json").write_text(
-            '{"lspServers":{}}\n', encoding="utf-8"
-        )
-        (github_config / "mcp.json").write_text(
-            '{"mcpServers":{}}\n', encoding="utf-8"
-        )
+        (github_config / "lsp.json").write_text('{"lspServers":{}}\n', encoding="utf-8")
+        (github_config / "mcp.json").write_text('{"mcpServers":{}}\n', encoding="utf-8")
+        (workspace / ".mcp.json").write_text('{"mcpServers":{}}\n', encoding="utf-8")
         attachments: tuple[Path, ...] = ()
         if mode in {"media", "media-png", "media-jpeg"}:
             png, jpeg = write_fixtures(workspace)
@@ -706,7 +779,14 @@ def run_mode(mode: str, debug_protocol: bool) -> None:
                 raise ProbeFailure("Copilot emitted no public JSONL records")
             validate_public_output(case, parse_public_output(stdout))
 
-        run_case(mode, attachments)
+        if mode == "web-disabled":
+            # A successful exact-URL fetch first proves that credentials,
+            # network access, and the web tool work. The following separately
+            # configured invocation must then demonstrate the active denial.
+            run_case("web-exact-url", ())
+            run_case("web-disabled", ())
+        else:
+            run_case(mode, attachments)
         if mode == "media":
             run_case("media-swapped-control", tuple(reversed(attachments)))
             for attachment in attachments:
@@ -714,52 +794,447 @@ def run_mode(mode: str, debug_protocol: bool) -> None:
             run_case("media-omitted-control", ())
 
 
-def selftest() -> None:
-    prompt = "opaque prompt"
-    first = Path("/tmp/probe attachment one.png")
-    second = Path("/tmp/probe-attachment-two.jpg")
-    argv = invocation_argv(prompt=prompt, attachments=(first, second))
-    assert argv.count("--attachment") == 2
-    prompt_index = argv.index("-p")
-    assert argv[prompt_index + 1] == prompt
-    assert "--yolo" not in argv
-    assert "--allow-all-paths" not in argv
-    assert "--allow-all-urls" not in argv
-    assert "--deny-tool=url" in argv
-    assert protocol_summary('{"type":"result","data":{"content":"secret"}}\n') == (
-        "type=result;shape=object{data:object{content:string},type:string}",
+def public_event(index: int, record_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": record_type,
+        "id": f"event-{index}",
+        "parentId": "00000000-0000-0000-0000-000000000000",
+        "timestamp": "2026-09-04T12:00:00.000Z",
+        "data": data,
+    }
+
+
+def public_jsonl_fixture(
+    text: str,
+    tools: tuple[str, ...] = (),
+    *,
+    mcp_servers: list[Any] | None = None,
+) -> str:
+    interaction_id = "interaction-1"
+    turn_id = "turn-1"
+    records: list[dict[str, Any]] = [
+        public_event(
+            1,
+            "session.mcp_servers_loaded",
+            {"servers": [] if mcp_servers is None else mcp_servers},
+        ),
+        public_event(
+            2,
+            "user.message",
+            {
+                "attachments": [],
+                "content": "private prompt",
+                "interactionId": interaction_id,
+            },
+        ),
+        public_event(
+            3,
+            "assistant.turn_start",
+            {"interactionId": interaction_id, "turnId": turn_id},
+        ),
+    ]
+    event_index = 4
+    for tool_index, tool_name in enumerate(tools, start=1):
+        call_id = f"call-{tool_index}"
+        records.extend(
+            (
+                public_event(
+                    event_index,
+                    "assistant.message",
+                    {
+                        "content": "",
+                        "interactionId": interaction_id,
+                        "messageId": f"message-{event_index}",
+                        "outputTokens": 1,
+                        "toolRequests": [
+                            {
+                                "toolCallId": call_id,
+                                "name": tool_name,
+                                "arguments": {"path": "/private/never-print"},
+                            }
+                        ],
+                        "turnId": turn_id,
+                    },
+                ),
+                public_event(
+                    event_index + 1,
+                    "tool.execution_start",
+                    {
+                        "turnId": turn_id,
+                        "toolCallId": call_id,
+                        "toolName": tool_name,
+                    },
+                ),
+                public_event(
+                    event_index + 2,
+                    "tool.execution_complete",
+                    {"turnId": turn_id, "toolCallId": call_id, "success": True},
+                ),
+            )
+        )
+        event_index += 3
+    records.extend(
+        (
+            public_event(
+                event_index,
+                "assistant.message",
+                {
+                    "content": text,
+                    "interactionId": interaction_id,
+                    "messageId": f"message-{event_index}",
+                    "outputTokens": 7,
+                    "toolRequests": [],
+                    "turnId": turn_id,
+                },
+            ),
+            public_event(event_index + 1, "assistant.turn_end", {"turnId": turn_id}),
+            {
+                "type": "result",
+                "timestamp": "2026-09-04T12:00:01.000Z",
+                "exitCode": 0,
+                "sessionId": "123e4567-e89b-12d3-a456-426614174000",
+                "usage": {
+                    "codeChanges": {
+                        "filesModified": [],
+                        "linesAdded": 0,
+                        "linesRemoved": 0,
+                    },
+                    "premiumRequests": 1.0,
+                    "sessionDurationMs": 1000,
+                    "totalApiDurationMs": 500,
+                },
+            },
+        )
     )
-    with contextlib.redirect_stderr(io.StringIO()) as stderr:
-        with patch.object(subprocess, "run", side_effect=OSError("sensitive")):
+    return "\n".join(json.dumps(record, separators=(",", ":")) for record in records)
+
+
+def expect_probe_failure(action: Any, label: str) -> None:
+    try:
+        action()
+    except ProbeFailure:
+        return
+    raise ProbeFailure(f"offline {label} self-test failed")
+
+
+def mutate_public_fixture(fixture: str, mutation: Any) -> str:
+    records = [json.loads(line) for line in fixture.splitlines()]
+    mutation(records)
+    return "\n".join(json.dumps(record, separators=(",", ":")) for record in records)
+
+
+def selftest() -> None:
+    sensitive_marker = "/private/probe-token=never-print-this"
+    with tempfile.TemporaryDirectory(prefix="cabal-copilot-probe-self-test-") as root:
+        directory = Path(root)
+        png, jpeg = write_fixtures(directory)
+        if (
+            not png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            or not jpeg.read_bytes().startswith(b"\xff\xd8\xff")
+            or any(
+                color in path.name for path in (png, jpeg) for color in ("blue", "red")
+            )
+            or any((path.stat().st_mode & 0o777) != 0o600 for path in (png, jpeg))
+        ):
+            raise ProbeFailure("offline fixture self-test failed")
+
+    prompt = "opaque prompt"
+    first = Path("/tmp/first input/probe attachment one.png")
+    second = Path("/tmp/second input/probe-attachment-two.jpg")
+    argv = invocation_argv(prompt=prompt, attachments=(first, second))
+    attachment_values = [
+        argv[index + 1] for index, value in enumerate(argv) if value == "--attachment"
+    ]
+    if (
+        attachment_values != [str(first.resolve()), str(second.resolve())]
+        or argv[argv.index("-p") + 1] != prompt
+        or "--deny-tool=url" not in argv
+        or any(
+            unsafe in argv
+            for unsafe in (
+                "--yolo",
+                "--allow-all",
+                "--allow-all-paths",
+                "--allow-all-urls",
+            )
+        )
+    ):
+        raise ProbeFailure("offline argv self-test failed")
+    web_argv = invocation_argv(prompt=prompt, allowed_url=OFFICIAL_PAGE)
+    if (
+        "--available-tools=view,grep,glob,web_fetch" not in web_argv
+        or f"--allow-url={OFFICIAL_PAGE}" not in web_argv
+        or "--deny-tool=url" in web_argv
+    ):
+        raise ProbeFailure("offline web argv self-test failed")
+
+    summary = protocol_summary('{"type":"result","data":{"content":"private value"}}\n')
+    if summary != (
+        "type=result;shape=object{data:object{content:string},type:string}",
+    ):
+        raise ProbeFailure("offline protocol-summary self-test failed")
+
+    mode_fixtures = {
+        "protocol": ("ready", ()),
+        "media-png": ('{"dominant_color":"blue"}', ("view",)),
+        "media-jpeg": ('{"dominant_color":"red"}', ("view",)),
+        "media": (
+            '{"first_image_dominant_color":"blue","second_image_dominant_color":"red"}',
+            ("view", "view"),
+        ),
+        "media-swapped-control": (
+            '{"first_image_dominant_color":"red","second_image_dominant_color":"blue"}',
+            ("view", "view"),
+        ),
+        "media-omitted-control": ("no-attachments", ()),
+        "web-disabled": ("blocked", ()),
+        "web-exact-url": (
+            '{"reservation_triplet":"right-title-interest"}',
+            ("web_fetch",),
+        ),
+    }
+    for mode, (text, tools) in mode_fixtures.items():
+        output = parse_public_output(public_jsonl_fixture(text, tools))
+        validate_public_output(mode, output)
+        wrong = PublicOutput(
+            session_id=output.session_id,
+            text="incorrect",
+            tools=output.tools,
+            output_tokens=output.output_tokens,
+        )
+        expect_probe_failure(
+            lambda mode=mode, wrong=wrong: validate_public_output(mode, wrong),
+            f"{mode} validator",
+        )
+
+    tool_fixture = public_jsonl_fixture("ready", ("view",))
+    expect_probe_failure(
+        lambda: parse_public_output("not-json"), "malformed JSONL parser"
+    )
+    expect_probe_failure(
+        lambda: parse_public_output(
+            public_jsonl_fixture("ready", (), mcp_servers=[{"name": "hostile"}])
+        ),
+        "nonempty MCP rejection",
+    )
+    expect_probe_failure(
+        lambda: parse_public_output(public_jsonl_fixture("ready", ("shell",))),
+        "forbidden tool rejection",
+    )
+
+    def fail_tool(records: list[dict[str, Any]]) -> None:
+        next(
+            record
+            for record in records
+            if record.get("type") == "tool.execution_complete"
+        )["data"]["success"] = False
+
+    def cross_turn(records: list[dict[str, Any]]) -> None:
+        next(
+            record for record in records if record.get("type") == "tool.execution_start"
+        )["data"]["turnId"] = "turn-2"
+
+    def outstanding_tool(records: list[dict[str, Any]]) -> None:
+        records[:] = [
+            record
+            for record in records
+            if record.get("type") != "tool.execution_complete"
+        ]
+
+    def workspace_change(records: list[dict[str, Any]]) -> None:
+        result = next(record for record in records if record.get("type") == "result")
+        result["usage"]["codeChanges"] = {
+            "filesModified": [sensitive_marker],
+            "linesAdded": 1,
+            "linesRemoved": 0,
+        }
+
+    def extra_public_field(records: list[dict[str, Any]]) -> None:
+        assistant = next(
+            record for record in records if record.get("type") == "assistant.message"
+        )
+        assistant["data"]["privatePath"] = sensitive_marker
+
+    for label, mutation in (
+        ("failed tool", fail_tool),
+        ("cross-turn tool", cross_turn),
+        ("outstanding tool", outstanding_tool),
+        ("workspace change", workspace_change),
+        ("extra public field", extra_public_field),
+    ):
+        expect_probe_failure(
+            lambda mutation=mutation: parse_public_output(
+                mutate_public_fixture(tool_fixture, mutation)
+            ),
+            label,
+        )
+
+    validate_ignored_record("session.skills_loaded", {"skills": []})
+    validate_ignored_record("session.info", {"infoType": "notice", "message": "public"})
+    validate_ignored_record("session.tools_updated", {"model": "public-model"})
+    validate_ignored_record(
+        "assistant.reasoning", {"content": "public", "reasoningId": "reason-1"}
+    )
+    expect_probe_failure(
+        lambda: validate_ignored_record(
+            "session.tools_updated",
+            {"model": "public-model", "tools": ["shell"]},
+        ),
+        "effective tool update",
+    )
+
+    def expect_process_failure(action: Any, expected: str) -> None:
+        try:
+            action()
+        except ProbeFailure as error:
+            if str(error) != expected or sensitive_marker in str(error):
+                raise ProbeFailure("offline process-error self-test failed") from error
+        else:
+            raise ProbeFailure("offline process-error self-test failed")
+
+    with patch.object(
+        subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired(["copilot", sensitive_marker], 1),
+    ):
+        expect_process_failure(require_version, "Copilot version check timed out")
+    with patch.object(subprocess, "run", side_effect=OSError(sensitive_marker)):
+        expect_process_failure(
+            require_version, "Copilot version process could not start"
+        )
+    with tempfile.TemporaryDirectory() as workspace:
+        for exception, expected in (
+            (
+                subprocess.TimeoutExpired(["copilot", sensitive_marker], 1),
+                "Copilot probe timed out",
+            ),
+            (OSError(sensitive_marker), "Copilot probe process could not start"),
+            (
+                UnicodeDecodeError("utf-8", b"x", 0, 1, sensitive_marker),
+                "Copilot probe output could not be decoded",
+            ),
+        ):
+            with patch.object(subprocess, "run", side_effect=exception):
+                expect_process_failure(
+                    lambda: run_invocation(Path(workspace), ["copilot"], False),
+                    expected,
+                )
+        failed = subprocess.CompletedProcess(
+            ["copilot", sensitive_marker], 1, "", sensitive_marker
+        )
+        with patch.object(subprocess, "run", return_value=failed):
             try:
-                require_version()
+                run_invocation(Path(workspace), ["copilot"], True)
             except ProbeFailure as error:
-                print(error, file=sys.stderr)
-    assert "sensitive" not in stderr.getvalue()
-    print("PASS selftest")
+                if sensitive_marker in str(error):
+                    raise ProbeFailure("offline diagnostic redaction self-test failed")
+            else:
+                raise ProbeFailure("offline diagnostic redaction self-test failed")
+
+    def expect_cli_failure(
+        cli_argv: list[str], expected: str, side_effect: Any = None
+    ) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        process_patch = (
+            patch.object(subprocess, "run", side_effect=side_effect)
+            if side_effect is not None
+            else contextlib.nullcontext()
+        )
+        with process_patch, contextlib.redirect_stdout(
+            stdout
+        ), contextlib.redirect_stderr(stderr):
+            status = main(cli_argv)
+        public = stdout.getvalue() + stderr.getvalue()
+        if (
+            status != 1
+            or stdout.getvalue() != ""
+            or stderr.getvalue() != f"FAIL: {expected}\n"
+            or sensitive_marker in public
+            or "Traceback" in public
+            or "usage:" in public
+        ):
+            raise ProbeFailure("offline CLI-sanitization self-test failed")
+
+    expect_cli_failure([sensitive_marker], "invalid probe arguments")
+    expect_cli_failure(
+        ["protocol"],
+        "Copilot version check timed out",
+        subprocess.TimeoutExpired(["copilot", sensitive_marker], 1),
+    )
+    expect_cli_failure(
+        ["protocol"], "Copilot probe interrupted", KeyboardInterrupt(sensitive_marker)
+    )
+    expect_cli_failure(
+        ["protocol"],
+        "Copilot emitted malformed public JSONL",
+        [
+            subprocess.CompletedProcess(
+                ["copilot", "--version"],
+                0,
+                f"GitHub Copilot CLI {EXPECTED_VERSION}.\n",
+                "",
+            ),
+            subprocess.CompletedProcess(
+                ["copilot", sensitive_marker], 0, sensitive_marker, ""
+            ),
+        ],
+    )
+
+    child = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), sensitive_marker],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=VERSION_TIMEOUT_SECONDS,
+    )
+    if (
+        child.returncode != 1
+        or child.stdout != ""
+        or child.stderr != "FAIL: invalid probe arguments\n"
+        or sensitive_marker in child.stdout + child.stderr
+        or "Traceback" in child.stdout + child.stderr
+        or "usage:" in child.stdout + child.stderr
+    ):
+        raise ProbeFailure("offline subprocess CLI-sanitization self-test failed")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    if argv == ["selftest"]:
+        argv = ["--self-test"]
     parser = SafeArgumentParser(add_help=True)
-    parser.add_argument("mode", choices=("selftest",) + MODES)
+    parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--debug-protocol", action="store_true")
-    return parser.parse_args(argv)
+    parser.add_argument("modes", nargs="*", choices=MODES, default=())
+    args = parser.parse_args(argv)
+    if args.self_test and args.modes:
+        raise ProbeFailure("invalid probe arguments")
+    return args
 
 
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
-        if args.mode == "selftest":
+        if args.self_test:
             selftest()
+            print("PASS self-test")
         else:
-            run_mode(args.mode, args.debug_protocol)
-            print(f"PASS {args.mode}")
+            for mode in tuple(args.modes) or MODES:
+                run_mode(mode, args.debug_protocol)
+                print(f"PASS {mode}")
         return 0
     except ProbeFailure as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("FAIL: Copilot probe interrupted", file=sys.stderr)
+        return 1
     except (AssertionError, OSError, ValueError, UnicodeError):
-        print("FAIL: probe selftest failed", file=sys.stderr)
+        print("FAIL: probe self-test failed", file=sys.stderr)
+        return 1
+    except Exception:
+        print("FAIL: probe parser failure", file=sys.stderr)
         return 1
 
 

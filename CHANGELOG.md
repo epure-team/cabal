@@ -9,24 +9,30 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
-- **Hardened Copilot CLI media transport (CBL-07E).** Copilot CLI now enforces
-  baseline `1.0.54` and advertises evidence-backed PNG/JPEG attachments while
-  remaining `Web_disabled`, non-resumable, non-streaming, and without native
-  JSON Schema. The adapter consumes only centrally sealed attachment paths,
+- **Quarantined Copilot CLI transport investigation (CBL-07E).** Copilot CLI
+  remains pinned to baseline `1.0.54` but advertises no media support and fails
+  every task before project setup or backend spawn. Source inspection showed
+  user, workspace, installed-plugin, built-in, and account-controlled ODR MCP
+  discovery; `--disable-builtin-mcps` and isolated `COPILOT_HOME` do not cover
+  every source, and upstream exposes no complete disable flag. The retained
+  candidate adapter consumes only centrally sealed attachment paths,
   preserves caller order with repeated `--attachment` flags, isolates and
   removes `COPILOT_HOME`, and narrows prompt mode to `view,grep,glob` with
   explicit shell/write/memory/URL denial and no blanket path or URL approval.
   Complete public JSONL is validated before text, UUID session, usage, paired
-  successful tool events, or callbacks are released; returned raw stdout/stderr
-  are withheld. Positive web, read-only, resume/reuse, and MCP requests fail
-  before config mutation or spawn. The bundled YAML route is non-executable.
-  Authenticated deterministic blue-PNG/red-JPEG, swapped-order, omitted-media,
-  and disabled-web controls back the claim; CBL-08 now selects Copilot media
-  without inventing a native-schema claim.
+  successful tool events, or synthesized callbacks are released; returned raw
+  stdout/stderr are withheld. Project MCP artifacts are neither generated nor
+  overwritten.
+  Media, positive web, read-only, resume/reuse, and MCP claims remain disabled;
+  the bundled YAML route is non-executable. The credential-free `--self-test`
+  exhaustively covers mode validators, protocol failures, process faults,
+  interruption, and output sanitization. Historical authenticated media and web
+  observations remain investigation data only and do not back capability claims.
 - **Central media + schema E2E proof (CBL-08 P0).** A new authenticated,
   `CABAL_E2E_TESTS=1`-gated harness selects evidence-backed media descriptors and
-  exercises Codex PNG/JPEG upload plus native JSON Schema and Copilot PNG/JPEG
-  upload without schema, each in one hardened `Task_runtime` invocation.
+  exercises Codex PNG/JPEG upload plus native JSON Schema in one hardened
+  `Task_runtime` invocation. Copilot is excluded because its media capability is
+  disabled pending complete pre-spawn MCP isolation.
   Runtime-generated 64×64 fixtures carry computed
   size/SHA-256 metadata; a strict schema plus an exact semantic assertion makes
   the response image-dependent. The proof checks the validated descriptor/runtime

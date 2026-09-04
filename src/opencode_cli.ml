@@ -456,6 +456,8 @@ let write_outcome_reason = function
       "opencode.json was backed up and written"
   | Some (Backend_config_writer.Invalid_managed_namespace _) ->
       "managed namespace was invalid"
+  | Some (Backend_config_writer.Unsafe_project_path _) ->
+      "project path was unsafe"
 
 let ensure_mcp_if_config_applied ~env ~setup_outcome spec =
   match spec.mcp_servers with

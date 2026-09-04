@@ -21,6 +21,7 @@ type write_result =
   | Refused_hash_mismatch of string
   | Backed_up_and_written of {path : string; backup_path : string}
   | Skipped_user_content of string
+  | Unsafe_project_path of string
   | Invalid_managed_namespace of string
 
 type artifact_write_outcome = {
@@ -242,25 +243,113 @@ let migrate_legacy_managed_json_content content =
     | _ -> None
   with _ -> None
 
-let rec ensure_parent_dir path =
-  let dir = Filename.dirname path in
-  if dir = path || dir = "." then ()
-  else begin
-    ensure_parent_dir dir ;
-    try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-  end
+exception Unsafe_project_path_error
 
-let read_file_opt path =
+type project_file_read = Missing | File of string | Unsafe
+
+let unsafe_project_path () = raise Unsafe_project_path_error
+
+let relative_components path =
+  if
+    path = "" || not (Filename.is_relative path)
+    || String.exists (fun character -> character = '\000') path
+  then unsafe_project_path ()
+  else
+    let components = String.split_on_char '/' path in
+    if
+      List.exists
+        (fun component -> component = "" || component = "." || component = "..")
+        components
+    then unsafe_project_path ()
+    else components
+
+let opened_project_root project_dir =
   try
-    let ic = open_in_bin path in
-    Fun.protect
-      ~finally:(fun () -> try close_in ic with _ -> ())
-      (fun () ->
-        let n = in_channel_length ic in
-        let buf = Bytes.create n in
-        really_input ic buf 0 n ;
-        Some (Bytes.to_string buf))
-  with _ -> None
+    let root = Unix.realpath project_dir in
+    if (Unix.stat root).Unix.st_kind <> Unix.S_DIR then unsafe_project_path () ;
+    root
+  with
+  | Unsafe_project_path_error -> raise Unsafe_project_path_error
+  | _ -> unsafe_project_path ()
+
+let rec ensure_safe_directories ~create current = function
+  | [] -> true
+  | component :: rest ->
+      let next = Filename.concat current component in
+      let exists =
+        try
+          match (Unix.lstat next).Unix.st_kind with
+          | Unix.S_DIR -> true
+          | Unix.S_LNK | Unix.S_REG | Unix.S_CHR | Unix.S_BLK | Unix.S_FIFO
+          | Unix.S_SOCK ->
+              unsafe_project_path ()
+        with
+        | Unix.Unix_error (Unix.ENOENT, _, _) when create ->
+            Unix.mkdir next 0o755 ;
+            (match (Unix.lstat next).Unix.st_kind with
+            | Unix.S_DIR -> true
+            | _ -> unsafe_project_path ())
+        | Unix.Unix_error (Unix.ENOENT, _, _) -> false
+      in
+      exists && ensure_safe_directories ~create next rest
+
+let safe_full_path ~project_root ~create_parent relative_path =
+  let components = relative_components relative_path in
+  match List.rev components with
+  | [] -> unsafe_project_path ()
+  | basename :: reversed_parent ->
+      let parent = List.rev reversed_parent in
+      if not (ensure_safe_directories ~create:create_parent project_root parent)
+      then raise Not_found ;
+      (Filename.concat
+         (List.fold_left Filename.concat project_root parent)
+         basename,
+       basename)
+
+let reject_symlink_target path =
+  try
+    if (Unix.lstat path).Unix.st_kind = Unix.S_LNK then unsafe_project_path ()
+  with Unix.Unix_error (Unix.ENOENT, _, _) -> ()
+
+let read_existing_regular path =
+  let before = Unix.lstat path in
+  if before.Unix.st_kind = Unix.S_LNK then unsafe_project_path () ;
+  if before.st_kind <> Unix.S_REG then unsafe_project_path () ;
+  let descriptor =
+    Unix.openfile path [Unix.O_RDONLY; Unix.O_CLOEXEC; Unix.O_NONBLOCK] 0
+  in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      let opened = Unix.fstat descriptor in
+      if
+        opened.st_kind <> Unix.S_REG || opened.st_dev <> before.st_dev
+        || opened.st_ino <> before.st_ino
+      then unsafe_project_path () ;
+      let length = opened.st_size in
+      let buffer = Bytes.create length in
+      let rec read offset =
+        if offset < length then
+          let count = Unix.read descriptor buffer offset (length - offset) in
+          if count = 0 then unsafe_project_path () else read (offset + count)
+      in
+      read 0 ;
+      Bytes.to_string buffer)
+
+let read_file_opt ~project_root ~relative_path =
+  try
+    let path, _ = safe_full_path ~project_root ~create_parent:false relative_path in
+    Some (read_existing_regular path)
+  with
+  | Not_found | Unix.Unix_error (Unix.ENOENT, _, _) -> None
+
+let inspect_project_file ~project_dir ~relative_path =
+  try
+    let project_root = opened_project_root project_dir in
+    match read_file_opt ~project_root ~relative_path with
+    | None -> Missing
+    | Some content -> File content
+  with _ -> Unsafe
 
 type sidecar_metadata = {
   generated_by : string;
@@ -295,7 +384,7 @@ let parse_sidecar_metadata content =
     | Error _ -> None
   with _ -> None
 
-let read_sidecar_metadata ~full_path (artifact : artifact) =
+let read_sidecar_metadata ~project_root ~full_path (artifact : artifact) =
   let paths =
     let current =
       sidecar_path ~managed_namespace:artifact.managed_namespace full_path
@@ -306,7 +395,11 @@ let read_sidecar_metadata ~full_path (artifact : artifact) =
   let rec read = function
     | [] -> None
     | path :: rest -> (
-        match read_file_opt path with
+        let relative_path =
+          String.sub path (String.length project_root + 1)
+            (String.length path - String.length project_root - 1)
+        in
+        match read_file_opt ~project_root ~relative_path with
         | None -> read rest
         | Some content -> Some content)
   in
@@ -329,55 +422,85 @@ let uses_sidecar_metadata artifact =
           ~managed_namespace:artifact.managed_namespace
           artifact.content)
 
-let atomic_write_file ?(managed_namespace = default_namespace) path content =
-  ensure_parent_dir path ;
+let atomic_write_file ?(managed_namespace = default_namespace) ~project_root
+    ~relative_path content =
+  let path, _ = safe_full_path ~project_root ~create_parent:true relative_path in
+  reject_symlink_target path ;
   let tmp_path = path ^ temp_suffix managed_namespace in
   let existing_perm =
-    try Some ((Unix.stat path).Unix.st_perm land 0o777) with _ -> None
+    try Some ((Unix.lstat path).Unix.st_perm land 0o777)
+    with Unix.Unix_error (Unix.ENOENT, _, _) -> None
+  in
+  let descriptor =
+    Unix.openfile tmp_path
+      [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC]
+      0o600
   in
   (try
-     let oc = open_out_bin tmp_path in
-     (try output_string oc content
-      with e ->
-        close_out_noerr oc ;
-        (try Sys.remove tmp_path with _ -> ()) ;
-        raise e) ;
-     close_out oc ;
-     match existing_perm with
-     | Some perm -> Unix.chmod tmp_path perm
-     | None -> ()
+     Fun.protect
+       ~finally:(fun () -> Unix.close descriptor)
+       (fun () ->
+         (match existing_perm with
+         | Some perm -> Unix.fchmod descriptor perm
+         | None -> ()) ;
+         let rec write offset =
+           if offset < String.length content then
+             let count =
+               Unix.write_substring descriptor content offset
+                 (String.length content - offset)
+             in
+             if count = 0 then raise End_of_file else write (offset + count)
+         in
+         write 0 ;
+         Unix.fsync descriptor)
    with e ->
-     (try Sys.remove tmp_path with _ -> ()) ;
+     (try Unix.unlink tmp_path with _ -> ()) ;
      raise e) ;
+  ignore (safe_full_path ~project_root ~create_parent:false relative_path) ;
+  reject_symlink_target path ;
   Sys.rename tmp_path path
 
-let copy_file ?(managed_namespace = default_namespace) src dst =
-  match read_file_opt src with
+let relative_to_root ~project_root path =
+  let prefix = project_root ^ Filename.dir_sep in
+  if String.starts_with ~prefix path then
+    String.sub path (String.length prefix) (String.length path - String.length prefix)
+  else unsafe_project_path ()
+
+let copy_file ?(managed_namespace = default_namespace) ~project_root src dst =
+  match
+    read_file_opt ~project_root
+      ~relative_path:(relative_to_root ~project_root src)
+  with
   | None -> Error (Printf.sprintf "cannot read '%s' for backup" src)
   | Some content -> (
       try
-        atomic_write_file ~managed_namespace dst content ;
+        atomic_write_file ~managed_namespace ~project_root
+          ~relative_path:(relative_to_root ~project_root dst)
+          content ;
         Ok ()
       with e -> Error (Printexc.to_string e))
 
-let write_sidecar_metadata full_path artifact =
+let write_sidecar_metadata ~project_root full_path artifact =
   atomic_write_file
     ~managed_namespace:artifact.managed_namespace
-    (sidecar_path ~managed_namespace:artifact.managed_namespace full_path)
+    ~project_root
+    ~relative_path:
+      (relative_to_root ~project_root
+         (sidecar_path ~managed_namespace:artifact.managed_namespace full_path))
     (sidecar_content artifact)
 
-let write_sidecar_artifact ~project_dir ~force artifact =
-  let full_path = Filename.concat project_dir artifact.project_relative_path in
-  match read_file_opt full_path with
+let write_sidecar_artifact ~project_root ~force artifact =
+  let full_path = Filename.concat project_root artifact.project_relative_path in
+  match read_file_opt ~project_root ~relative_path:artifact.project_relative_path with
   | None ->
       atomic_write_file
         ~managed_namespace:artifact.managed_namespace
-        full_path
+        ~project_root ~relative_path:artifact.project_relative_path
         artifact.content ;
-      write_sidecar_metadata full_path artifact ;
+      write_sidecar_metadata ~project_root full_path artifact ;
       Written full_path
   | Some existing -> (
-      match read_sidecar_metadata ~full_path artifact with
+      match read_sidecar_metadata ~project_root ~full_path artifact with
       | None -> Skipped_user_content full_path
       | Some meta ->
           let h_current = md5_hex existing in
@@ -386,9 +509,9 @@ let write_sidecar_artifact ~project_dir ~force artifact =
             else begin
               atomic_write_file
                 ~managed_namespace:artifact.managed_namespace
-                full_path
+                ~project_root ~relative_path:artifact.project_relative_path
                 artifact.content ;
-              write_sidecar_metadata full_path artifact ;
+              write_sidecar_metadata ~project_root full_path artifact ;
               Written full_path
             end
           else if force then (
@@ -398,6 +521,7 @@ let write_sidecar_artifact ~project_dir ~force artifact =
             match
               copy_file
                 ~managed_namespace:artifact.managed_namespace
+                ~project_root
                 full_path
                 backup_path
             with
@@ -411,9 +535,9 @@ let write_sidecar_artifact ~project_dir ~force artifact =
             | Ok () ->
                 atomic_write_file
                   ~managed_namespace:artifact.managed_namespace
-                  full_path
+                  ~project_root ~relative_path:artifact.project_relative_path
                   artifact.content ;
-                write_sidecar_metadata full_path artifact ;
+                write_sidecar_metadata ~project_root full_path artifact ;
                 Backed_up_and_written {path = full_path; backup_path})
           else
             Refused_hash_mismatch
@@ -422,34 +546,38 @@ let write_sidecar_artifact ~project_dir ~force artifact =
                   with --force to backup and overwrite."
                  full_path))
 
-let write_artifact ~project_dir ~force artifact =
+let write_artifact_unchecked ~project_root ~force artifact =
   match Backend_types.validate_managed_namespace artifact.managed_namespace with
   | Error msg -> Invalid_managed_namespace msg
   | Ok () -> (
-      let full_path =
-        Filename.concat project_dir artifact.project_relative_path
-      in
-      if uses_sidecar_metadata artifact then
-        write_sidecar_artifact ~project_dir ~force artifact
-      else
-        match artifact.ownership with
-        | Epure_owned ->
-            let existing = read_file_opt full_path in
+       let full_path = Filename.concat project_root artifact.project_relative_path in
+       if uses_sidecar_metadata artifact then
+         write_sidecar_artifact ~project_root ~force artifact
+       else
+         match artifact.ownership with
+         | Epure_owned ->
+             let existing =
+               read_file_opt ~project_root
+                 ~relative_path:artifact.project_relative_path
+             in
             if existing = Some artifact.content then Already_current
             else begin
-              atomic_write_file
-                ~managed_namespace:artifact.managed_namespace
-                full_path
-                artifact.content ;
+               atomic_write_file
+                 ~managed_namespace:artifact.managed_namespace
+                 ~project_root ~relative_path:artifact.project_relative_path
+                 artifact.content ;
               Written full_path
             end
-        | Backend_project -> (
-            match read_file_opt full_path with
+         | Backend_project -> (
+             match
+               read_file_opt ~project_root
+                 ~relative_path:artifact.project_relative_path
+             with
             | None ->
-                atomic_write_file
-                  ~managed_namespace:artifact.managed_namespace
-                  full_path
-                  artifact.content ;
+                 atomic_write_file
+                   ~managed_namespace:artifact.managed_namespace
+                   ~project_root ~relative_path:artifact.project_relative_path
+                   artifact.content ;
                 Written full_path
             | Some existing -> (
                 if
@@ -473,10 +601,11 @@ let write_artifact ~project_dir ~force artifact =
                   | None ->
                       if existing = artifact.content then Already_current
                       else begin
-                        atomic_write_file
-                          ~managed_namespace:artifact.managed_namespace
-                          full_path
-                          artifact.content ;
+                         atomic_write_file
+                           ~managed_namespace:artifact.managed_namespace
+                           ~project_root
+                           ~relative_path:artifact.project_relative_path
+                           artifact.content ;
                         Written full_path
                       end
                   | Some h_file ->
@@ -486,10 +615,11 @@ let write_artifact ~project_dir ~force artifact =
                             migrate_legacy_managed_json_content existing
                           with
                           | Some migrated ->
-                              atomic_write_file
-                                ~managed_namespace:artifact.managed_namespace
-                                full_path
-                                migrated ;
+                               atomic_write_file
+                                 ~managed_namespace:artifact.managed_namespace
+                                 ~project_root
+                                 ~relative_path:artifact.project_relative_path
+                                 migrated ;
                               Written full_path
                           | None ->
                               Refused_hash_mismatch
@@ -521,10 +651,11 @@ let write_artifact ~project_dir ~force artifact =
                           = Some h_file
                         then Already_current
                         else begin
-                          atomic_write_file
-                            ~managed_namespace:artifact.managed_namespace
-                            full_path
-                            artifact.content ;
+                           atomic_write_file
+                             ~managed_namespace:artifact.managed_namespace
+                             ~project_root
+                             ~relative_path:artifact.project_relative_path
+                             artifact.content ;
                           Written full_path
                         end
                       else if force then (
@@ -532,10 +663,11 @@ let write_artifact ~project_dir ~force artifact =
                           full_path ^ backup_suffix artifact.managed_namespace
                         in
                         match
-                          copy_file
-                            ~managed_namespace:artifact.managed_namespace
-                            full_path
-                            backup_path
+                           copy_file
+                             ~managed_namespace:artifact.managed_namespace
+                             ~project_root
+                             full_path
+                             backup_path
                         with
                         | Error msg ->
                             Refused_hash_mismatch
@@ -545,10 +677,11 @@ let write_artifact ~project_dir ~force artifact =
                                  full_path
                                  msg)
                         | Ok () ->
-                            atomic_write_file
-                              ~managed_namespace:artifact.managed_namespace
-                              full_path
-                              artifact.content ;
+                             atomic_write_file
+                               ~managed_namespace:artifact.managed_namespace
+                               ~project_root
+                               ~relative_path:artifact.project_relative_path
+                               artifact.content ;
                             Backed_up_and_written
                               {path = full_path; backup_path})
                       else
@@ -557,6 +690,16 @@ let write_artifact ~project_dir ~force artifact =
                              "File '%s' has been modified (hash mismatch). Run \
                               with --force to backup and overwrite."
                              full_path))))
+
+let write_artifact ~project_dir ~force artifact =
+  try
+    let project_root = opened_project_root project_dir in
+    ignore (relative_components artifact.project_relative_path) ;
+    write_artifact_unchecked ~project_root ~force artifact
+  with
+  | Unsafe_project_path_error | Not_found
+  | Unix.Unix_error ((Unix.ELOOP | Unix.ENOTDIR | Unix.EACCES), _, _) ->
+      Unsafe_project_path "project configuration path is unsafe"
 
 let setup_artifacts ~project_dir ~force = function
   | [] ->
@@ -596,6 +739,7 @@ let setup_artifacts ~project_dir ~force = function
             | Already_current ->
                 Some (Filename.concat project_dir primary.project_relative_path)
             | Refused_hash_mismatch _ | Skipped_user_content _
+            | Unsafe_project_path _
             | Invalid_managed_namespace _ ->
                 None)
       in
@@ -603,7 +747,7 @@ let setup_artifacts ~project_dir ~force = function
 
 let write_result_was_applied = function
   | Written _ | Already_current | Backed_up_and_written _ -> true
-  | Refused_hash_mismatch _ | Skipped_user_content _
+  | Refused_hash_mismatch _ | Skipped_user_content _ | Unsafe_project_path _
   | Invalid_managed_namespace _ ->
       false
 
@@ -692,4 +836,19 @@ let precedence_warning_for ~backend_id ~write_outcome =
                           the managed namespace is invalid: %s"
                          desc.display_name
                          msg)
+                | Some (Unsafe_project_path _) ->
+                    Some
+                      (Printf.sprintf
+                         "Warning [%s]: project config path was unsafe; no file \
+                          was written."
+                         desc.display_name)
                 | _ -> None)))
+
+module Private = struct
+  type nonrec project_file_read = project_file_read =
+    | Missing
+    | File of string
+    | Unsafe
+
+  let inspect_project_file = inspect_project_file
+end

@@ -51,37 +51,6 @@ let json_string_map_to_yojson = Backend_json_helpers.json_string_map_to_yojson
 
 let json_string_map_of_yojson = Backend_json_helpers.json_string_map_of_yojson
 
-type mcp_server_settings = {
-  type_ : string; [@key "type"]
-  command : string;
-  args : string list;
-  env : json_string_map;
-  tools : string list;
-}
-[@@deriving yojson]
-
-type mcp_server_map = (string * mcp_server_settings) list
-
-let mcp_server_map_to_yojson servers =
-  `Assoc
-    (List.map
-       (fun (name, server) -> (name, mcp_server_settings_to_yojson server))
-       servers)
-
-let mcp_server_map_of_yojson = function
-  | `Assoc fields ->
-      let rec loop acc = function
-        | [] -> Ok (List.rev acc)
-        | (name, json) :: rest -> (
-            match mcp_server_settings_of_yojson json with
-            | Ok server -> loop ((name, server) :: acc) rest
-            | Error msg -> Error (Printf.sprintf "%s: %s" name msg))
-      in
-      loop [] fields
-  | _ -> Error "expected JSON object"
-
-type project_mcp_json = {mcpServers : mcp_server_map} [@@deriving yojson]
-
 type copilot_lsp_server_settings = {
   command : string;
   args : string list;
@@ -127,30 +96,6 @@ let repository_settings_json_content () =
   in
   json |> Yojson.Safe.pretty_to_string |> fun s -> s ^ "\n"
 
-let env_reference_value ~name value =
-  if String.length value > 0 && value.[0] = '$' then value
-  else if name = "" then value
-  else "$" ^ name
-
-let persistent_env_references env =
-  List.map (fun (name, value) -> (name, env_reference_value ~name value)) env
-
-let mcp_server_entry (cfg : Backend_types.mcp_server_config) =
-  ( cfg.name,
-    {
-      type_ = "local";
-      command = cfg.command;
-      args = cfg.args;
-      env = persistent_env_references cfg.env;
-      tools = ["*"];
-    } )
-
-let mcp_json_content mcp_servers =
-  project_mcp_json_to_yojson
-    {mcpServers = List.map mcp_server_entry mcp_servers}
-  |> Yojson.Safe.pretty_to_string
-  |> fun s -> s ^ "\n"
-
 let lsp_server_entry (cfg : Backend_types.lsp_server_config) =
   ( cfg.name,
     {
@@ -173,12 +118,12 @@ let copilot_instructions_body =
 
 This file is managed by the host application via Cabal. Custom instructions
 live at `.github/copilot-instructions.md`, repository settings live at
-`.github/copilot/settings.json`, and compatibility project MCP config lives at
-`.github/mcp.json` for Copilot CLI 1.0.54 (stable channel).
+`.github/copilot/settings.json`, and project LSP config lives at
+`.github/lsp.json` for Copilot CLI 1.0.54 (stable channel).
 
 ## Project Context
 
-Configured by the host application for this project.
+    Configured by the host application for this project.
 
 ## LSP Configuration
 
@@ -189,10 +134,8 @@ readiness is tracked by the host's own project hook layer.
 
 ## MCP Servers
 
-MCP servers are not activated by default. Entries can be rendered to
-`.github/mcp.json` for compatibility, but the hardened task transport excludes
-MCP tools and rejects task-level MCP requests before invocation.
-<!-- mcp: disabled by default — no approved entries activated -->
+MCP servers are unsupported by the hardened task transport. Cabal does not
+write repository MCP configuration for Copilot.
 
 ## Stable Limitations (Copilot CLI 1.0.54)
 
@@ -207,7 +150,7 @@ attachments. The following capabilities are intentionally not supported:
 <!-- stable-limitations: documented per backend parity policy -->
 |}
 
-let project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers =
+let project_config_artifacts ~managed_namespace ~mcp_servers:_ ~lsp_servers =
   [
     {
       Backend_config_writer.backend_id = id;
@@ -234,13 +177,6 @@ let project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers =
       managed_namespace;
       project_relative_path = ".github/lsp.json";
       content = lsp_json_content lsp_servers;
-    };
-    {
-      Backend_config_writer.backend_id = id;
-      ownership = Backend_config_writer.Backend_project;
-      managed_namespace;
-      project_relative_path = ".github/mcp.json";
-      content = mcp_json_content mcp_servers;
     };
   ]
 
@@ -438,9 +374,9 @@ type protocol_state = {
   active_turn : string option;
   active_interaction : string option;
   turns_finished : int;
-  requested_tools : (string * string) list;
-  started_tools : string list;
-  completed_tools : string list;
+  requested_tools : (string * (string * string)) list;
+  started_tools : (string * string) list;
+  completed_tools : (string * string) list;
   final_text : string option;
   output_tokens : int;
   terminal : verified_terminal option;
@@ -575,7 +511,11 @@ let validate_event_envelope state fields =
       },
       data )
 
-let add_tool_requests state requests =
+let allowed_tool_name = function
+  | "view" | "grep" | "glob" -> true
+  | _ -> false
+
+let add_tool_requests state ~turn_id requests =
   let ( let* ) = Result.bind in
   List.fold_left
     (fun result request ->
@@ -588,11 +528,13 @@ let add_tool_requests state requests =
           with
           | Some identifier, Some name
             when safe_identifier identifier && safe_identifier name
+                 && allowed_tool_name name
                  && not (List.mem_assoc identifier state.requested_tools) ->
               Ok
                 {
                   state with
-                  requested_tools = state.requested_tools @ [(identifier, name)];
+                  requested_tools =
+                    state.requested_tools @ [(identifier, (name, turn_id))];
                 }
           | _ -> protocol_error "invalid tool request")
       | _ -> protocol_error "invalid tool request")
@@ -617,10 +559,10 @@ let validate_terminal_usage fields =
             Ok fields
         | _ -> protocol_error "invalid terminal usage"
       in
-      let files_valid =
+      let files_unchanged =
         match list_field "filesModified" code_changes with
-        | Some files -> List.for_all (function `String _ -> true | _ -> false) files
-        | None -> false
+        | Some [] -> true
+        | Some _ | None -> false
       in
       let integer_valid name fields =
         Option.bind (member name fields) nonnegative_integer |> Option.is_some
@@ -631,8 +573,9 @@ let validate_terminal_usage fields =
         | None -> false
       in
       if
-        files_valid && integer_valid "linesAdded" code_changes
-        && integer_valid "linesRemoved" code_changes
+        files_unchanged
+        && member "linesAdded" code_changes = Some (`Int 0)
+        && member "linesRemoved" code_changes = Some (`Int 0)
         && number_valid "premiumRequests" usage_fields
         && integer_valid "sessionDurationMs" usage_fields
         && integer_valid "totalApiDurationMs" usage_fields
@@ -649,14 +592,17 @@ let validate_ignored_record state record_type data =
   let valid =
     match record_type with
     | "session.mcp_servers_loaded" ->
-        not state.seen_user_message && required "servers" list_value
+        not state.seen_user_message
+        && exact_fields ["servers"] data
+        && member "servers" data = Some (`List [])
     | "session.skills_loaded" ->
         not state.seen_user_message && required "skills" list_value
     | "session.info" ->
         not state.seen_user_message && required "infoType" string_value
         && required "message" string_value
     | "session.tools_updated" ->
-        not state.seen_user_message && required "model" string_value
+        not state.seen_user_message && exact_fields ["model"] data
+        && required "model" string_value
     | "assistant.reasoning" ->
         Option.is_some state.active_turn && required "content" string_value
         && required "reasoningId" string_value
@@ -668,16 +614,34 @@ let saturating_add left right =
   if max_int - left < right then max_int else left + right
 
 let terminal_cost output_tokens =
-  Some
-    {
-      tokens_input = None;
-      tokens_output = Some output_tokens;
-      cost_usd = None;
-      cache_creation_input_tokens = None;
-      cache_read_input_tokens = None;
-    }
+  {
+    tokens_input = None;
+    tokens_output = Some output_tokens;
+    cost_usd = None;
+    cache_creation_input_tokens = None;
+    cache_read_input_tokens = None;
+  }
 
-let parse_result state raw_line fields =
+let sanitized_callback_lines ~text ~session_id ~output_tokens =
+  let assistant =
+    `Assoc
+      [
+        ("type", `String "assistant.message");
+        ("data", `Assoc [("content", `String text)]);
+      ]
+  in
+  let result =
+    `Assoc
+      [
+        ("type", `String "result");
+        ("exitCode", `Int 0);
+        ("sessionId", `String session_id);
+        ("usage", `Assoc [("outputTokens", `Int output_tokens)]);
+      ]
+  in
+  List.map (Yojson.Safe.to_string ~std:true) [assistant; result]
+
+let parse_result state _raw_line fields =
   let ( let* ) = Result.bind in
   let* () =
     if
@@ -727,18 +691,21 @@ let parse_result state raw_line fields =
     [
       Task_event.Agent_text_delta text;
       Task_event.Session_id session_id;
-      Task_event.Token_usage (Option.get cost);
+      Task_event.Token_usage cost;
     ]
   in
   Ok
     {
       state with
-      terminal = Some {text; session_id = Some session_id; cost};
+      terminal = Some {text; session_id = Some session_id; cost = Some cost};
       events_rev = List.rev_append final_events state.events_rev;
-      callback_lines_rev = raw_line :: state.callback_lines_rev;
+      callback_lines_rev =
+        List.rev
+          (sanitized_callback_lines ~text ~session_id
+             ~output_tokens:state.output_tokens);
     }
 
-let parse_event state raw_line fields record_type =
+let parse_event state _raw_line fields record_type =
   let ( let* ) = Result.bind in
   let* state, data = validate_event_envelope state fields in
   match record_type with
@@ -795,19 +762,16 @@ let parse_event state raw_line fields record_type =
           when state.active_turn = Some turn_id
                && state.active_interaction = Some interaction_id
                && safe_identifier message_id ->
-            let* state = add_tool_requests state requests in
-             Ok
-               {
-                 state with
-                 final_text =
-                   (if requests = [] && String.trim content <> "" then Some content
-                    else None);
-                 output_tokens = saturating_add state.output_tokens output_tokens;
-                 callback_lines_rev =
-                   (if requests = [] && String.trim content <> "" then
-                      [raw_line]
-                    else []);
-               }
+            let* state = add_tool_requests state ~turn_id requests in
+            Ok
+              {
+                state with
+                final_text =
+                  (if requests = [] && String.trim content <> "" then Some content
+                   else None);
+                output_tokens = saturating_add state.output_tokens output_tokens;
+                callback_lines_rev = [];
+              }
         | _ -> protocol_error "invalid assistant message"
       end
   | "tool.execution_start" ->
@@ -818,12 +782,14 @@ let parse_event state raw_line fields record_type =
         match (turn_id, identifier, name) with
         | Some turn_id, Some identifier, Some name
           when state.active_turn = Some turn_id
-               && List.assoc_opt identifier state.requested_tools = Some name
-               && not (List.mem identifier state.started_tools) ->
+               && allowed_tool_name name
+               && List.assoc_opt identifier state.requested_tools
+                  = Some (name, turn_id)
+               && not (List.mem (identifier, turn_id) state.started_tools) ->
             Ok
               {
                 state with
-                started_tools = identifier :: state.started_tools;
+                started_tools = (identifier, turn_id) :: state.started_tools;
                 events_rev =
                   Task_event.Tool_started {name; id = Some identifier}
                   :: state.events_rev;
@@ -838,24 +804,39 @@ let parse_event state raw_line fields record_type =
         match (turn_id, identifier) with
         | Some turn_id, Some identifier
           when state.active_turn = Some turn_id && succeeded
-               && List.mem identifier state.started_tools
-               && not (List.mem identifier state.completed_tools) ->
-            let name = List.assoc identifier state.requested_tools in
-            Ok
-              {
-                state with
-                completed_tools = identifier :: state.completed_tools;
-                events_rev =
-                  Task_event.Tool_finished
-                    {name = Some name; id = Some identifier}
-                  :: state.events_rev;
-              }
+               && List.mem (identifier, turn_id) state.started_tools
+               && not (List.mem (identifier, turn_id) state.completed_tools) -> (
+            match List.assoc_opt identifier state.requested_tools with
+            | Some (name, request_turn)
+              when request_turn = turn_id && allowed_tool_name name
+                   &&
+                   (match string_field "toolName" data with
+                   | None -> true
+                   | Some completed_name ->
+                       completed_name = name && allowed_tool_name completed_name) ->
+                Ok
+                  {
+                    state with
+                    completed_tools =
+                      (identifier, turn_id) :: state.completed_tools;
+                    events_rev =
+                      Task_event.Tool_finished
+                        {name = Some name; id = Some identifier}
+                      :: state.events_rev;
+                  }
+            | Some _ | None -> protocol_error "invalid tool execution completion")
         | _ -> protocol_error "invalid tool execution completion"
       end
   | "assistant.turn_end" ->
       begin
         match string_field "turnId" data with
-        | Some turn_id when state.active_turn = Some turn_id ->
+        | Some turn_id
+          when state.active_turn = Some turn_id
+               && List.for_all
+                    (fun (identifier, (_name, request_turn)) ->
+                      request_turn <> turn_id
+                      || List.mem (identifier, turn_id) state.completed_tools)
+                    state.requested_tools ->
             Ok
               {
                 state with
@@ -863,6 +844,8 @@ let parse_event state raw_line fields record_type =
                 active_interaction = None;
                 turns_finished = state.turns_finished + 1;
               }
+        | Some turn_id when state.active_turn = Some turn_id ->
+            protocol_error "turn end has outstanding tools"
         | _ -> protocol_error "invalid assistant turn end"
       end
   | _ -> protocol_error "unknown record type"
@@ -974,6 +957,10 @@ let setup_outcome_reason = function
         _;
       } ->
       "managed namespace was invalid"
+  | Some
+      {Backend_config_writer.result = Backend_config_writer.Unsafe_project_path _; _}
+    ->
+      "project path was unsafe"
 
 let first_non_valid results =
   match
@@ -1088,25 +1075,41 @@ let check_project_config ~sw:_ ~env ~project_dir ~setup_result =
         ~path:".github/lsp.json"
         ~label:"Copilot LSP config"
         ~of_yojson:project_lsp_json_of_yojson;
-      validate_strict_json_file
-        ~env
-        ~project_dir
-        ~setup_result
-        ~path:".github/mcp.json"
-        ~label:"Copilot MCP config"
-        ~of_yojson:project_mcp_json_of_yojson;
     ]
 
 let preserves_existing_lsp_artifact ~project_dir lsp_servers artifact =
   lsp_servers = []
   && artifact.Backend_config_writer.project_relative_path = ".github/lsp.json"
-  && Sys.file_exists (Filename.concat project_dir ".github/lsp.json")
+  &&
+  match
+    Backend_config_writer.Private.inspect_project_file ~project_dir
+      ~relative_path:".github/lsp.json"
+  with
+  | Backend_config_writer.Private.File _ -> true
+  | Backend_config_writer.Private.Missing | Backend_config_writer.Private.Unsafe ->
+      false
 
 let runtime_project_config_artifacts ~project_dir ~managed_namespace
     ~mcp_servers ~lsp_servers =
   project_config_artifacts ~managed_namespace ~mcp_servers ~lsp_servers
   |> List.filter (fun artifact ->
       not (preserves_existing_lsp_artifact ~project_dir lsp_servers artifact))
+
+let validate_complete_mcp_isolation () =
+  (* 1.0.54 can discover user, workspace, installed-plugin, built-in, and
+     account-controlled ODR MCP servers. [--disable-builtin-mcps] covers only
+     one source, [COPILOT_HOME] isolates only local user/plugin state, and no
+     flag disables all remaining sources. An empty workspace file therefore
+     cannot prove that the effective MCP set is empty before process start. *)
+  invocation_error "Copilot CLI 1.0.54 cannot disable all MCP discovery"
+
+let setup_has_unsafe_path setup =
+  List.exists
+    (fun outcome ->
+      match outcome.Backend_config_writer.result with
+      | Backend_config_writer.Unsafe_project_path _ -> true
+      | _ -> false)
+    setup.Backend_config_writer.write_outcomes
 
 let failed_result message =
   make_task_result ~status:(Failed message) ~stderr:message ~exit_code:1 ()
@@ -1184,43 +1187,47 @@ let requested_transport_inputs ?context spec =
                 attachment_paths = sealed.attachment_paths;
               })
 
-let rec remove_tree path =
-  try
-    match (Unix.lstat path).st_kind with
-    | Unix.S_DIR ->
-        let children_removed =
-          Sys.readdir path
-          |> Array.fold_left
-               (fun success child ->
-                 remove_tree (Filename.concat path child) && success)
-               true
-        in
-        if children_removed then (
-          Unix.rmdir path ;
-          true)
-        else false
-    | _ ->
-        Unix.unlink path ;
-        true
-  with
-  | Unix.Unix_error (Unix.ENOENT, _, _) -> true
-  | Unix.Unix_error _ | Sys_error _ -> false
+external secure_remove_tree : string -> bool = "cabal_secure_remove_tree"
 
-let with_isolated_config_home f =
+let cleanup_retry_limit = 3
+let cleanup_failure_message = "Copilot config isolation cleanup failed"
+
+let cleanup_isolated_home ?(on_cleanup_attempt = fun () -> ()) directory =
+  Eio.Cancel.protect (fun () ->
+      let rec loop remaining =
+        let removed =
+          try
+            on_cleanup_attempt () ;
+            secure_remove_tree directory
+          with _ -> false
+        in
+        if removed then true
+        else if remaining > 1 then (
+          Eio.Fiber.yield () ;
+          loop (remaining - 1))
+        else false
+      in
+      loop cleanup_retry_limit)
+
+let with_isolated_config_home ?on_cleanup_attempt f =
   match
     try Ok (Filename.temp_dir ~perms:0o700 "cabal-copilot-config-" "")
     with Sys_error _ | Unix.Unix_error _ -> Error ()
   with
-  | Error () -> Error "Copilot config isolation could not be created"
+  | Error () -> failed_result "Copilot config isolation could not be created"
   | Ok directory ->
-      let result =
-        Fun.protect
-          ~finally:(fun () ->
-            if not (remove_tree directory) then
-              Diagnostics.warn "Copilot config isolation cleanup failed")
-          (fun () -> f directory)
+      let outcome =
+        try `Result (f directory) with
+        | (Out_of_memory | Stack_overflow | Sys.Break) as fatal -> `Fatal fatal
+        | error -> `Exception error
       in
-      Ok result
+      let removed = cleanup_isolated_home ?on_cleanup_attempt directory in
+      if not removed then Diagnostics.warn "%s" cleanup_failure_message ;
+      match outcome with
+      | `Fatal fatal -> raise fatal
+      | `Exception error -> raise error
+      | `Result result ->
+          if removed then result else failed_result cleanup_failure_message
 
 let scrub_process_result result =
   {
@@ -1237,8 +1244,10 @@ let scrub_process_result result =
   }
 
 let run_invocation ~sw ~env ~spec ?context ?on_raw_line transport =
-  match
-    with_isolated_config_home (fun config_home ->
+  match validate_complete_mcp_isolation () with
+  | Error message -> failed_result message
+  | Ok () ->
+      with_isolated_config_home (fun config_home ->
         match
           build_invocation
             ~attachment_paths:transport.attachment_paths
@@ -1295,41 +1304,71 @@ let run_invocation ~sw ~env ~spec ?context ?on_raw_line transport =
                         session_id = verified.terminal.session_id;
                       })
             end)
-  with
-  | Ok result -> result
-  | Error message -> failed_result message
 
 let run_task ~sw ~env ?context ?on_raw_line spec =
   match Backend_process.validate_task_namespace spec with
   | Some result -> result
-  | None -> (
-      match validate_supported_request spec with
+  | None ->
+      (match validate_supported_request spec with
       | Error message -> failed_result message
-      | Ok () -> (
-          match requested_transport_inputs ?context spec with
+      | Ok () ->
+          (match requested_transport_inputs ?context spec with
           | Error message -> failed_result message
-          | Ok transport -> (
-              match
-                build_invocation
-                  ~attachment_paths:transport.attachment_paths
-                  ~attachment_delivery:transport.attachment_delivery
-                  ~config_home:"/isolated-config" ~mcp_config_path:None spec
-              with
+          | Ok transport ->
+              match validate_complete_mcp_isolation () with
               | Error message -> failed_result message
-              | Ok _ ->
-                  let setup =
-                    Backend_config_writer.setup_artifacts
-                      ~project_dir:spec.working_dir ~force:false
-                      (runtime_project_config_artifacts
-                         ~project_dir:spec.working_dir
-                         ~managed_namespace:spec.managed_namespace ~mcp_servers:[]
-                         ~lsp_servers:spec.lsp_servers)
-                  in
-                  (match
-                     Backend_config_writer.precedence_warning_for ~backend_id:id
-                       ~write_outcome:setup.Backend_config_writer.write_outcome
-                   with
-                  | None -> ()
-                  | Some message -> Diagnostics.user_warning "%s" message) ;
-                  run_invocation ~sw ~env ~spec ?context ?on_raw_line
-                    transport)))
+              | Ok () ->
+                  match
+                    build_invocation
+                      ~attachment_paths:transport.attachment_paths
+                      ~attachment_delivery:transport.attachment_delivery
+                      ~config_home:"/isolated-config" ~mcp_config_path:None spec
+                  with
+                  | Error message -> failed_result message
+                  | Ok _ ->
+                      let setup =
+                        Backend_config_writer.setup_artifacts
+                          ~project_dir:spec.working_dir ~force:false
+                          (runtime_project_config_artifacts
+                             ~project_dir:spec.working_dir
+                             ~managed_namespace:spec.managed_namespace
+                             ~mcp_servers:[] ~lsp_servers:spec.lsp_servers)
+                      in
+                      (match
+                         Backend_config_writer.precedence_warning_for
+                           ~backend_id:id
+                           ~write_outcome:
+                             setup.Backend_config_writer.write_outcome
+                       with
+                      | None -> ()
+                      | Some message -> Diagnostics.user_warning "%s" message) ;
+                      if setup_has_unsafe_path setup then
+                        failed_result
+                          "Copilot project configuration path is unsafe"
+                      else
+                        run_invocation ~sw ~env ~spec ?context ?on_raw_line
+                          transport))
+
+module Private = struct
+  type nonrec backend_invocation = backend_invocation = {
+    argv : string list;
+    stdin : string option;
+    redacted_argv : string list;
+  }
+
+  type nonrec verified_terminal = verified_terminal = {
+    text : string;
+    session_id : string option;
+    cost : cost option;
+  }
+
+  let build_invocation = build_invocation
+  let build_command = build_command
+  let verify_terminal_stdout = verify_terminal_stdout
+  let normalized_events_of_stdout = normalized_events_of_stdout
+  let parse_stdout_text = parse_stdout_text
+  let cleanup_retry_limit = cleanup_retry_limit
+
+  let with_isolated_config_home_for_test ?on_cleanup_attempt f =
+    with_isolated_config_home ?on_cleanup_attempt f
+end

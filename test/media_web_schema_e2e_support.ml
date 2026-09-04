@@ -12,7 +12,7 @@ open Cabal
 type protocol_requirements = {
   session : bool;
   usage : bool;
-  tool : bool;
+  exact_tools : (string * int) list;
 }
 
 type trace_error =
@@ -24,13 +24,15 @@ type trace_error =
   | Required_session_missing
   | Required_usage_missing
   | Required_tool_lifecycle_missing
+  | Required_tool_lifecycle_mismatch
   | Tool_lifecycle_disagreement
   | Delivery_was_truncated
 
 let protocol_requirements_for_backend = function
-  | "codex" -> {session = true; usage = true; tool = false}
-  | "copilot-cli" -> {session = true; usage = true; tool = true}
-  | _ -> {session = false; usage = false; tool = false}
+  | "codex" -> {session = true; usage = true; exact_tools = []}
+  | "copilot-cli" ->
+      {session = true; usage = true; exact_tools = [("view", 2)]}
+  | _ -> {session = false; usage = false; exact_tools = []}
 
 let outcome_of_status = function
   | Backend_types.Success -> Task_event.Attempt_succeeded
@@ -260,7 +262,8 @@ let validate_tool_lifecycle ~attempt_numbers events =
                 let key = (event.attempt, identity) in
                 if List.mem key active_tools then Error Tool_lifecycle_disagreement
                 else
-                  loop attempt_states (key :: active_tools) (started + 1) rest)
+                    loop attempt_states (key :: active_tools) (tool.name :: started)
+                      rest)
         | Task_event.Tool_finished {id; name} -> (
             match
               ( attempt_is_active event.attempt attempt_states,
@@ -279,7 +282,15 @@ let validate_tool_lifecycle ~attempt_numbers events =
             else loop attempt_states active_tools started rest
         | _ -> loop attempt_states active_tools started rest)
   in
-  loop attempt_states [] 0 events
+  Result.map List.rev (loop attempt_states [] [] events)
+
+let tool_counts names =
+  List.fold_left
+    (fun counts name ->
+      let count = Option.value ~default:0 (List.assoc_opt name counts) in
+      (name, count + 1) :: List.remove_assoc name counts)
+    [] names
+  |> List.sort compare
 
 let expected_attachment_delivery = function
   | Backend_types.Initial_attempt | Backend_types.Fresh_attempt ->
@@ -357,6 +368,10 @@ let validate_event_trace ~requirements execution events =
           match validate_tool_lifecycle ~attempt_numbers events with
           | Error _ as error -> error
           | Ok tools_started ->
-              if requirements.tool && tools_started = 0 then
-                Error Required_tool_lifecycle_missing
+              let expected = List.sort compare requirements.exact_tools in
+              let actual = tool_counts tools_started in
+              if expected = [] then Ok ()
+              else if tools_started = [] then Error Required_tool_lifecycle_missing
+              else if actual <> expected then
+                Error Required_tool_lifecycle_mismatch
               else Ok ()

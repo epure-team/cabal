@@ -339,7 +339,8 @@ let command_argv_for_case_unsafe case spec =
   else if case.id = Codex_cli.id then command_from Codex_cli.build_command
   else if case.id = Opencode_cli.id then command_from Opencode_cli.build_command
   else if case.id = Gemini_cli.id then command_from Gemini_cli.build_command
-  else if case.id = Copilot_cli.id then command_from Copilot_cli.build_command
+  else if case.id = Copilot_cli.id then
+    command_from Copilot_cli.Private.build_command
   else invalid_arg ("no smoke command preview for backend " ^ case.id)
 
 let command_argv_for_case case spec =
@@ -626,7 +627,9 @@ let test_real_backend case () =
     Eio.Switch.run @@ fun sw -> run_backend ~sw ~env case
 
 let smoke_tests =
-  List.map (fun case -> (case.id, `Slow, test_real_backend case)) backends
+  backends
+  |> List.filter (fun case -> case.id <> Copilot_cli.id)
+  |> List.map (fun case -> (case.id, `Slow, test_real_backend case))
 
 let () =
   Alcotest.run

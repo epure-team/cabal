@@ -268,7 +268,9 @@ let invoke_media_schema ~sw ~env (descriptor : Backend_registry.descriptor) mode
     if List.length attachments <> List.length fixtures then
       Error Fixture_materialization_failed
     else
-      let native = descriptor.capabilities.native_json_schema_output in
+      let native =
+        E2e_harness_config.valid_native_schema_descriptor descriptor
+      in
       let json_schema =
         if native then Some (Media_web_schema_fixture.schema fixtures) else None
       in

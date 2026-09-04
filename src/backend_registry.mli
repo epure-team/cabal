@@ -29,11 +29,14 @@
 
 (** How a backend receives MCP server configuration. *)
 type mcp_support =
-  | Mcp_none  (** Backend ignores [task_spec.mcp_servers]; MCP not supported. *)
+  | Mcp_none
+      (** MCP is unsupported. Central capability preflight rejects every
+          nonempty [task_spec.mcp_servers] request before attachment staging,
+          version probing, project configuration, or backend execution. *)
   | Mcp_config_file
       (** Backend reads MCP config from a file passed explicitly at invocation
           (e.g. [claude --mcp-config <path>]) or from a project config file
-          written by Épure (e.g. [opencode.json] or [.github/mcp.json]). *)
+          written by the host through Cabal (e.g. [opencode.json]). *)
   | Mcp_config_flag
       (** Backend receives MCP config via a dedicated CLI flag. *)
   | Mcp_user_settings

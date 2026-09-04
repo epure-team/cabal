@@ -46,12 +46,16 @@ let replace_byte bytes offset value =
 
 let test_capability_driven_selection () =
   let descriptors = Backend_registry.all () in
+  Alcotest.(check (list string))
+    "quarantined Copilot is excluded from default executable E2Es"
+    ["claude-code"; "codex"; "opencode"]
+    E2e_harness_config.all_backend_ids ;
   let media =
     E2e_harness_config.media_schema_descriptors ~descriptors ()
   in
   Alcotest.(check (list string))
     "all positive media transports"
-    ["codex"; "copilot-cli"]
+    ["codex"]
     (E2e_harness_config.media_descriptors ~descriptors ()
     |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
   Alcotest.(check (list string))
@@ -83,9 +87,11 @@ let test_capability_driven_selection () =
     | None -> Alcotest.fail "Copilot descriptor is missing"
   in
   Alcotest.(check bool)
-    "Copilot media proof does not imply native schema"
-    false
-    copilot.capabilities.native_json_schema_output ;
+    "Copilot media remains disabled without complete MCP isolation"
+    true
+    (copilot.capabilities.media_support.media_types = []
+    && copilot.capabilities.media_support.evidence = None
+    && not copilot.capabilities.native_json_schema_output) ;
   let structured_without_native_schema =
     {
       codex with
@@ -584,7 +590,7 @@ let test_tool_lifecycle_identity_pairing () =
      Media_web_schema_e2e_support.validate_tool_lifecycle ~attempt_numbers:[1]
        valid
    with
-  | Ok 2 -> ()
+   | Ok ["read"; "fallback-name"] -> ()
   | Ok _ -> Alcotest.fail "valid tool lifecycle returned the wrong start count"
   | Error _ -> Alcotest.fail "valid stable-id/name fallback pairing was rejected") ;
   expect_invalid_tool_lifecycle "mismatched stable id"
@@ -769,6 +775,99 @@ let test_event_trace_contract () =
   with
   | Error _ -> ()
   | Ok () -> Alcotest.fail "attempt start/finish disagreement was accepted"
+
+let test_copilot_requires_exactly_two_view_lifecycles () =
+  let text = {|{"png_dominant_color":"blue","jpeg_dominant_color":"red"}|} in
+  let result =
+    Backend_types.make_task_result ~status:Success ~agent_text:text
+      ~session_id:"session" ~cost:result_cost ()
+  in
+  let attempt : Backend_types.task_attempt =
+    {
+      number = 1;
+      kind = Initial_attempt;
+      result;
+      attempt_elapsed = 1.0;
+      schema_validation_error = None;
+      delivery =
+        {
+          attachment_references = [];
+          attachment_delivery = Upload_attachments;
+          web_access_policy = Web_disabled;
+        };
+    }
+  in
+  let execution =
+    Backend_types.make_task_execution ~final_result:result ~attempts:[attempt]
+      ~cleanup_status:Cleanup_succeeded ()
+  in
+  let requirements =
+    Media_web_schema_e2e_support.protocol_requirements_for_backend "copilot-cli"
+  in
+  let tool seq id name payload =
+    event seq 1
+      (payload
+         (Task_event.{id = Some id; name}))
+  in
+  let started seq id name = tool seq id name (fun tool -> Tool_started tool) in
+  let finished seq id name =
+    event seq 1 (Tool_finished {id = Some id; name = Some name})
+  in
+  let trace tools =
+    [event 0 0 Task_started; event 1 1 (Attempt_started Initial_attempt)]
+    @ tools
+    @ [
+        event 20 1 (Session_id "session");
+        event 21 1 (Agent_text_delta text);
+        event 22 1 (Token_usage result_cost);
+        event 23 1 (Attempt_finished Attempt_succeeded);
+        event 24 1 (Terminal Succeeded);
+      ]
+  in
+  let expect_ok events =
+    match
+      Media_web_schema_e2e_support.validate_event_trace ~requirements execution
+        events
+    with
+    | Ok () -> ()
+    | Error _ -> Alcotest.fail "two exact view lifecycles were rejected"
+  in
+  let expect_rejected label events =
+    match
+      Media_web_schema_e2e_support.validate_event_trace ~requirements execution
+        events
+    with
+    | Error _ -> ()
+    | Ok () -> Alcotest.fail (label ^ " satisfied Copilot media evidence")
+  in
+  expect_ok
+    (trace
+       [
+         started 2 "view-1" "view";
+         finished 3 "view-1" "view";
+         started 4 "view-2" "view";
+         finished 5 "view-2" "view";
+       ]) ;
+  expect_rejected "one view"
+    (trace [started 2 "view-1" "view"; finished 3 "view-1" "view"]) ;
+  expect_rejected "grep and glob"
+    (trace
+       [
+         started 2 "grep-1" "grep";
+         finished 3 "grep-1" "grep";
+         started 4 "glob-1" "glob";
+         finished 5 "glob-1" "glob";
+       ]) ;
+  expect_rejected "unexpected extra tool"
+    (trace
+       [
+         started 2 "view-1" "view";
+         finished 3 "view-1" "view";
+         started 4 "view-2" "view";
+         finished 5 "view-2" "view";
+         started 6 "glob-1" "glob";
+         finished 7 "glob-1" "glob";
+       ])
 
 let test_tool_events_respect_attempt_boundaries () =
   let text = {|{"result":"ok"}|} in
@@ -986,6 +1085,9 @@ let test_e2e_binary_is_credential_gated_and_sequential () =
     true
     (contains source "Task_runtime.start_task") ;
   Alcotest.(check bool)
+    "live schema inclusion uses evidence and compatible draft" true
+    (contains source "E2e_harness_config.valid_native_schema_descriptor descriptor") ;
+  Alcotest.(check bool)
     "live proof never invokes the low-level backend"
     false
     (contains source "Agentic_backend.run_task") ;
@@ -1024,6 +1126,8 @@ let () =
         [
           Alcotest.test_case "terminal and attempts are consistent" `Quick
             test_event_trace_contract;
+          Alcotest.test_case "Copilot requires exactly two view lifecycles"
+            `Quick test_copilot_requires_exactly_two_view_lifecycles;
           Alcotest.test_case "tools stay within attempt boundaries" `Quick
             test_tool_events_respect_attempt_boundaries;
           Alcotest.test_case "multi-attempt tools remain isolated" `Quick

@@ -254,7 +254,7 @@ let test_ac3_config_points_to_project_mcp_json () =
 
 let test_ac3_build_command_prefers_project_mcp_discovery () =
   let cmd, _stdin =
-    Copilot_cli.build_command
+    Copilot_cli.Private.build_command
       ~mcp_config_path:(Some "/tmp/transient-mcp.json")
       (minimal_spec ())
   in

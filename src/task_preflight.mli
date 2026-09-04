@@ -76,6 +76,7 @@ type capability_error =
       requested : Backend_types.web_access;
       maximum : Backend_types.web_access;
     }
+  | Mcp_unsupported
   | Read_only_unsupported
   | Session_resume_unsupported
 
@@ -162,9 +163,10 @@ val validate_descriptor : Backend_registry.descriptor -> (unit, error) result
 
 (** [validate_capabilities ~descriptor spec] verifies descriptor proof
     invariants and checks that [descriptor] supports every requested media type,
-    the requested web level, read-only mode, and session resume. A non-native
-    [spec.json_schema] is accepted because [Json_schema_enforcer] provides the
-    validate-and-retry fallback.
+    the requested web level, MCP configuration mode, read-only mode, and session
+    resume. [Mcp_none] rejects any nonempty [spec.mcp_servers] before input I/O.
+    A non-native [spec.json_schema] is accepted because [Json_schema_enforcer]
+    provides the validate-and-retry fallback.
 
     {b Preconditions.} [descriptor] is the descriptor selected for the
     prospective invocation. Descriptor evidence is checked through

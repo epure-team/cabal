@@ -225,7 +225,7 @@ capability_evidence = None                        (* unchanged *)
 
 - **Accessed:** 2026-09-04
 - **Exact authenticated binary:** GitHub Copilot CLI `1.0.54`
-- **Current media outcome:** PNG/JPEG supported
+- **Current media outcome:** disabled; transport quarantined before spawn
 - **Current web outcome:** `Web_disabled`
 - **Unchanged schema outcome:** no native JSON Schema
 
@@ -241,10 +241,16 @@ capability_evidence = None                        (* unchanged *)
   argument surface for `--attachment`, `--output-format json`, `--stream off`,
   `--available-tools`, `--allow-all-tools`, `--deny-tool`, `--allow-url`,
   `--add-dir`, and `--disallow-temp-dir`.
+- Exact local `copilot --prefer-version 1.0.54 mcp --help`, which identifies
+  user `~/.copilot/mcp-config.json` and workspace `.mcp.json` sources.
+- Installed `1.0.54` `app.js`, searched for `COPILOT_HOME`, `.mcp.json`,
+  `disable-builtin-mcps`, and MCP loader construction. The loader merges user,
+  workspace, installed-plugin, additional, and account-controlled ODR sources;
+  built-ins are controlled separately.
 
-The public distribution contains binaries rather than implementation source.
-The adapter therefore treats the documented CLI and public JSONL contract as a
-strict boundary and fails closed on drift instead of relying on private internals.
+The local npm distribution includes a bundled/minified `app.js` but not a
+maintainable upstream source tree. The adapter therefore treats the documented
+CLI and public JSONL contract as a strict boundary and fails closed on drift.
 The terminal record is exact: `type`, `timestamp`, `exitCode`, `sessionId`, and
 `usage`; `usage` is validated as `codeChanges`, `premiumRequests`,
 `sessionDurationMs`, and `totalApiDurationMs`. Nonterminal event envelopes require
@@ -254,39 +260,55 @@ records are accepted. Event IDs, turn/interaction IDs, timestamp shapes,
 tool request/start/finish pairing, one canonical UUID terminal session, and one
 last zero-exit result are checked before any public projection.
 
-### Authenticated capability proof
+### Historical authenticated observations and offline proof
 
-`tools/probe_copilot_media_web.py` is bounded, non-sensitive, and exact-version
-gated. The final `media` run used deterministic blue PNG and red JPEG fixtures
+Before the MCP isolation review, `tools/probe_copilot_media_web.py` produced a
+bounded, non-sensitive, exact-version authenticated observation. Its `media` run
+used deterministic blue PNG and red JPEG fixtures
 with spaces in their paths, repeated `--attachment` flags in caller order,
 explicit `--add-dir`, and `--disallow-temp-dir`. It passed the ordered answer,
 paired successful `view` lifecycles, a swapped-order causal control, and an
 omitted-media control after fixture removal. The final `web-disabled` run passed
-with no web tool lifecycle. `test/test_media_web_schema_backends.ml` reproduces
-the positive image proof through central sealed preflight and hardened runtime.
+with no web tool lifecycle. These observations prove attachment behavior, but
+they do not prove that unrelated MCP servers were unable to load before task
+execution and therefore no longer back a capability claim.
 
-An exact-URL manual investigation also observed a successful public `web_fetch`
-at `1.0.54`, but Cabal's public policy is hierarchical and the hardened adapter
-does not yet implement a complete negative unrelated-URL matrix. Consequently
-the descriptor remains `Web_disabled`; exact-URL observation is not promoted to
-capability evidence.
+The probe's credential-free `--self-test` remains authoritative for its local
+mechanics. It exercises every mode validator, deterministic fixture magic and
+permissions, ordered/swapped/omitted media controls, exact URL web content,
+strict public record shapes, forbidden/failed/cross-turn/outstanding tools,
+nonempty MCP, workspace changes, extra fields, malformed output, timeouts,
+process start/decode failures, interruption, redaction, and a real subprocess
+invalid-argument check. Positional `selftest` remains a compatibility alias.
+
+The live `web-disabled` investigation now runs an exact-URL `web_fetch` positive
+control first, proving credentials, network, and tool functionality, then a
+separately configured denial requiring no web lifecycle. Cabal's policy is
+hierarchical and the probe does not implement a complete negative unrelated-URL
+matrix. Consequently the descriptor remains `Web_disabled`; the positive
+control is not promoted to capability evidence.
 
 ### Hardened invocation decision
 
-Copilot prompt mode documents `--allow-all-tools` as required. Cabal uses it only
-behind `--available-tools=view,grep,glob`, explicit shell/write/memory/URL denials,
-and no `--allow-all`, `--yolo`, `--allow-all-paths`, or `--allow-all-urls`. Hidden
-broadening environment variables are unset. A fresh private `COPILOT_HOME` owns
-config/log state and is removed with fixed cleanup telemetry. Raw JSONL and stderr
-are never returned because public event data may include prompts, attachment
-paths, tool arguments, and tool results.
+Copilot prompt mode documents `--allow-all-tools` as required. The retained
+candidate invocation bounds it with `--available-tools=view,grep,glob`, explicit
+shell/write/memory/URL denials, and no `--allow-all`, `--yolo`,
+`--allow-all-paths`, or `--allow-all-urls`. Hidden broadening environment
+variables are unset. A fresh private `COPILOT_HOME` would isolate user config,
+plugin state, and logs; descriptor/no-follow cleanup and fixed structural cleanup
+failure are independently tested.
 
-Positive web, read-only, resume/reuse, and MCP requests are rejected before
-config mutation or process spawn. Streaming remains false because the adapter
-uses `--stream off` and releases events only after whole-stream verification.
-Native JSON Schema remains false; when a schema is requested, the shared enforcer
-may make one fresh retry (two backend calls maximum) and resends the same sealed
-attachments.
+Those controls are insufficient at `1.0.54`: `--disable-builtin-mcps` disables
+only built-ins, `COPILOT_HOME` does not disable workspace or account-controlled
+ODR MCP sources, and `--additional-mcp-config` augments rather than replaces the
+effective configuration. Server names cannot be known safely in advance for
+per-server disable flags. Cabal therefore cannot establish an empty effective
+MCP set before process start. Every task fails with a fixed diagnostic before
+project setup or backend spawn; project MCP files are never generated or
+overwritten. The descriptor and independent runtime snapshot both advertise
+`media_types = []`, `media evidence = None`, and `Web_disabled`. CBL-08 excludes
+Copilot from authenticated media selection. Streaming, session resume,
+read-only, MCP, and native JSON Schema also remain false.
 
 The launcher installed on the probe host reported `1.0.54` while its default
 cached application could select older behavior. Every hardened invocation uses

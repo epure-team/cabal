@@ -73,17 +73,6 @@ let codex_media_evidence : Backend_types.feature_evidence =
         "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
   }
 
-let copilot_media_evidence : Backend_types.feature_evidence =
-  {
-    tested_at_version = "1.0.54";
-    test_method = Backend_types.E2e_test;
-    notes =
-      "Reproducible authenticated proof: test/test_media_web_schema_backends.ml and tools/probe_copilot_media_web.py media. They materialize deterministic ordered PNG/JPEG fixtures, validate image-derived answers and paired public JSONL tool events, and keep web disabled.";
-    evidence_url =
-      Some
-        "https://github.com/github/copilot-cli/blob/v1.0.54/changelog.md";
-  }
-
 let builtin_backends =
   [
     {
@@ -239,11 +228,7 @@ let builtin_backends =
           precedence_confidence = Low;
           generated_lsp_config = true;
           file_reading = false;
-          media_support =
-            {
-              media_types = [Backend_types.Png; Backend_types.Jpeg];
-              evidence = Some copilot_media_evidence;
-            };
+          media_support = {media_types = []; evidence = None};
           web_support =
             {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = false;
@@ -384,8 +369,20 @@ let unsupported_capability_notes_data =
         "https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically";
       note =
         "Copilot programmatic docs document prompt forms and flags, but no \
-         arbitrary prompt file-reference ingestion surface is documented for \
-         Épure file refs.";
+          arbitrary prompt file-reference ingestion surface is documented for \
+          Épure file refs.";
+    };
+    {
+      backend_id = "copilot-cli";
+      feature = "media_support";
+      evidence_url =
+        "https://github.com/github/copilot-cli/blob/v1.0.54/README.md";
+      note =
+        "Copilot CLI 1.0.54 can discover MCP servers from user, workspace, \
+         installed-plugin, built-in, and account-controlled ODR sources. Its \
+         --disable-builtin-mcps flag covers only built-ins and no flag disables \
+         every source before process start, so the hardened runtime is \
+         quarantined and advertises no media support.";
     };
   ]
 
