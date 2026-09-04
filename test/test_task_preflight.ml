@@ -1092,33 +1092,37 @@ let test_non_native_json_schema_uses_fallback () =
     "non-native JSON schema does not fail capability preflight" true
     (validate_capabilities descriptor (spec "/tmp" ~json_schema:schema) = Ok ())
 
-let test_codex_proven_media_and_disabled_web_capabilities () =
-  let descriptor =
-    match Backend_registry.find "codex" with
-    | Some descriptor -> descriptor
-    | None -> Alcotest.fail "Codex descriptor missing"
-  in
+let test_proven_media_and_disabled_web_capabilities () =
   let attachments =
     [
       attachment ~id:"png" ~path:"cover.png" png;
       attachment ~id:"jpeg" ~path:"back.jpg" ~media_type:Backend_types.Jpeg jpeg;
     ]
   in
-  Alcotest.(check bool)
-    "Codex accepts proven PNG/JPEG with disabled web" true
-    (validate_capabilities descriptor
-       (spec "/tmp" ~attachments ~web_access:Backend_types.Web_disabled)
-    = Ok ());
   List.iter
-    (fun web_access ->
-      expect_capability_error
-        (function
-          | Task_preflight.Unsupported_web_access
-              {requested; maximum = Backend_types.Web_disabled} ->
-              requested = web_access
-          | _ -> false)
-        (validate_capabilities descriptor (spec "/tmp" ~attachments ~web_access)))
-    [ Backend_types.Web_search; Backend_types.Web_search_and_fetch ]
+    (fun backend_id ->
+      let descriptor =
+        match Backend_registry.find backend_id with
+        | Some descriptor -> descriptor
+        | None -> Alcotest.fail (backend_id ^ " descriptor missing")
+      in
+      Alcotest.(check bool)
+        (backend_id ^ " accepts proven PNG/JPEG with disabled web") true
+        (validate_capabilities descriptor
+           (spec "/tmp" ~attachments ~web_access:Backend_types.Web_disabled)
+        = Ok ()) ;
+      List.iter
+        (fun web_access ->
+          expect_capability_error
+            (function
+              | Task_preflight.Unsupported_web_access
+                  {requested; maximum = Backend_types.Web_disabled} ->
+                  requested = web_access
+              | _ -> false)
+            (validate_capabilities descriptor
+               (spec "/tmp" ~attachments ~web_access)))
+        [Backend_types.Web_search; Backend_types.Web_search_and_fetch])
+    ["codex"; "copilot-cli"]
 
 let input_tests =
   [
@@ -1211,9 +1215,9 @@ let capability_tests =
     ( "non-native JSON schema fallback",
       `Quick,
       test_non_native_json_schema_uses_fallback );
-    ( "Codex proven media and disabled web capabilities",
+    ( "proven media and disabled web capabilities",
       `Quick,
-      test_codex_proven_media_and_disabled_web_capabilities );
+      test_proven_media_and_disabled_web_capabilities );
   ]
 
 let () =

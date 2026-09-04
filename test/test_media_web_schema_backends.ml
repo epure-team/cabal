@@ -5,14 +5,14 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** CBL-08 P0 authenticated media + JSON Schema E2E proof.
+(** CBL-08 authenticated media + optional native JSON Schema E2E proof.
 
     This binary is compiled and run only with [CABAL_E2E_TESTS=1]. It selects
-    evidence-valid native-schema media descriptors, applies
+    evidence-valid media descriptors, applies
     [CABAL_E2E_BACKEND], checks their hardened runtime binding, and performs
     exactly one central [Task_runtime] invocation per selected installed backend.
-    Current P0 is one Codex invocation carrying both PNG and JPEG fixtures under
-    native schema.
+    Codex carries both fixtures under native schema; backends such as Copilot
+    without native schema carry the same fixtures without advertising schema.
 
     Web selection is a separate test. No built-in currently has a positive web
     descriptor, so P0 performs no web invocation; the full web matrix is P1. *)
@@ -268,9 +268,17 @@ let invoke_media_schema ~sw ~env (descriptor : Backend_registry.descriptor) mode
     if List.length attachments <> List.length fixtures then
       Error Fixture_materialization_failed
     else
+      let native = descriptor.capabilities.native_json_schema_output in
+      let json_schema =
+        if native then Some (Media_web_schema_fixture.schema fixtures) else None
+      in
+      let prompt =
+        if native then Media_web_schema_fixture.prompt
+        else Media_web_schema_fixture.prompt_without_native_schema fixtures
+      in
       let spec =
         Backend_types.make_task_spec
-          ~prompt:Media_web_schema_fixture.prompt
+          ~prompt
           ~working_dir
           ~timeout:180.0
           ~expected_outputs:[]
@@ -278,8 +286,8 @@ let invoke_media_schema ~sw ~env (descriptor : Backend_registry.descriptor) mode
           ~web_access:Backend_types.Web_disabled
           ~managed_namespace:E2e_harness_config.managed_namespace
           ?model
-          ~read_only:true
-          ~json_schema:(Media_web_schema_fixture.schema fixtures)
+          ~read_only:descriptor.capabilities.read_only_support
+          ?json_schema
           ()
       in
       let events = ref [] in
@@ -321,12 +329,12 @@ let test_media_schema_backends () =
       | Error failure -> Alcotest.fail (render_failure failure)
       | Ok () ->
           let selected =
-            E2e_harness_config.selected_media_schema_descriptors
+            E2e_harness_config.selected_media_descriptors
               ~descriptors:(Backend_registry.all ()) ()
           in
           if selected = [] then
             Printf.eprintf
-              "[e2e-cbl08] SKIP media/schema: no eligible native-schema media backend\n%!"
+              "[e2e-cbl08] SKIP media: no eligible evidence-backed media backend\n%!"
           else
             Eio_posix.run @@ fun env ->
             Eio.Switch.run @@ fun sw ->
@@ -361,7 +369,7 @@ let test_media_schema_backends () =
                       with
                       | Ok () ->
                           Printf.eprintf
-                            "[e2e-cbl08] PASS %s image/schema central runtime proof\n%!"
+                            "[e2e-cbl08] PASS %s image central runtime proof\n%!"
                             descriptor.id
                       | Error failure ->
                           Alcotest.failf
@@ -398,7 +406,7 @@ let () =
     [
       ( "P0 media/schema",
         [
-          Alcotest.test_case "native-evidence media backends" `Slow
+          Alcotest.test_case "evidence-backed media backends" `Slow
             test_media_schema_backends;
         ] );
       ( "P1 web selection",

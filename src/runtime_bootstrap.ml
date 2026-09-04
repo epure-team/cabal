@@ -113,6 +113,17 @@ let codex_media_evidence : Backend_types.feature_evidence =
         "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
   }
 
+let copilot_media_evidence : Backend_types.feature_evidence =
+  {
+    tested_at_version = "1.0.54";
+    test_method = Backend_types.E2e_test;
+    notes =
+      "Reproducible authenticated proof: test/test_media_web_schema_backends.ml and tools/probe_copilot_media_web.py media. They materialize deterministic ordered PNG/JPEG fixtures, validate image-derived answers and paired public JSONL tool events, and keep web disabled.";
+    evidence_url =
+      Some
+        "https://github.com/github/copilot-cli/blob/v1.0.54/changelog.md";
+  }
+
 (* This mapping is intentionally independent of [Backend_registry]. It is the
    bootstrap-owned runtime contract for the exact approved implementations.
    Entry construction requires exact equality with the catalog descriptor, so a
@@ -165,16 +176,20 @@ let approved_runtime_capabilities = function
       Some
         Backend_registry.
           {
-            structured_output = false;
+            structured_output = true;
             streaming_output = false;
             session_resume = false;
-            mcp_support = Mcp_config_file;
+            mcp_support = Mcp_none;
             read_only_support = false;
             project_config_surface = Config_fixed_path;
             precedence_confidence = Low;
             generated_lsp_config = true;
             file_reading = false;
-            media_support = no_media;
+            media_support =
+              {
+                media_types = [Backend_types.Png; Backend_types.Jpeg];
+                evidence = Some copilot_media_evidence;
+              };
             web_support = no_web;
             native_json_schema_output = false;
             native_json_schema_output_evidence = None;

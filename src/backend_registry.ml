@@ -73,6 +73,17 @@ let codex_media_evidence : Backend_types.feature_evidence =
         "https://github.com/openai/codex/blob/rust-v0.131.0/codex-rs/utils/cli/src/shared_options.rs";
   }
 
+let copilot_media_evidence : Backend_types.feature_evidence =
+  {
+    tested_at_version = "1.0.54";
+    test_method = Backend_types.E2e_test;
+    notes =
+      "Reproducible authenticated proof: test/test_media_web_schema_backends.ml and tools/probe_copilot_media_web.py media. They materialize deterministic ordered PNG/JPEG fixtures, validate image-derived answers and paired public JSONL tool events, and keep web disabled.";
+    evidence_url =
+      Some
+        "https://github.com/github/copilot-cli/blob/v1.0.54/changelog.md";
+  }
+
 let builtin_backends =
   [
     {
@@ -216,19 +227,23 @@ let builtin_backends =
       id = "copilot-cli";
       display_name = "Copilot CLI";
       binary_name = "copilot";
-      baseline_version = "1.0.34";
+      baseline_version = "1.0.54";
       capabilities =
         {
-          structured_output = false;
+          structured_output = true;
           streaming_output = false;
           session_resume = false;
-          mcp_support = Mcp_config_file;
+          mcp_support = Mcp_none;
           read_only_support = false;
           project_config_surface = Config_fixed_path;
           precedence_confidence = Low;
           generated_lsp_config = true;
           file_reading = false;
-          media_support = {media_types = []; evidence = None};
+          media_support =
+            {
+              media_types = [Backend_types.Png; Backend_types.Jpeg];
+              evidence = Some copilot_media_evidence;
+            };
           web_support =
             {maximum = Backend_types.Web_disabled; evidence = None};
           native_json_schema_output = false;

@@ -473,7 +473,25 @@ let validate_semantics fixtures document =
     | _ -> Error Image_semantics_mismatch
   with Yojson.Json_error _ -> Error Image_semantics_mismatch
 
+let public_json_document document =
+  let document = String.trim document in
+  let unwrap prefix =
+    if
+      String.starts_with ~prefix document
+      && String.ends_with ~suffix:"```" document
+      && String.length document >= String.length prefix + 3
+    then
+      String.sub document (String.length prefix)
+        (String.length document - String.length prefix - 3)
+      |> String.trim
+    else document
+  in
+  if String.starts_with ~prefix:"```json" document then unwrap "```json"
+  else if String.starts_with ~prefix:"```" document then unwrap "```"
+  else document
+
 let validate_response fixtures document =
+  let document = public_json_document document in
   match Json_schema_validator.validate ~schema:(schema fixtures) ~document with
   | Error _ -> Error Schema_rejected
   | Ok () -> validate_semantics fixtures document
@@ -498,3 +516,13 @@ let prompt =
    output schema. Return only the JSON object required by the schema. Do not \
    infer colors from attachment identifiers or filenames, and do not include \
    prose or markdown."
+
+let prompt_without_native_schema fixtures =
+  let fields =
+    fixtures
+    |> List.map (fun fixture -> Printf.sprintf "\"%s\"" fixture.response_field)
+    |> String.concat ", "
+  in
+  Printf.sprintf
+    "Inspect the actual contents of every attached image. Identify the dominant visible color in each image using one lowercase English color word. Return only one JSON object with exactly these string fields in this order: %s. Do not infer colors from attachment identifiers or filenames, and do not include prose or markdown."
+    fields

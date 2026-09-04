@@ -56,16 +56,6 @@ let arg_value_after flag args =
   in
   find args
 
-(** Replace task prompt argv values with a stable placeholder. *)
-let normalize_prompt_arg_values args =
-  let rec normalize = function
-    | flag :: _value :: rest when flag = "-p" || flag = "--prompt" ->
-        flag :: "<prompt>" :: normalize rest
-    | arg :: rest -> arg :: normalize rest
-    | [] -> []
-  in
-  normalize args
-
 (** {1 AC1 — Claude Code read-only bug is fixed} *)
 
 (* AC1: build_command with read_only=true must include --disallowedTools *)
@@ -206,26 +196,20 @@ let test_ac3_gemini_read_only_no_write_amplification () =
     args_rw
     args_ro
 
-(* AC3: Copilot read_only=true does not add write-amplifying flags vs baseline. *)
+(* AC3: Copilot cannot enforce the public read-only contract and fails closed. *)
 let test_ac3_copilot_read_only_no_write_amplification () =
-  let args_ro, _ =
-    Copilot_cli.build_command ~mcp_config_path:None (spec_ro ())
-  in
-  let args_rw, _ =
-    Copilot_cli.build_command ~mcp_config_path:None (spec_rw ())
-  in
   Alcotest.(check bool)
-    "AC3: copilot read-only prompt is passed in argv"
+    "AC3: copilot rejects unsupported read-only execution"
     true
-    (List.mem "review the diff" args_ro) ;
+    (Result.is_error
+       (Copilot_cli.build_invocation ~config_home:"/isolated"
+          ~mcp_config_path:None (spec_ro ()))) ;
   Alcotest.(check bool)
-    "AC3: copilot read-write prompt is passed in argv"
+    "AC3: copilot still accepts its narrowed default transport"
     true
-    (List.mem "implement the story" args_rw) ;
-  Alcotest.(check (list string))
-    "AC3: copilot read-only = baseline (no escalation, limitation documented)"
-    (normalize_prompt_arg_values args_rw)
-    (normalize_prompt_arg_values args_ro)
+    (Result.is_ok
+       (Copilot_cli.build_invocation ~config_home:"/isolated"
+          ~mcp_config_path:None (spec_rw ())))
 
 (** {4 AC4 — Validators do not gain mutable powers accidentally} *)
 

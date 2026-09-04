@@ -29,6 +29,7 @@ type trace_error =
 
 let protocol_requirements_for_backend = function
   | "codex" -> {session = true; usage = true; tool = false}
+  | "copilot-cli" -> {session = true; usage = true; tool = true}
   | _ -> {session = false; usage = false; tool = false}
 
 let outcome_of_status = function

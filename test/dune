@@ -140,7 +140,8 @@
 
 (test
  (name test_copilot_cli)
- (libraries cabal alcotest eio eio_posix unix)
+ (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
+ (deps ../bin/process_group_launcher.exe)
  (modules test_copilot_cli))
 
 (test

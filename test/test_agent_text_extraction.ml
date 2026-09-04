@@ -116,20 +116,20 @@ let test_opencode_extracts_response_via_json_events () =
     expected
     (Opencode_cli.parse_stdout_text stdout)
 
-(** {1 copilot: plain text, no structured envelope} *)
+(** {1 copilot: strict public JSONL only} *)
 
-let test_copilot_returns_stdout_verbatim () =
+let test_copilot_rejects_plain_stdout () =
   let stdout = "Plain-text reply from copilot." in
   Alcotest.(check string)
-    "agent text is stdout (whitespace-trimmed)"
-    stdout
+    "plain output is not public agent text"
+    ""
     (Copilot_cli.parse_stdout_text stdout)
 
-let test_copilot_trims_trailing_whitespace () =
+let test_copilot_rejects_truncated_stdout () =
   let stdout = "Hello world\n\n  " in
   Alcotest.(check string)
-    "trailing whitespace stripped"
-    "Hello world"
+    "truncated output is not public agent text"
+    ""
     (Copilot_cli.parse_stdout_text stdout)
 
 (** {1 task_result wiring}
@@ -197,12 +197,12 @@ let () =
         ] );
       ( "copilot",
         [
-          ( "returns stdout verbatim",
+          ( "rejects plain stdout",
             `Quick,
-            test_copilot_returns_stdout_verbatim );
-          ( "trims trailing whitespace",
+            test_copilot_rejects_plain_stdout );
+          ( "rejects truncated stdout",
             `Quick,
-            test_copilot_trims_trailing_whitespace );
+            test_copilot_rejects_truncated_stdout );
         ] );
       ( "task_result wiring",
         [

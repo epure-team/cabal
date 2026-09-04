@@ -50,6 +50,11 @@ let test_capability_driven_selection () =
     E2e_harness_config.media_schema_descriptors ~descriptors ()
   in
   Alcotest.(check (list string))
+    "all positive media transports"
+    ["codex"; "copilot-cli"]
+    (E2e_harness_config.media_descriptors ~descriptors ()
+    |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
+  Alcotest.(check (list string))
     "current positive media/schema matrix"
     ["codex"]
     (List.map (fun (d : Backend_registry.descriptor) -> d.id) media) ;
@@ -72,6 +77,15 @@ let test_capability_driven_selection () =
     "Codex P0 uses native schema"
     true
     codex.capabilities.native_json_schema_output ;
+  let copilot =
+    match Backend_registry.find "copilot-cli" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Copilot descriptor is missing"
+  in
+  Alcotest.(check bool)
+    "Copilot media proof does not imply native schema"
+    false
+    copilot.capabilities.native_json_schema_output ;
   let structured_without_native_schema =
     {
       codex with
@@ -449,6 +463,21 @@ let test_fixture_schema_and_semantic_marker () =
   (match Media_web_schema_fixture.validate_fixture_semantics wrong_jpeg with
   | Error _ -> ()
   | Ok () -> Alcotest.fail "arbitrary JPEG color assignment was accepted") ;
+  let plain_prompt =
+    Media_web_schema_fixture.prompt_without_native_schema fixtures
+  in
+  List.iter
+    (fun field ->
+      Alcotest.(check bool)
+        ("plain media prompt names " ^ field) true
+        (contains plain_prompt field))
+    ["png_dominant_color"; "jpeg_dominant_color"] ;
+  List.iter
+    (fun answer ->
+      Alcotest.(check bool)
+        "plain media prompt does not disclose the expected answer" false
+        (contains plain_prompt answer))
+    ["\"blue\""; "\"red\""] ;
   let expected = Media_web_schema_fixture.expected_document_text fixtures in
   (match
      Json_schema_validator.validate
@@ -460,6 +489,12 @@ let test_fixture_schema_and_semantic_marker () =
   (match Media_web_schema_fixture.validate_response fixtures expected with
   | Ok () -> ()
   | Error _ -> Alcotest.fail "expected image-derived response was rejected") ;
+  (match
+     Media_web_schema_fixture.validate_response fixtures
+       ("```json\n" ^ expected ^ "\n```")
+   with
+  | Ok () -> ()
+  | Error _ -> Alcotest.fail "public JSON code fence was not normalized") ;
   let constant_but_wrong =
     {|{"png_dominant_color":"blue","jpeg_dominant_color":"blue"}|}
   in

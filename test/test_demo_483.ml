@@ -5,7 +5,7 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Tests for Story #483 — Copilot parity uplift (Copilot CLI 1.0.34).
+(** Tests for Story #483 — Copilot project configuration compatibility.
 
     Covers:
     - AC1: Supported Copilot project config files are created or updated
@@ -86,14 +86,12 @@ let minimal_spec () : Backend_types.task_spec =
     json_schema = None;
   }
 
-let check_failed_with_mcp_path result path =
+let check_failed_with_unsupported_mcp result =
   match result.Backend_types.status with
   | Backend_types.Failed msg ->
       Alcotest.(check bool) "failure mentions MCP" true (contains_str msg "MCP") ;
-      Alcotest.(check bool)
-        "failure mentions MCP path"
-        true
-        (contains_str msg path)
+      Alcotest.(check bool) "failure is explicit" true
+        (contains_str msg "unsupported")
   | _ -> Alcotest.fail "expected Copilot run_task to fail before invocation"
 
 (** {1 AC1 — Project-scoped config files created or updated} *)
@@ -218,16 +216,16 @@ let test_ac2_config_has_lsp_section () =
 
 (** {1 AC3 — MCP/config improved, no prerelease, no unapproved entries} *)
 
-(* AC3: MCP support mode reflects the project .github/mcp.json file. *)
+(* AC3: the narrowed non-interactive transport excludes all MCP tools. *)
 let test_ac3_copilot_mcp_support_is_config_file () =
   let open Backend_registry in
   match find "copilot-cli" with
   | None -> Alcotest.fail "copilot-cli descriptor not found"
   | Some d ->
       Alcotest.(check bool)
-        "AC3: copilot-cli mcp_support = Mcp_config_file"
+        "AC3: copilot-cli mcp_support = Mcp_none"
         true
-        (d.capabilities.mcp_support = Mcp_config_file)
+        (d.capabilities.mcp_support = Mcp_none)
 
 (* AC3: generated config contains an MCP reference section. *)
 let test_ac3_config_contains_mcp_reference () =
@@ -273,7 +271,7 @@ let test_ac3_run_fails_when_user_mcp_config_blocks_requested_mcp () =
       Eio_posix.run @@ fun env ->
       Eio.Switch.run @@ fun sw ->
       let result = Copilot_cli.run_task ~sw ~env (task_spec_with_mcp dir) in
-      check_failed_with_mcp_path result ".github/mcp.json" ;
+      check_failed_with_unsupported_mcp result ;
       Alcotest.(check string)
         "user-authored MCP config unchanged"
         original
@@ -293,7 +291,7 @@ let test_ac3_run_fails_when_hash_mismatch_blocks_requested_mcp () =
       Eio_posix.run @@ fun env ->
       Eio.Switch.run @@ fun sw ->
       let result = Copilot_cli.run_task ~sw ~env (task_spec_with_mcp dir) in
-      check_failed_with_mcp_path result ".github/mcp.json" ;
+      check_failed_with_unsupported_mcp result ;
       Alcotest.(check string)
         "hash-mismatched MCP config unchanged"
         modified
@@ -348,9 +346,7 @@ let test_ac3_config_no_secrets () =
 
 (** {1 AC4 — Stable limitations are documented} *)
 
-(* AC4: the generated config documents the stable limitations of Copilot CLI
-   1.0.34 (streaming, structured output, session resume, read-only, file
-   reading are not available in the stable channel). *)
+(* AC4: generated project instructions continue to document limitations. *)
 let test_ac4_limitations_documented () =
   match Backend_config_gen.generate ~backend_id:"copilot-cli" with
   | None -> Alcotest.fail "expected artifact for copilot-cli"
@@ -363,15 +359,15 @@ let test_ac4_limitations_documented () =
         || contains_str lower "not supported"
         || contains_str lower "not available")
 
-(* AC4: baseline version is the stable 1.0.34. *)
+(* AC4: baseline version is the authenticated media baseline. *)
 let test_ac4_baseline_is_stable () =
   let open Backend_registry in
   match find "copilot-cli" with
   | None -> Alcotest.fail "copilot-cli descriptor not found"
   | Some d ->
       Alcotest.(check string)
-        "AC4: baseline_version = 1.0.34 (stable)"
-        "1.0.34"
+        "AC4: baseline_version = 1.0.54 (stable)"
+        "1.0.54"
         d.baseline_version
 
 (* AC4: capability flags accurately reflect stable limitations. *)
@@ -382,23 +378,23 @@ let test_ac4_capability_flags_reflect_stable_limits () =
   | Some d ->
       let caps = d.capabilities in
       Alcotest.(check bool)
-        "AC4: streaming_output = false (not in stable 1.0.34)"
+        "AC4: streaming_output = false"
         false
         caps.streaming_output ;
       Alcotest.(check bool)
-        "AC4: structured_output = false (not in stable 1.0.34)"
-        false
+        "AC4: structured_output = true"
+        true
         caps.structured_output ;
       Alcotest.(check bool)
-        "AC4: session_resume = false (not in stable 1.0.34)"
+        "AC4: session_resume = false"
         false
         caps.session_resume ;
       Alcotest.(check bool)
-        "AC4: read_only_support = false (not in stable 1.0.34)"
+        "AC4: read_only_support = false"
         false
         caps.read_only_support ;
       Alcotest.(check bool)
-        "AC4: file_reading = false (not in stable 1.0.34)"
+        "AC4: file_reading = false"
         false
         caps.file_reading
 
@@ -449,7 +445,7 @@ let () =
       ( "AC3 MCP improved, no prerelease, no unapproved entries",
         [
           Alcotest.test_case
-            "mcp_support = Mcp_config_file (.github/mcp.json)"
+            "hardened runtime mcp_support = Mcp_none"
             `Quick
             test_ac3_copilot_mcp_support_is_config_file;
           Alcotest.test_case
@@ -488,7 +484,7 @@ let () =
             `Quick
             test_ac4_limitations_documented;
           Alcotest.test_case
-            "baseline = 1.0.34 (stable, not prerelease)"
+            "baseline = 1.0.54 (authenticated media baseline)"
             `Quick
             test_ac4_baseline_is_stable;
           Alcotest.test_case

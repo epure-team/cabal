@@ -109,7 +109,7 @@ let test_copilot_cli_baseline () =
   let d = find_desc "copilot-cli" in
   Alcotest.(check string)
     "copilot-cli baseline"
-    "1.0.34"
+    "1.0.54"
     d.Backend_registry.baseline_version
 
 (** {1 AC3 — Capability flags are present and correct} *)
@@ -134,7 +134,7 @@ let test_file_reading_capabilities () =
         d.Backend_registry.capabilities.Backend_registry.file_reading)
     ["codex"; "gemini-cli"; "copilot-cli"]
 
-(* structured_output: all except copilot-cli *)
+(* structured_output: all built-ins expose a validated machine-readable form *)
 let test_structured_output_capabilities () =
   List.iter
     (fun id ->
@@ -143,12 +143,7 @@ let test_structured_output_capabilities () =
         (id ^ " has structured_output")
         true
         d.Backend_registry.capabilities.Backend_registry.structured_output)
-    ["claude-code"; "codex"; "opencode"; "gemini-cli"] ;
-  let d_cop = find_desc "copilot-cli" in
-  Alcotest.(check bool)
-    "copilot-cli has no structured_output"
-    false
-    d_cop.Backend_registry.capabilities.Backend_registry.structured_output
+    ["claude-code"; "codex"; "opencode"; "gemini-cli"; "copilot-cli"]
 
 (* session_resume: claude-code, codex, and gemini-cli *)
 let test_session_resume_capabilities () =
@@ -201,7 +196,7 @@ let test_streaming_output_capability () =
         d.Backend_registry.capabilities.Backend_registry.streaming_output)
     ["codex"; "copilot-cli"]
 
-(* mcp_support: not None for claude-code, opencode, copilot-cli *)
+(* The narrowed Copilot transport excludes all MCP tools. *)
 let test_mcp_support_modes () =
   let open Backend_registry in
   let d_claude = find_desc "claude-code" in
@@ -216,9 +211,9 @@ let test_mcp_support_modes () =
     (d_opencode.capabilities.mcp_support <> Mcp_none) ;
   let d_copilot = find_desc "copilot-cli" in
   Alcotest.(check bool)
-    "copilot-cli mcp_support <> None"
+    "copilot-cli mcp_support = None"
     true
-    (d_copilot.capabilities.mcp_support <> Mcp_none)
+    (d_copilot.capabilities.mcp_support = Mcp_none)
 
 (* project_config_surface: assert exact variant per backend *)
 let test_project_config_surface_values () =
@@ -322,7 +317,8 @@ let test_codex_media_and_disabled_web_capabilities () =
 
 let test_non_codex_media_and_web_remain_disabled () =
   Backend_registry.all ()
-  |> List.filter (fun (d : Backend_registry.descriptor) -> d.id <> "codex")
+  |> List.filter (fun (d : Backend_registry.descriptor) ->
+         d.id <> "codex" && d.id <> "copilot-cli")
   |> List.iter (fun (d : Backend_registry.descriptor) ->
          Alcotest.(check (list bool))
            (d.id ^ " remains media/web-disabled")
@@ -332,7 +328,33 @@ let test_non_codex_media_and_web_remain_disabled () =
              d.capabilities.media_support.evidence = None;
              d.capabilities.web_support.maximum = Backend_types.Web_disabled;
              d.capabilities.web_support.evidence = None;
-           ])
+            ])
+
+let test_copilot_media_and_disabled_web_capabilities () =
+  let descriptor = find_desc "copilot-cli" in
+  let media = descriptor.capabilities.media_support in
+  Alcotest.(check bool)
+    "Copilot supports exactly PNG and JPEG"
+    true
+    (media.media_types = [Backend_types.Png; Backend_types.Jpeg]) ;
+  (match media.evidence with
+  | None -> Alcotest.fail "Copilot media evidence is missing"
+  | Some evidence ->
+      Alcotest.(check string)
+        "Copilot media evidence version" "1.0.54" evidence.tested_at_version ;
+      Alcotest.(check bool)
+        "Copilot evidence names its reproducible proof"
+        true
+        (match evidence.test_method with
+        | Backend_types.E2e_test ->
+            contains_substring evidence.notes "test_media_web_schema_backends"
+            && contains_substring evidence.notes "probe_copilot_media_web.py"
+        | Backend_types.Manual_probe _ -> false)) ;
+  Alcotest.(check bool)
+    "Copilot web remains disabled"
+    true
+    (descriptor.capabilities.web_support.maximum = Backend_types.Web_disabled
+    && descriptor.capabilities.web_support.evidence = None)
 
 (** {1 AC4 — backend_supports_file_reading routed through registry} *)
 
@@ -688,7 +710,7 @@ let () =
             `Quick
             test_gemini_cli_baseline;
           Alcotest.test_case
-            "copilot-cli baseline 1.0.34"
+            "copilot-cli baseline 1.0.54"
             `Quick
             test_copilot_cli_baseline;
         ] );
@@ -699,7 +721,7 @@ let () =
             `Quick
             test_file_reading_capabilities;
           Alcotest.test_case
-            "structured_output: all except copilot-cli"
+            "structured_output: all built-ins"
             `Quick
             test_structured_output_capabilities;
           Alcotest.test_case
@@ -735,7 +757,11 @@ let () =
             `Quick
             test_codex_media_and_disabled_web_capabilities;
           Alcotest.test_case
-            "non-codex media and web support remains disabled"
+            "copilot media evidence and disabled web"
+            `Quick
+            test_copilot_media_and_disabled_web_capabilities;
+          Alcotest.test_case
+            "other media and web support remains disabled"
             `Quick
             test_non_codex_media_and_web_remain_disabled;
         ] );

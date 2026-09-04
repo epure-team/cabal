@@ -94,6 +94,13 @@ let media_schema_descriptors ~descriptors () =
       && valid_native_schema_descriptor descriptor)
     descriptors
 
+let media_descriptors ~descriptors () =
+  List.filter
+    (fun descriptor ->
+      positive_media_descriptor descriptor
+      && Result.is_ok (Cabal.Task_preflight.validate_descriptor descriptor))
+    descriptors
+
 let web_descriptors ~descriptors () =
   List.filter positive_web_descriptor descriptors
 
@@ -113,6 +120,9 @@ let select_descriptors ?(getenv = Sys.getenv_opt) descriptors =
 let selected_media_schema_descriptors ?(getenv = Sys.getenv_opt) ~descriptors ()
     =
   media_schema_descriptors ~descriptors () |> select_descriptors ~getenv
+
+let selected_media_descriptors ?(getenv = Sys.getenv_opt) ~descriptors () =
+  media_descriptors ~descriptors () |> select_descriptors ~getenv
 
 let selected_web_descriptors ?(getenv = Sys.getenv_opt) ~descriptors () =
   web_descriptors ~descriptors () |> select_descriptors ~getenv

@@ -8,32 +8,40 @@
 (** GitHub Copilot CLI agentic backend.
 
     This module implements the [AGENTIC_BACKEND.S] interface for the
-    GitHub Copilot CLI tool. It spawns [copilot] in non-interactive mode
-    and collects results.
+    GitHub Copilot CLI tool at the enforced 1.0.54 media baseline.
 
     {b Configuration:}
     Copilot CLI is expected to be installed and accessible in the PATH.
-    The stable Copilot CLI expects the prompt as a CLI argument
-    ([--prompt <text>] / [-p <text>]), so the backend passes the full prompt in
-    argv rather than through stdin. It also uses [--yolo -s --no-ask-user] for
-    non-interactive execution with auto-approval and silent output (no stats,
-    just response).
+    The prompt is one argv value. Each centrally prepared PNG/JPEG is supplied
+    once with a repeated [--attachment] flag and its private staging directory
+    is explicitly added without a blanket path grant. The invocation pins
+    [--prefer-version 1.0.54], disables remote/update/experimental behavior,
+    and limits visible tools to [view], [grep], and [glob]. Copilot requires
+    [--allow-all-tools] in prompt mode; that approval is bounded by the visible
+    list and explicit shell/write/memory/URL denials. User configuration and
+    logs are routed through a fresh private [COPILOT_HOME] removed after the
+    attempt. Cleanup failure emits only fixed telemetry.
 
     {b MCP Integration:}
-    Copilot supports project MCP servers via [.github/mcp.json]. When
-    [task_spec.mcp_servers] is non-empty, Épure writes approved entries to
-    that project config file before invocation and relies on Copilot's project
-    discovery rather than a transient CLI flag.  If the project MCP artifact is
-    user-authored or hash-mismatched, the backend fails clearly instead of
-    invoking Copilot without the requested MCP servers.
+    The artifact generator retains [.github/mcp.json] compatibility, but the
+    hardened prompt transport excludes MCP tools. A task requesting MCP servers
+    is rejected before config mutation or process execution.
 
     {b LSP Integration:}
     Copilot supports project LSP server configuration via [.github/lsp.json].
     Épure renders host-provided LSP servers into that strict JSON artifact.
 
     {b Output Format:}
-    Copilot CLI does not support JSON output. The response is captured
-    as plain text from stdout. Token usage is not available. *)
+    Copilot runs with [--output-format json --stream off]. The complete public
+    JSONL stream is validated before assistant text, UUID session identity,
+    output-token usage, tool lifecycle events, or verified raw callbacks are
+    released. Unknown/error/truncated/mixed/post-terminal streams fail closed.
+    Raw stdout and stderr are discarded from returned results because public
+    records can repeat prompts, attachment paths, and tool arguments.
+
+    Positive web access, read-only requests, resume/reuse, and MCP are currently
+    unsupported. Native JSON Schema stays false; schema enforcement therefore
+    uses the shared bounded fresh-retry path. *)
 
 (** @inline *)
 include Agentic_backend.S
@@ -62,50 +70,58 @@ val project_config_artifacts :
   lsp_servers:Backend_types.lsp_server_config list ->
   Backend_config_writer.artifact list
 
-(** [build_command ~mcp_config_path spec] constructs the Copilot CLI command
-    and stdin content.  Stable Copilot CLI expects [--prompt <text>] / [-p
-    <text>] rather than reading stdin for [-p -], so the returned command embeds
-    the full prompt argument and the returned stdin content is empty.  Copilot
-    CLI 1.0.34 has no native read-only sandbox;
-    [spec.read_only] is acknowledged as documented limitation and the baseline
-    command is returned unchanged.  [mcp_config_path] is ignored because
-    Copilot discovers the project [.github/mcp.json] written by [run_task].
-    Exported for testing.
+(** A fail-closed non-interactive Copilot invocation. [redacted_argv] has the
+    same shape as [argv] but contains no prompt, model, configuration path, or
+    attachment path. *)
+type backend_invocation = {
+  argv : string list;
+  stdin : string option;
+  redacted_argv : string list;
+}
 
-    {pre}
-    (none)
+(** [build_invocation ~config_home ~mcp_config_path spec] builds a hardened
+    prompt-mode invocation. [attachment_paths] must be the absolute paths of
+    the ordered, sealed files authorized for [spec.attachments]. Unsupported
+    media, web, read-only, resume, reuse, or MCP requests return a sanitized
+    error before process execution. *)
+val build_invocation :
+  ?attachment_paths:string list ->
+  ?attachment_delivery:Backend_types.attachment_delivery ->
+  config_home:string ->
+  mcp_config_path:string option ->
+  Backend_types.task_spec ->
+  (backend_invocation, string) result
 
-    {post}
-    Returns [(cmd_list, stdin_content)].  Includes [--model <model>] when
-    [spec.model] is set and returns empty [stdin_content].  Command is otherwise
-    identical for [read_only = true] and [read_only = false] (no native
-    restriction model).
-
-    {violators}
-    (none)
-
-    {violates}
-    (none) *)
+(** Compatibility wrapper around {!build_invocation}. It raises
+    [Invalid_argument] for an unsupported request. New callers should use
+    {!build_invocation} so rejection remains explicit. *)
 val build_command :
   mcp_config_path:string option ->
   Backend_types.task_spec ->
   string list * string
 
-(** [parse_stdout_text stdout] extracts the agent text from Copilot CLI's
-    plain-text stdout.  Copilot does not currently emit a structured (JSON)
-    output mode, so this returns the captured stdout with trailing whitespace
-    trimmed.  Exposed so adapters that wrap Copilot via [task_result.agent_text]
-    can keep a uniform host-facing surface.
+(** Validated terminal projection of Copilot's public JSONL protocol. *)
+type verified_terminal = {
+  text : string;
+  session_id : string option;
+  cost : Backend_types.cost option;
+}
 
-    {pre}
-    (none)
+(** [verify_terminal_stdout stdout] validates the complete public Copilot JSONL
+    stream, including canonical session identity, bounded timestamp shapes,
+    paired tool lifecycles, and exactly one final [result] record. Unknown record
+    types, malformed required fields, non-zero terminal results, and
+    post-terminal data fail with a sanitized diagnostic. *)
+val verify_terminal_stdout : string -> (verified_terminal, string) result
 
-    {post}
-    Returns [stdout] with trailing whitespace stripped.
+(** [normalized_events_of_stdout stdout] returns host-neutral assistant text,
+    session, tool-lifecycle, and token-usage events only after the complete
+    stream passes {!verify_terminal_stdout}. Raw prompts, tool arguments, and
+    attachment paths are never included. *)
+val normalized_events_of_stdout :
+  string -> (Task_event.payload list, string) result
 
-    {violators}
-    (none)
-
-    {violates}
-    (none) *)
+(** [parse_stdout_text stdout] returns the final public assistant text only when
+    the complete JSONL stream passes {!verify_terminal_stdout}; malformed,
+    incomplete, plain-text, and error output returns the empty string. *)
 val parse_stdout_text : string -> string

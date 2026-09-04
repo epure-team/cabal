@@ -1,8 +1,8 @@
 # Native JSON Schema Investigation — copilot-cli
 
 **Backend ID:** `copilot-cli`
-**Baseline version investigated:** `1.0.34`
-**Version range consulted:** `1.0.34` (baseline) .. `1.0.34` (latest stable at time of investigation), i.e. `baseline_version..latest-public-release`
+**Baseline version investigated:** `1.0.34` for Story #633; revalidated at the current media baseline `1.0.54`
+**Version range consulted:** `1.0.34..1.0.54`
 **Outcome:** AC2(b) — documented non-support
 **Story:** #633
 **Date:** 2026-05-25
@@ -11,7 +11,8 @@
 
 ## 1. Summary
 
-At baseline version `1.0.34`, copilot-cli does not expose a CLI surface for
+At the original `1.0.34` baseline and the current `1.0.54` baseline,
+copilot-cli does not expose a CLI surface for
 forwarding a JSON schema into the underlying GitHub Copilot API invocation.
 The CLI is a closed-source GitHub CLI extension (`gh copilot`) that calls the
 GitHub Copilot API internally but does not surface any `--json-schema`,
@@ -156,7 +157,7 @@ schema enforcement.
 **AC1 binary outcome:** Option 4 (no schema-forwarding surface with hard
 enforcement) — routes to AC2(b) documented non-support.
 
-**Descriptor action:** `native_json_schema_output` stays `false`;
+**Descriptor action at baseline `1.0.54`:** `native_json_schema_output` stays `false`;
 `capability_evidence` stays `None`.  No other backend descriptor is touched
 (NFR-U2).
 
@@ -171,7 +172,7 @@ is not wired.
 
 ## 6. Future-Work Note
 
-Features newer than `1.0.34` are not considered here per NFR-U3.  If a future
+Features through `1.0.54` were re-evaluated for CBL-07E. If a future
 copilot-cli release introduces a `--json-schema <path>` flag, a
 `--response-format json-schema` flag, or an equivalent config-file key that
 routes to a hard-constrained GitHub Copilot API response schema, this
@@ -213,7 +214,82 @@ https://github.com/orgs/community/discussions/ (accessed 2026-05-25).
 
 ```
 id = "copilot-cli"
-baseline_version = "1.0.34"
+baseline_version = "1.0.54"
 capabilities.native_json_schema_output = false   (* unchanged *)
 capability_evidence = None                        (* unchanged *)
 ```
+
+---
+
+## 8. CBL-07E media/web and transport re-evaluation
+
+- **Accessed:** 2026-09-04
+- **Exact authenticated binary:** GitHub Copilot CLI `1.0.54`
+- **Current media outcome:** PNG/JPEG supported
+- **Current web outcome:** `Web_disabled`
+- **Unchanged schema outcome:** no native JSON Schema
+
+### Authoritative public surfaces
+
+- Pinned `1.0.54` distribution README:
+  https://github.com/github/copilot-cli/blob/v1.0.54/README.md
+- Pinned `1.0.54` changelog:
+  https://github.com/github/copilot-cli/blob/v1.0.54/changelog.md
+- GitHub's non-interactive/programmatic CLI documentation:
+  https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically
+- Exact local `copilot --prefer-version 1.0.54 --help`, used to pin the stable
+  argument surface for `--attachment`, `--output-format json`, `--stream off`,
+  `--available-tools`, `--allow-all-tools`, `--deny-tool`, `--allow-url`,
+  `--add-dir`, and `--disallow-temp-dir`.
+
+The public distribution contains binaries rather than implementation source.
+The adapter therefore treats the documented CLI and public JSONL contract as a
+strict boundary and fails closed on drift instead of relying on private internals.
+The terminal record is exact: `type`, `timestamp`, `exitCode`, `sessionId`, and
+`usage`; `usage` is validated as `codeChanges`, `premiumRequests`,
+`sessionDurationMs`, and `totalApiDurationMs`. Nonterminal event envelopes require
+`type`, `id`, `parentId`, `timestamp`, and object `data`. Only documented session,
+user, assistant-turn/message/reasoning, tool-start, and successful tool-complete
+records are accepted. Event IDs, turn/interaction IDs, timestamp shapes,
+tool request/start/finish pairing, one canonical UUID terminal session, and one
+last zero-exit result are checked before any public projection.
+
+### Authenticated capability proof
+
+`tools/probe_copilot_media_web.py` is bounded, non-sensitive, and exact-version
+gated. The final `media` run used deterministic blue PNG and red JPEG fixtures
+with spaces in their paths, repeated `--attachment` flags in caller order,
+explicit `--add-dir`, and `--disallow-temp-dir`. It passed the ordered answer,
+paired successful `view` lifecycles, a swapped-order causal control, and an
+omitted-media control after fixture removal. The final `web-disabled` run passed
+with no web tool lifecycle. `test/test_media_web_schema_backends.ml` reproduces
+the positive image proof through central sealed preflight and hardened runtime.
+
+An exact-URL manual investigation also observed a successful public `web_fetch`
+at `1.0.54`, but Cabal's public policy is hierarchical and the hardened adapter
+does not yet implement a complete negative unrelated-URL matrix. Consequently
+the descriptor remains `Web_disabled`; exact-URL observation is not promoted to
+capability evidence.
+
+### Hardened invocation decision
+
+Copilot prompt mode documents `--allow-all-tools` as required. Cabal uses it only
+behind `--available-tools=view,grep,glob`, explicit shell/write/memory/URL denials,
+and no `--allow-all`, `--yolo`, `--allow-all-paths`, or `--allow-all-urls`. Hidden
+broadening environment variables are unset. A fresh private `COPILOT_HOME` owns
+config/log state and is removed with fixed cleanup telemetry. Raw JSONL and stderr
+are never returned because public event data may include prompts, attachment
+paths, tool arguments, and tool results.
+
+Positive web, read-only, resume/reuse, and MCP requests are rejected before
+config mutation or process spawn. Streaming remains false because the adapter
+uses `--stream off` and releases events only after whole-stream verification.
+Native JSON Schema remains false; when a schema is requested, the shared enforcer
+may make one fresh retry (two backend calls maximum) and resends the same sealed
+attachments.
+
+The launcher installed on the probe host reported `1.0.54` while its default
+cached application could select older behavior. Every hardened invocation uses
+`--prefer-version 1.0.54`; the descriptor baseline is therefore `1.0.54`, the
+exact authenticated and transport-selected version, rather than an inferred
+minimum from earlier changelog entries.
