@@ -460,14 +460,14 @@ let init_git_repo dir =
   if Sys.command cmd <> 0 then Error "could not initialise temporary git repo"
   else Ok ()
 
-let task_spec ~working_dir ~model =
+let task_spec ?(read_only = true) ~working_dir ~model () =
   Backend_types.make_task_spec
     ~prompt:"Reply exactly: EPURE_SMOKE_OK"
     ~working_dir
     ~timeout:120.0
     ~expected_outputs:[]
     ?model
-    ~read_only:true
+    ~read_only
     ()
 
 let command_argv_or_fail case spec =
@@ -487,7 +487,8 @@ let test_copilot_command_preview_omits_model_when_none () =
   let argv =
     command_argv_or_fail
       (backend_case Copilot_cli.id)
-      (task_spec ~working_dir:"/tmp/epure-smoke-copilot" ~model:None)
+      (task_spec ~read_only:false ~working_dir:"/tmp/epure-smoke-copilot"
+         ~model:None ())
   in
   Alcotest.(check bool) "omits --model" false (List.mem "--model" argv)
 
@@ -497,7 +498,7 @@ let test_gemini_command_preview_includes_model_and_omits_skip_trust () =
       (backend_case Gemini_cli.id)
       (task_spec
          ~working_dir:"/tmp/epure-smoke-gemini"
-         ~model:(Some "gemini-3-flash-preview"))
+         ~model:(Some "gemini-3-flash-preview") ())
   in
   Alcotest.(check bool)
     "omits unsupported --skip-trust"
@@ -568,7 +569,10 @@ let run_backend ~sw ~env case =
               match init_git_repo dir with
               | Error msg -> fail_backend case msg
               | Ok () -> (
-                  let spec = task_spec ~working_dir:dir ~model in
+                  let spec =
+                    task_spec ~read_only:(case.id <> Copilot_cli.id)
+                      ~working_dir:dir ~model ()
+                  in
                   match command_argv_for_case case spec with
                   | Error msg -> fail_backend case msg
                   | Ok argv -> (
