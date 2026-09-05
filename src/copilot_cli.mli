@@ -14,12 +14,14 @@
 
     {b Configuration:}
     Copilot CLI is expected to be installed and accessible in the PATH.
-    Authenticated 1.0.54 attachment behavior was observed, but the media
-    capability and evidence were withdrawn because complete MCP discovery
-    isolation is unproven. The dormant candidate builds the prompt as one argv
-    value and would supply each centrally prepared PNG/JPEG once with a repeated
-    [--attachment] flag; its private staging directory would be explicitly added
-    without a blanket path grant. The candidate invocation would pin
+    Authenticated 1.0.54 attachment behavior is a historical,
+    investigation-only observation; it supplies no positive media evidence or
+    capability claim because complete MCP discovery isolation is unproven.
+    Copilot is excluded from executable media E2E selection. The dormant
+    candidate builds the prompt as one argv value and would supply each centrally
+    prepared PNG/JPEG once with a repeated [--attachment] flag; its private
+    staging directory would be explicitly added without a blanket path grant.
+    The candidate invocation would pin
     [--prefer-version 1.0.54], disable remote/update/experimental behavior, and
     limit visible tools to [view], [grep], and [glob]. Copilot requires
     [--allow-all-tools] in prompt mode; that candidate approval is bounded by
@@ -34,9 +36,11 @@
     [.mcp.json] files, installed plugins, built-ins, and account-controlled ODR.
     [--disable-builtin-mcps] covers only built-ins and a private [COPILOT_HOME]
     isolates only local user/plugin state. No flag disables every source. Cabal
-    therefore generates no MCP artifact and fails every task before project
-    setup or backend spawn. The protocol validator independently rejects any
-    nonempty MCP-loaded event.
+    therefore generates no MCP artifact. Hardened central dispatch rejects every
+    task immediately after validated registry lookup, before input/capability
+    preflight, project setup, or backend spawn; the direct adapter rejection is
+    defense in depth. The protocol validator independently rejects any nonempty
+    MCP-loaded event.
 
     {b LSP Integration:}
     Copilot supports project LSP server configuration via [.github/lsp.json].
@@ -44,9 +48,11 @@
 
     {b Output Format:}
     Authenticated [--output-format json --stream off] JSONL was observed, and the
-    dormant parser validates exact non-duplicate envelope, payload, usage,
+    dormant parser recursively rejects duplicate object keys in every parsed
+    value before semantic parsing, including opaque tool arguments, attachment
+    objects, and skills. It then validates exact envelope, payload, usage,
     session, and tool fields before reconstructing public data. Tool requests
-    require an object [arguments] field that is validated structurally and then
+    require an object [arguments] field that is structurally checked and then
     discarded. Callback JSON is rebuilt only from validated assistant text,
     session identity, and output-token usage; unknown/error/truncated/mixed/
     post-terminal streams fail closed. Raw stdout and stderr are never projected.

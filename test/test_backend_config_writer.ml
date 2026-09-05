@@ -289,10 +289,10 @@ let test_unique_temp_collision_retries_without_deleting_unowned_file () =
         "successful owned temp was renamed" false (Sys.file_exists winner) ;
       Alcotest.(check string) "target content" "new data\n" (read_file target))
 
-let test_replaced_owned_temp_is_not_published_or_deleted () =
+let test_observed_temp_inode_mismatch_is_rejected () =
   with_project_dir (fun project ->
       let replacement_path = ref None in
-      let sentinel = "replacement owned by another writer\n" in
+      let sentinel = "mismatched replacement fixture\n" in
       let rejected =
         try
           W.Private.atomic_write_file_with_hooks ~project_root:project
@@ -308,15 +308,16 @@ let test_replaced_owned_temp_is_not_published_or_deleted () =
           false
         with Unix.Unix_error (Unix.EAGAIN, _, _) -> true
       in
-      Alcotest.(check bool) "replacement is rejected before publish" true rejected ;
+      Alcotest.(check bool)
+        "observed inode mismatch is rejected before publish" true rejected ;
       Alcotest.(check bool)
         "target is not published" false
         (Sys.file_exists (Filename.concat project "config/test.cfg")) ;
       Option.iter
         (fun path ->
-          Alcotest.(check bool) "unowned replacement is preserved" true
+          Alcotest.(check bool) "mismatched replacement is preserved" true
             (Sys.file_exists path) ;
-          Alcotest.(check string) "unowned replacement is unchanged" sentinel
+          Alcotest.(check string) "mismatched replacement is unchanged" sentinel
             (read_file path))
         !replacement_path)
 
@@ -413,8 +414,8 @@ let () =
             "unique temporary collision retries safely" `Quick
             test_unique_temp_collision_retries_without_deleting_unowned_file;
           Alcotest.test_case
-            "replaced owned temporary file is not published or deleted" `Quick
-            test_replaced_owned_temp_is_not_published_or_deleted;
+            "observed temporary inode mismatch is rejected" `Quick
+            test_observed_temp_inode_mismatch_is_rejected;
           Alcotest.test_case
             "relative and absolute parent symlinks cannot escape"
             `Quick test_symlinked_parent_never_writes_outside_workspace;

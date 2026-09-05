@@ -148,8 +148,9 @@ applies even when a task requests no MCP server.
 ## Stable Limitations (Copilot CLI 1.0.54)
 
 Cabal retains a tested candidate JSONL validator for future investigation, but
-does not execute it while the runtime is quarantined. The following capabilities
-are intentionally not supported:
+does not execute it while the runtime is quarantined. It rejects duplicate keys
+recursively in every parsed JSON object before semantic parsing. The following
+capabilities are intentionally not supported:
 - structured_output: disabled while quarantined; JSONL observations are dormant
 - media_support: disabled; no positive evidence is recorded
 - streaming_output: disabled; whole-stream verification is required
@@ -414,6 +415,33 @@ let initial_protocol_state =
 
 let protocol_error category =
   Error ("Copilot protocol rejected: " ^ category)
+
+module String_set = Set.Make (String)
+
+let rec validate_no_duplicate_object_fields (json : Yojson.Safe.t) =
+  match json with
+  | `Assoc fields ->
+      let rec validate_fields seen = function
+        | [] -> Ok ()
+        | (name, _) :: _ when String_set.mem name seen ->
+            protocol_error "duplicate JSON object field"
+        | (name, value) :: rest -> (
+            match validate_no_duplicate_object_fields value with
+            | Error _ as error -> error
+            | Ok () -> validate_fields (String_set.add name seen) rest)
+      in
+      validate_fields String_set.empty fields
+  | `List values ->
+      let rec validate_values = function
+        | [] -> Ok ()
+        | value :: rest -> (
+            match validate_no_duplicate_object_fields value with
+            | Error _ as error -> error
+            | Ok () -> validate_values rest)
+      in
+      validate_values values
+  | `Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `String _ -> Ok ()
+  | `Tuple _ | `Variant _ -> protocol_error "non-standard JSON value"
 
 let contains_substring value fragment =
   let value_length = String.length value in
@@ -921,6 +949,7 @@ let verify_stream_stdout stdout =
           try Ok (Yojson.Safe.from_string raw_line)
           with Yojson.Json_error _ -> protocol_error "malformed JSONL"
         in
+        let* () = validate_no_duplicate_object_fields json in
         parse_record state raw_line json)
       (Ok initial_protocol_state) (nonempty_lines stdout)
   in

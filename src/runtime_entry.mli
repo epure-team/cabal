@@ -87,3 +87,10 @@ val create :
   execution_policy:execution_policy ->
   version_policy:version_policy ->
   (t, validation_error) result
+
+(** {b Migration note:} [execution_policy] is a new mandatory argument to
+    {!create}; existing call sites must pass [Dispatch_enabled] unless they are
+    intentionally binding a typed quarantine. No optional default is supplied,
+    so trusted registration code cannot silently omit this security state.
+    {!t} also gained the readable private field [execution_policy]; exhaustive
+    private-record patterns must name it or end with [_]. *)

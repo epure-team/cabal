@@ -252,8 +252,12 @@ capability_evidence = None                        (* unchanged *)
 The local npm distribution includes a bundled/minified `app.js` but not a
 maintainable upstream source tree. The adapter therefore treats the documented
 CLI and public JSONL contract as a strict boundary and fails closed on drift.
-The terminal record is exact and non-duplicate: `type`, `timestamp`, `exitCode`,
-`sessionId`, and `usage`; `usage` and nested `codeChanges` use exact field sets,
+Before semantic parsing, both the OCaml candidate parser and Python evidence
+probe recursively reject duplicate keys in every object reached through objects
+or arrays, including opaque tool arguments, user attachment objects, and skills.
+The failure is fixed and sanitized. The terminal record is then exact:
+`type`, `timestamp`, `exitCode`, `sessionId`, and `usage`; `usage` and nested
+`codeChanges` use exact field sets,
 integer kinds/ranges where required, finite non-negative premium requests, and no
 workspace changes. Nonterminal event envelopes require exactly `type`, `id`,
 `parentId`, `timestamp`, and object `data`; every accepted session, user,
@@ -285,9 +289,10 @@ mechanics. It exercises every mode validator, deterministic fixture magic and
 permissions, ordered/swapped/omitted media controls, exact URL web content,
 strict public record shapes, forbidden/failed/cross-turn/outstanding tools,
 nonempty MCP, workspace changes, missing/extra/duplicate fields, object-valued
-arguments, numeric kinds/ranges and overflow, malformed output, timeouts, process
-start/decode failures, interruption, redaction, and a real subprocess invalid-
-argument check. Positional `selftest` remains a compatibility alias.
+arguments, recursive nested duplicate keys, numeric kinds/ranges and overflow,
+malformed output, timeouts, process start/decode failures, interruption,
+redaction, and a real subprocess invalid-argument check. Positional `selftest`
+remains a compatibility alias.
 
 The live `web-disabled` investigation now runs an exact-URL `web_fetch` positive
 control first, proving credentials, network, and tool functionality, then a

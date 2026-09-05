@@ -776,7 +776,10 @@ let test_event_trace_contract () =
   | Error _ -> ()
   | Ok () -> Alcotest.fail "attempt start/finish disagreement was accepted"
 
-let test_historical_copilot_oracle_requires_two_view_lifecycles () =
+(* Investigation-only regression for historical Copilot observations. It is not
+   positive capability evidence: quarantined Copilot remains excluded from the
+   CBL-08 descriptor selection and executable E2E run. *)
+let test_historical_copilot_observation_requires_two_view_lifecycles () =
   let text = {|{"png_dominant_color":"blue","jpeg_dominant_color":"red"}|} in
   let result =
     Backend_types.make_task_result ~status:Success ~agent_text:text
@@ -839,7 +842,8 @@ let test_historical_copilot_oracle_requires_two_view_lifecycles () =
     with
     | Error _ -> ()
     | Ok () ->
-        Alcotest.fail (label ^ " satisfied the historical Copilot oracle")
+        Alcotest.fail
+          (label ^ " satisfied the historical Copilot observation contract")
   in
   expect_ok
     (trace
@@ -1128,8 +1132,9 @@ let () =
           Alcotest.test_case "terminal and attempts are consistent" `Quick
             test_event_trace_contract;
           Alcotest.test_case
-            "historical Copilot oracle requires exactly two view lifecycles"
-            `Quick test_historical_copilot_oracle_requires_two_view_lifecycles;
+            "historical Copilot observation requires exactly two view lifecycles"
+            `Quick
+            test_historical_copilot_observation_requires_two_view_lifecycles;
           Alcotest.test_case "tools stay within attempt boundaries" `Quick
             test_tool_events_respect_attempt_boundaries;
           Alcotest.test_case "multi-attempt tools remain isolated" `Quick

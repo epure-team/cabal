@@ -500,10 +500,13 @@ bounded by the explicit available-tool list and is not accompanied by
 `--allow-all-paths`, `--allow-all-urls`, `--allow-all`, or `--yolo`. The dormant
 parser accepts only exact, non-duplicate envelopes and payload schemas, strict
 numeric kinds/ranges, object-valued tool arguments, and fully paired allowlisted
-tool lifecycles. Raw JSONL, tool arguments, and stderr would be withheld from
-`task_result`; callbacks are rebuilt only from verified assistant text, canonical
-UUID session identity, and checked output-token usage. Because this transport is
-quarantined and unreachable, Copilot advertises `structured_output = false`.
+tool lifecycles. Before those semantic checks, duplicate keys are rejected
+recursively throughout every object and array, including opaque arguments,
+attachment objects, and skills. Raw JSONL, tool arguments, and stderr would be
+withheld from `task_result`; callbacks are rebuilt only from verified assistant
+text, canonical UUID session identity, and checked output-token usage. Because
+this transport is quarantined and unreachable, Copilot advertises
+`structured_output = false`.
 However, `1.0.54` can also discover user, workspace, installed-plugin, built-in,
 and account-controlled ODR MCP servers. `--disable-builtin-mcps` covers only one
 source and isolated `COPILOT_HOME` covers only local user/plugin state; there is
@@ -631,6 +634,14 @@ safe `Enforce_baseline` default. Collisions and invalid capability/evidence pair
 mutate neither registry. Origin is registry-entry metadata, so
 `Agentic_backend.S` imposes no provenance field on downstream modules.
 
+The execution-policy API is intentionally source-breaking. Calls to
+`Runtime_entry.create` must now pass `~execution_policy`; use `Dispatch_enabled`
+unless intentionally binding a typed quarantine. Exhaustive patterns over the
+private `Runtime_entry.t` record must add `execution_policy` or end with `_`, and
+exhaustive `Runtime_dispatch.error` matches must handle `Backend_quarantined`.
+There is no optional default because trusted registration must not silently omit
+the security state.
+
 `Registry.register` remains the legacy runtime-only compatibility API. It always
 installs a raw, untrusted entry and clears any validated pairing for the same id;
 `Runtime_dispatch` rejects it before preflight side effects, version/availability
@@ -643,11 +654,13 @@ must replace the whole validated entry.
 2. Config artifact paths must be workspace-relative. Cabal rejects absolute,
    empty, dot, traversal, symlinked-parent, and symlink-target paths before
    writing. Atomic replacement uses a unique same-directory `O_EXCL` temporary
-   file created as `0600`; failure cleanup and publication act only while its
-   device/inode identity still matches, so collisions and replacements are never
-   deleted or published. Hosts must still prevent hostile concurrent workspace
-   parent renames during config setup because portable OCaml does not expose the
-   required descriptor-relative `openat`/`renameat` primitives.
+   file created as `0600`; observed device/inode mismatch prevents that operation
+   from deliberately cleaning up or publishing the mismatched pathname. These
+   checks are defense in depth, not race isolation. For the full write
+   transaction, hosts must ensure that no hostile same-UID process concurrently
+   mutates parent, target, or temporary workspace pathnames: portable OCaml does
+   not expose the required descriptor-relative `openat`/`renameat`/`unlinkat`
+   primitives.
 3. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
 4. Timeout coverage is still incomplete for all subprocess phases, including spawn and stdin-write edge cases.
 5. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.

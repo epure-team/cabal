@@ -350,6 +350,21 @@ let contains_substr s needle =
   in
   nlen = 0 || loop 0
 
+let replace_first text ~needle ~replacement =
+  let text_length = String.length text in
+  let needle_length = String.length needle in
+  let rec find offset =
+    if offset + needle_length > text_length then None
+    else if String.sub text offset needle_length = needle then Some offset
+    else find (offset + 1)
+  in
+  match find 0 with
+  | None -> Alcotest.fail ("test fixture is missing " ^ needle)
+  | Some offset ->
+      String.sub text 0 offset ^ replacement
+      ^ String.sub text (offset + needle_length)
+          (text_length - offset - needle_length)
+
 let test_build_command_includes_model_flag () =
   let spec =
     {(minimal_spec ()) with Backend_types.model = Some "gpt-5.4-mini"}
@@ -851,6 +866,46 @@ let test_protocol_rejects_non_exact_shape_mutations () =
     (fun (label, stream) -> expect_protocol_rejection label stream)
     cases
 
+let test_protocol_rejects_duplicates_recursively_before_semantics () =
+  let duplicate_error =
+    "Copilot protocol rejected: duplicate JSON object field"
+  in
+  let expect_duplicate label stream =
+    match Copilot_cli.Private.verify_terminal_stdout stream with
+    | Error message -> Alcotest.(check string) label duplicate_error message
+    | Ok _ -> Alcotest.fail (label ^ " duplicate key was accepted")
+  in
+  let tool_arguments =
+    replace_first (successful_tool_jsonl ())
+      ~needle:{|"arguments":{"path":"/private/image.png"}|}
+      ~replacement:
+        {|"arguments":{"path":"/private/image.png","path":"/private/other.png"}|}
+  in
+  let user_attachment =
+    replace_first (successful_jsonl ()) ~needle:{|"attachments":[]|}
+      ~replacement:{|"attachments":[{"path":"first","path":"second"}]|}
+  in
+  let nested_skill =
+    json_line
+      (event ~id:"event-skills" ~type_:"session.skills_loaded"
+         (`Assoc
+           [
+             ( "skills",
+               `List
+                 [
+                   `Assoc
+                     [("name", `String "first"); ("name", `String "second")];
+                 ] );
+           ]))
+    ^ "\n" ^ successful_jsonl ()
+  in
+  [
+    ("opaque tool arguments", tool_arguments);
+    ("user attachment object", user_attachment);
+    ("skills array object", nested_skill);
+  ]
+  |> List.iter (fun (label, stream) -> expect_duplicate label stream)
+
 let test_protocol_rejects_unexpected_numeric_kinds_and_ranges () =
   let plain = successful_jsonl () in
   let mutate_data record_type transform stream =
@@ -1322,6 +1377,9 @@ let command_tests =
     ( "protocol rejects non-exact envelope and payload shapes",
       `Quick,
       test_protocol_rejects_non_exact_shape_mutations );
+    ( "protocol rejects duplicate keys recursively before semantics",
+      `Quick,
+      test_protocol_rejects_duplicates_recursively_before_semantics );
     ( "protocol rejects unexpected numeric kinds and ranges",
       `Quick,
       test_protocol_rejects_unexpected_numeric_kinds_and_ranges );

@@ -1165,6 +1165,16 @@ def selftest() -> None:
     expect_probe_failure(
         lambda: parse_public_output(duplicate_field), "duplicate JSON object field"
     )
+    nested_duplicate_field = tool_fixture.replace(
+        '"arguments":{"path":"/private/never-print"}',
+        '"arguments":{"path":"/private/never-print",'
+        '"path":"/private/also-never-print"}',
+        1,
+    )
+    expect_probe_failure(
+        lambda: parse_public_output(nested_duplicate_field),
+        "nested duplicate JSON object field",
+    )
 
     validate_ignored_record("session.skills_loaded", {"skills": []})
     validate_ignored_record("session.info", {"infoType": "notice", "message": "public"})

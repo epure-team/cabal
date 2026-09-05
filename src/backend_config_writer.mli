@@ -156,17 +156,21 @@ val managed_body_hash :
 (** [write_artifact ~project_dir ~force artifact] writes [artifact] using the
     generic ownership policy.
 
-    The project root is resolved once, absolute paths and traversal components
-    are rejected, and every existing parent/target component is checked with
-    [lstat] immediately before reads, unique same-directory temporary files are
-    opened with [O_EXCL] at mode [0600], and successful writes use atomic
-    replacement. Only the exact temporary inode created by the current call is
-    eligible for cleanup on an unsuccessful exit; collisions and stale files
-    are never deleted. Symlink components fail with [Unsafe_project_path] before
-    content is written. OCaml's portable Unix API exposes no
-    descriptor-relative [openat]/[renameat] write surface, so a hostile process
-    with concurrent rename access retains a residual parent-component TOCTOU;
-    callers should prevent concurrent workspace mutation during config setup. *)
+    {b Caller precondition:} no hostile same-UID process may mutate, rename, or
+    replace the workspace's parent, target, or temporary pathnames for the full
+    write transaction. Subject to that precondition, the project root is resolved
+    once, absolute paths and traversal components are rejected, every existing
+    parent/target component is checked with [lstat], unique same-directory
+    temporary files are opened with [O_EXCL] at mode [0600], and successful
+    writes use atomic replacement. Recorded device/inode checks avoid deliberately
+    cleaning up or publishing a temporary pathname when a mismatch is observed;
+    exclusive-open collisions are retried without intentionally removing the
+    colliding path, and symlink components fail with [Unsafe_project_path].
+
+    Portable OCaml exposes no descriptor-relative
+    [openat]/[renameat]/[unlinkat] surface, so [lstat] and inode checks retain
+    pathname check/use windows and are defense in depth, not isolation from such
+    concurrent namespace mutation. *)
 val write_artifact :
   project_dir:string -> force:bool -> artifact -> write_result
 
@@ -196,11 +200,14 @@ module Private : sig
   val inspect_project_file :
     project_dir:string -> relative_path:string -> project_file_read
 
-  (** Deterministic failure/collision seam for the production atomic writer.
+  (** Deterministic failure/collision hook for the production atomic writer.
       [nonce_for_attempt] controls only the validated basename suffix; temporary
       files always remain beside the target. [after_write] runs after complete
-      write and [fsync], while the owned descriptor is still open. Every raised
-      exception closes it and removes only the matching owned inode. *)
+      write and [fsync], while the owned descriptor is still open. Ordinary
+      failure cleanup closes the descriptor and conditionally unlinks after an
+      observed device/inode match. This deterministic hook does not model or
+      close hostile concurrent pathname replacement races; the caller
+      precondition on {!write_artifact} still applies. *)
   val atomic_write_file_with_hooks :
     ?managed_namespace:Backend_types.managed_namespace ->
     ?nonce_for_attempt:(int -> string) ->

@@ -22,10 +22,12 @@ by the date a change merged to `main`.
   preserve caller order with repeated `--attachment` flags, isolate and
   remove `COPILOT_HOME`, and narrow prompt mode to `view,grep,glob` with
   explicit shell/write/memory/URL denial and no blanket path or URL approval.
-  Exact, non-duplicate public JSONL envelopes and payloads, numeric kinds/ranges,
+  The dormant parser recursively rejects duplicate keys throughout every object
+  and array before semantics, including opaque arguments, attachment objects,
+  and skills. Exact public JSONL envelopes and payloads, numeric kinds/ranges,
   object-valued tool arguments, and paired successful allowlisted tool events are
-  validated by the dormant parser before text, UUID session, usage, or rebuilt
-  callbacks are released; returned raw stdout/stderr and arguments are withheld.
+  then validated before text, UUID session, usage, or rebuilt callbacks are
+  released; returned raw stdout/stderr and arguments are withheld.
   Project MCP artifacts are neither generated nor overwritten.
   Media, positive web, read-only, resume/reuse, and MCP claims remain disabled;
   the bundled YAML route is non-executable. Authenticated `1.0.54` attachment
@@ -35,13 +37,19 @@ by the date a change merged to `main`.
   faults, interruption, and output sanitization. Historical authenticated media
   and web observations remain investigation data only and do not back capability
   claims.
+- **Runtime execution-policy migration.** `Runtime_entry.create` now requires
+  explicit `~execution_policy`; exhaustive patterns over its private record must
+  add the readable field or `_`, and exhaustive `Runtime_dispatch.error` matches
+  must handle `Backend_quarantined`. There is deliberately no enabling default
+  that would let trusted registration omit quarantine state.
 - **Owned atomic backend-config publication.** Managed artifacts now use unique
   same-directory `O_EXCL` temporary files created as `0600`, bounded collision
   retries, device/inode ownership checks before cleanup and rename, and atomic
-  replacement. Failed writes remove only the current call's matching inode;
-  stale, colliding, or replaced paths are neither deleted nor published. The
-  documented portable parent-component race boundary remains because OCaml does
-  not expose descriptor-relative `openat`/`renameat`.
+  replacement. An observed inode mismatch blocks deliberate cleanup or
+  publication of that mismatched pathname. This does not close hostile same-UID
+  namespace races: callers must prevent concurrent parent, target, and temporary
+  pathname mutation for the full transaction because portable OCaml does not
+  expose descriptor-relative `openat`/`renameat`/`unlinkat`.
 - **Central media + schema E2E proof (CBL-08 P0).** A new authenticated,
   `CABAL_E2E_TESTS=1`-gated harness selects evidence-backed media descriptors and
   exercises Codex PNG/JPEG upload plus native JSON Schema in one hardened

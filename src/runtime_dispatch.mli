@@ -38,6 +38,10 @@ type error =
       (** Untrusted low-level error. Use {!render_error}, which redacts it,
           rather than displaying this payload directly. *)
 
+(** {b Migration note:} {!error} gained [Backend_quarantined]. Exhaustive
+    matches must add that constructor, normally rendering it through
+    {!render_error}, or deliberately use a wildcard for forward compatibility. *)
+
 (** Central detailed failure. [Dispatch_failure] covers resolution, preflight,
     version, availability, and protected execution-boundary failures before a
     backend result completes. [Dispatch_failure_with_execution] is the same

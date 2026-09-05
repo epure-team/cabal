@@ -154,9 +154,11 @@ standalone OCaml library and as the backend abstraction layer vendored under
   `--prefer-version 1.0.54`, use repeated `--attachment` flags in caller order,
   and validate exact, non-duplicate public `--output-format json --stream off`
   envelopes and payloads before reconstructing text/session/usage/tool events or
-  callbacks. Numeric kinds/ranges, object-valued tool arguments, and complete
-  allowlisted tool lifecycles fail closed; raw records and arguments are never
-  projected. `--allow-all-tools` is required by Copilot prompt mode and is safe
+  callbacks. Before semantics, recursive duplicate-key validation covers every
+  object and array, including opaque arguments, attachment objects, and skills.
+  Numeric kinds/ranges, object-valued tool arguments, and complete allowlisted
+  tool lifecycles fail closed; raw records and arguments are never projected.
+  `--allow-all-tools` is required by Copilot prompt mode and is safe
   only while bounded by `--available-tools=view,grep,glob`, explicit
   shell/write/memory/URL denials, no blanket path/URL grants, and isolated
   `COPILOT_HOME`. Because those controls do not disable every MCP discovery
@@ -491,11 +493,17 @@ standalone OCaml library and as the backend abstraction layer vendored under
   custom module source compatibility. YAML package/config metadata is bounded to
   the latest package per id and cleared by `Registry.clear`.
 - Config artifact replacement uses unique same-directory `O_EXCL` temporary files
-  created as `0600`. Cleanup and rename proceed only while device/inode identity
-  still matches the file created by that call; stale/colliding/replaced paths are
-  never deleted or published. Portable OCaml lacks descriptor-relative
-  `openat`/`renameat`, so hosts must still exclude hostile concurrent parent
-  renames during setup.
+  created as `0600`. Observed device/inode mismatch blocks cleanup or publication
+  of that mismatched pathname, but this is defense in depth rather than hostile
+  same-UID race isolation. For the complete transaction, callers must prevent
+  concurrent hostile mutation of parent, target, and temporary workspace
+  pathnames. Portable OCaml lacks descriptor-relative
+  `openat`/`renameat`/`unlinkat`, so check/use windows remain.
+- `Runtime_entry.create` requires explicit `~execution_policy`; do not add a
+  default that lets trusted registration silently omit quarantine state. Its
+  private record gained the readable `execution_policy` field, and
+  `Runtime_dispatch.error` gained `Backend_quarantined`; update exhaustive
+  patterns or deliberately use `_`.
 - Custom backends are registered additively as a validated descriptor/runtime
   pair through `Runtime_bootstrap.register_custom`; their explicit descriptor is
   the full host capability attestation and `Enforce_baseline` is the safe default.
