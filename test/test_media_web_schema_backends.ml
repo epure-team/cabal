@@ -11,8 +11,8 @@
     evidence-valid media descriptors, applies
     [CABAL_E2E_BACKEND], checks their hardened runtime binding, and performs
     exactly one central [Task_runtime] invocation per selected installed backend.
-    Codex carries both fixtures under native schema; backends such as Copilot
-    without native schema carry the same fixtures without advertising schema.
+    Codex carries both fixtures under native schema; future evidence-backed
+    non-native media backends should exercise the schema-less one-call path.
 
     Web selection is a separate test. No built-in currently has a positive web
     descriptor, so P0 performs no web invocation; the full web matrix is P1. *)
