@@ -42,6 +42,14 @@ by the date a change merged to `main`.
   add the readable field or `_`, and exhaustive `Runtime_dispatch.error` matches
   must handle `Backend_quarantined`. There is deliberately no enabling default
   that would let trusted registration omit quarantine state.
+- **Additional exhaustive/API migrations.** Exhaustive
+  `Backend_config_writer.write_result` / `Backend_config_gen.write_result`
+  matches must add `Unsafe_project_path`, and exhaustive
+  `Task_preflight.capability_error` matches must add `Mcp_unsupported`. Replace
+  `Copilot_cli.build_command` with `Copilot_cli.Private.build_command` and
+  `Copilot_cli.parse_stdout_text` with
+  `Copilot_cli.Private.parse_stdout_text`; no forwarding aliases retain these
+  quarantined seams as production-level APIs.
 - **Owned atomic backend-config publication.** Managed artifacts now use unique
   same-directory `O_EXCL` temporary files created as `0600`, bounded collision
   retries, device/inode ownership checks before cleanup and rename, and atomic
@@ -49,7 +57,10 @@ by the date a change merged to `main`.
   publication of that mismatched pathname. This does not close hostile same-UID
   namespace races: callers must prevent concurrent parent, target, and temporary
   pathname mutation for the full transaction because portable OCaml does not
-  expose descriptor-relative `openat`/`renameat`/`unlinkat`.
+  expose descriptor-relative `openat`/`renameat`/`unlinkat`. Subject to that
+  precondition, strict-JSON backend-project writes prevalidate the target,
+  current/legacy metadata sidecars, and force-mode backup before publishing any
+  file; an unsafe auxiliary path leaves all three unchanged.
 - **Central media + schema E2E proof (CBL-08 P0).** A new authenticated,
   `CABAL_E2E_TESTS=1`-gated harness selects evidence-backed media descriptors and
   exercises Codex PNG/JPEG upload plus native JSON Schema in one hardened
@@ -64,7 +75,10 @@ by the date a change merged to `main`.
   attempt/tool lifecycle pairing by attempt and stable identity, with tool events
   confined between the exact attempt's start and finish. It selects only
   evidence-valid positive-media descriptors and attaches draft 2020-12 schema
-  only to independently evidence-valid native-schema backends. It skips
+  only to independently evidence-valid native-schema backends. Its typed request
+  plan distinguishes native schema, absent schema, and validate-and-retry: a
+  future non-native positive-media backend receives the schema-less prompt with
+  no schema and is valid only with one initial backend call. It skips
   genuine absent binaries only, and fails other lookup or installed
   probe/authentication errors. Credential-free PNG pixel inspection and fixed
   JPEG golden/dimension provenance reject corruption and arbitrary color labels.

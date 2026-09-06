@@ -44,6 +44,10 @@ type write_result =
   | Unsafe_project_path of string
   | Invalid_managed_namespace of string
 
+(** {b Migration note:} {!write_result} gained [Unsafe_project_path]. Exhaustive
+    matches must handle it (or deliberately use a wildcard) and must treat it as
+    a fail-closed refusal rather than retrying through an unchecked path. *)
+
 (** Per-artifact result produced by [setup_artifacts]. *)
 type artifact_write_outcome = {
   artifact : artifact;  (** Artifact whose write was attempted. *)
@@ -166,6 +170,11 @@ val managed_body_hash :
     cleaning up or publishing a temporary pathname when a mismatch is observed;
     exclusive-open collisions are retried without intentionally removing the
     colliding path, and symlink components fail with [Unsafe_project_path].
+    For strict-JSON [Backend_project] artifacts, the target, current/legacy
+    metadata sidecars, and any force-mode backup path are all required to be
+    regular-or-missing before the first file is published. An unsafe auxiliary
+    path therefore returns [Unsafe_project_path] without mutating the target,
+    sidecar, or backup.
 
     Portable OCaml exposes no descriptor-relative
     [openat]/[renameat]/[unlinkat] surface, so [lstat] and inode checks retain

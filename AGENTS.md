@@ -504,6 +504,11 @@ standalone OCaml library and as the backend abstraction layer vendored under
   private record gained the readable `execution_policy` field, and
   `Runtime_dispatch.error` gained `Backend_quarantined`; update exhaustive
   patterns or deliberately use `_`.
+- Exhaustive config-writer results must handle `Unsafe_project_path`, and
+  exhaustive preflight capability errors must handle `Mcp_unsupported`. The
+  quarantined Copilot seams are now exactly `Copilot_cli.Private.build_command`
+  and `Copilot_cli.Private.parse_stdout_text`; do not restore production-level
+  forwarding aliases.
 - Custom backends are registered additively as a validated descriptor/runtime
   pair through `Runtime_bootstrap.register_custom`; their explicit descriptor is
   the full host capability attestation and `Enforce_baseline` is the safe default.

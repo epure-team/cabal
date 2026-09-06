@@ -383,6 +383,8 @@
   cabal_media_web_schema_e2e_support
   alcotest
   digestif
+  eio
+  eio_posix
   yojson
   unix)
  (deps dune test_media_web_schema_backends.ml)

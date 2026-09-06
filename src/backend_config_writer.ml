@@ -306,10 +306,12 @@ let safe_full_path ~project_root ~create_parent relative_path =
          basename,
        basename)
 
-let reject_symlink_target path =
-  try
-    if (Unix.lstat path).Unix.st_kind = Unix.S_LNK then unsafe_project_path ()
-  with Unix.Unix_error (Unix.ENOENT, _, _) -> ()
+let prevalidate_publication_path ~project_root ~create_parent relative_path =
+  let path, _ = safe_full_path ~project_root ~create_parent relative_path in
+  (try
+     if (Unix.lstat path).Unix.st_kind <> Unix.S_REG then unsafe_project_path ()
+   with Unix.Unix_error (Unix.ENOENT, _, _) -> ()) ;
+  path
 
 let read_existing_regular path =
   let before = Unix.lstat path in
@@ -506,8 +508,9 @@ let temp_is_owned owned =
 
 let atomic_write_file_with_hooks ?(managed_namespace = default_namespace)
     ?nonce_for_attempt ?after_write ~project_root ~relative_path content =
-  let path, _ = safe_full_path ~project_root ~create_parent:true relative_path in
-  reject_symlink_target path ;
+  let path =
+    prevalidate_publication_path ~project_root ~create_parent:true relative_path
+  in
   let existing_perm =
     try Some ((Unix.lstat path).Unix.st_perm land 0o777)
     with Unix.Unix_error (Unix.ENOENT, _, _) -> None
@@ -535,8 +538,9 @@ let atomic_write_file_with_hooks ?(managed_namespace = default_namespace)
           Unix.fsync descriptor ;
           Option.iter (fun hook -> hook created.path) after_write ;
           Option.iter (Unix.fchmod descriptor) existing_perm) ;
-      ignore (safe_full_path ~project_root ~create_parent:false relative_path) ;
-      reject_symlink_target path ;
+      ignore
+        (prevalidate_publication_path ~project_root ~create_parent:false
+           relative_path) ;
       if not (temp_is_owned created) then
         raise (Unix.Unix_error (Unix.EAGAIN, "rename", created.path)) ;
       Unix.rename created.path path ;
@@ -575,7 +579,29 @@ let write_sidecar_metadata ~project_root full_path artifact =
          (sidecar_path ~managed_namespace:artifact.managed_namespace full_path))
     (sidecar_content artifact)
 
+let prevalidate_sidecar_artifact_paths ~project_root ~force
+    (artifact : artifact) =
+  let target = artifact.project_relative_path in
+  let current_sidecar = target ^ sidecar_suffix artifact.managed_namespace in
+  let legacy_sidecar = target ^ sidecar_suffix default_namespace in
+  let paths =
+    if current_sidecar = legacy_sidecar then [target; current_sidecar]
+    else [target; current_sidecar; legacy_sidecar]
+  in
+  let paths =
+    if force then
+      (target ^ backup_suffix artifact.managed_namespace) :: paths
+    else paths
+  in
+  List.iter
+    (fun relative_path ->
+      ignore
+        (prevalidate_publication_path ~project_root ~create_parent:true
+           relative_path))
+    paths
+
 let write_sidecar_artifact ~project_root ~force artifact =
+  prevalidate_sidecar_artifact_paths ~project_root ~force artifact ;
   let full_path = Filename.concat project_root artifact.project_relative_path in
   match read_file_opt ~project_root ~relative_path:artifact.project_relative_path with
   | None ->
@@ -745,9 +771,16 @@ let write_artifact_unchecked ~project_root ~force artifact =
                           Written full_path
                         end
                       else if force then (
+                        let backup_relative_path =
+                          artifact.project_relative_path
+                          ^ backup_suffix artifact.managed_namespace
+                        in
                         let backup_path =
                           full_path ^ backup_suffix artifact.managed_namespace
                         in
+                        ignore
+                          (prevalidate_publication_path ~project_root
+                             ~create_parent:true backup_relative_path) ;
                         match
                            copy_file
                              ~managed_namespace:artifact.managed_namespace

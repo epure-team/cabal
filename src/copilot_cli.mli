@@ -91,7 +91,15 @@ val project_config_artifacts :
   lsp_servers:Backend_types.lsp_server_config list ->
   Backend_config_writer.artifact list
 
-(** Test and compatibility seams that are not part of the backend abstraction. *)
+(** Test and compatibility seams that are not part of the backend abstraction.
+
+    {b Migration note:} the dormant/quarantined command and parser seams moved
+    out of the production-level module surface. Replace
+    [Copilot_cli.build_command] with [Copilot_cli.Private.build_command], and
+    replace [Copilot_cli.parse_stdout_text] with
+    [Copilot_cli.Private.parse_stdout_text]. No deprecated forwarding aliases are
+    retained because that would continue presenting the quarantined seams as
+    production APIs. *)
 module Private : sig
   (** A fail-closed non-interactive invocation. [redacted_argv] contains no
       prompt, model, configuration path, or attachment path. *)

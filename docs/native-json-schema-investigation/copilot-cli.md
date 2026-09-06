@@ -1,8 +1,10 @@
 # Native JSON Schema Investigation — copilot-cli
 
 **Backend ID:** `copilot-cli`
-**Baseline version investigated:** `1.0.34` for Story #633; revalidated at the current media baseline `1.0.54`
-**Version range consulted:** `1.0.34..1.0.54`
+**Historical schema investigation:** legacy `gh-copilot` extension `1.0.34`
+**Current transport re-evaluation:** standalone GitHub Copilot CLI `1.0.54`
+**Surfaces consulted:** the two named releases; they are distinct CLI
+architectures, not one continuous version range
 **Outcome:** AC2(b) — documented non-support
 **Story:** #633
 **Date:** 2026-05-25
@@ -11,15 +13,16 @@
 
 ## 1. Summary
 
-At the original `1.0.34` baseline and the current `1.0.54` baseline,
-copilot-cli does not expose a CLI surface for
-forwarding a JSON schema into the underlying GitHub Copilot API invocation.
-The CLI is a closed-source GitHub CLI extension (`gh copilot`) that calls the
-GitHub Copilot API internally but does not surface any `--json-schema`,
-`--response-format`, `--response-schema`, or equivalent schema-forwarding
-mechanism as a CLI flag or config-file key at `1.0.34`.
+The original Story #633 result concerns the legacy `github/gh-copilot` `1.0.34`
+GitHub CLI extension architecture, invoked as `gh copilot` (or its standalone
+extension binary). That historical extension did not expose a schema-forwarding
+surface. The current CBL-07E result separately concerns the standalone
+`github/copilot-cli` npm CLI at `1.0.54`, invoked as `copilot` and pinned with
+`--prefer-version 1.0.54`. The current CLI also exposes no native JSON Schema
+surface and is quarantined for an independent MCP-isolation reason. Statements
+about the old extension architecture do not describe the current CLI.
 
-This investigation consulted (a) the `copilot --help` CLI surface and
+The historical investigation consulted (a) the legacy extension help surface and
 source where open (the extension source is not publicly available at `1.0.34`;
 the `gh-copilot` repository is a precompiled binary distribution — see
 Section 2a for detail), and (b) the GitHub Copilot API documentation, release
@@ -37,13 +40,13 @@ remains `false`; `capability_evidence` remains `None`.
 
 ---
 
-## 2. CLI Surface Consulted
+## 2. Historical extension CLI surface consulted
 
-### 2a. `copilot --help` output (accessed 2026-05-25)
+### 2a. `gh copilot --help` output (accessed 2026-05-25)
 
-The copilot-cli binary at version `1.0.34` is distributed as a GitHub CLI
-extension.  It is invoked as `gh copilot` or, when installed standalone, as
-`copilot`.  The relevant flags at this version:
+The legacy `gh-copilot` binary at version `1.0.34` is distributed as a GitHub CLI
+extension. It is invoked as `gh copilot` or through its standalone extension
+binary. The relevant flags at this historical version:
 
 | Flag | Purpose | Schema-forwarding? |
 |------|---------|-------------------|
@@ -55,11 +58,13 @@ extension.  It is invoked as `gh copilot` or, when installed standalone, as
 No `--json-schema`, `--response-format`, `--response-schema`,
 `--generation-config`, or equivalent schema-forwarding flag exists at `1.0.34`.
 
-Source: https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically (accessed 2026-05-25)
+Historical release source:
+https://github.com/github/gh-copilot/releases/tag/v1.0.34
+(accessed 2026-05-25)
 
 ### 2b. Source inspection (source where open)
 
-The copilot-cli extension binary at `1.0.34` is distributed as a
+The legacy `gh-copilot` extension binary at `1.0.34` is distributed as a
 **closed-source precompiled binary** via the `github/gh-copilot` GitHub
 repository.  The source code is not publicly available for inspection at this
 version; the repository contains only release assets.
@@ -96,7 +101,7 @@ public release at the time of this investigation.
 
 No feature in any of these sources provides a stable, machine-readable
 mechanism at `1.0.34` for forwarding a full JSON schema from the Cabal caller
-into the copilot-cli invocation such that the underlying GitHub Copilot API
+into the legacy extension invocation such that the underlying GitHub Copilot API
 enforces it natively via hard-constrained decoding.
 
 ---
@@ -144,9 +149,9 @@ be provider-rejected; hint-style guidance cannot satisfy this requirement.
 
 ### Option 4 — No schema-forwarding surface at `baseline_version`
 
-**Finding:** Confirmed.  The CLI at `1.0.34` does not expose any mechanism for
-forwarding a JSON schema into the underlying GitHub Copilot API with hard
-schema enforcement.
+**Finding:** Confirmed. The legacy extension at `1.0.34` does not expose any
+mechanism for forwarding a JSON schema into the underlying GitHub Copilot API
+with hard schema enforcement.
 
 **Outcome:** Option 4 — routes to **AC2(b) documented non-support**.
 
@@ -157,13 +162,13 @@ schema enforcement.
 **AC1 binary outcome:** Option 4 (no schema-forwarding surface with hard
 enforcement) — routes to AC2(b) documented non-support.
 
-**Descriptor action at baseline `1.0.54`:** `native_json_schema_output` stays `false`;
-`capability_evidence` stays `None`.  No other backend descriptor is touched
-(NFR-U2).
+**Current descriptor action, independently revalidated at `1.0.54`:**
+`native_json_schema_output` stays `false`; `capability_evidence` stays `None`.
+No other backend descriptor is touched (NFR-U2).
 
 **AC3 note:** Since the descriptor stays at `false`, AC3 (E2E test via native
-path) is not applicable.  The required credential env var for copilot-cli
-would be `GH_TOKEN` (as documented in the programmatic invocation docs at
+path) is not applicable. The required credential env var for the current
+standalone CLI would be `GH_TOKEN` (as documented in the programmatic invocation docs at
 https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically,
 accessed 2026-05-25), but no E2E test is registered because the native path
 is not wired.
@@ -172,8 +177,9 @@ is not wired.
 
 ## 6. Future-Work Note
 
-Features through `1.0.54` were re-evaluated for CBL-07E. If a future
-copilot-cli release introduces a `--json-schema <path>` flag, a
+The distinct standalone `github/copilot-cli` `1.0.54` surface was re-evaluated
+for CBL-07E. If a future release of that current CLI introduces a
+`--json-schema <path>` flag, a
 `--response-format json-schema` flag, or an equivalent config-file key that
 routes to a hard-constrained GitHub Copilot API response schema, this
 investigation should be re-opened against the new `baseline_version`.
@@ -181,7 +187,10 @@ investigation should be re-opened against the new `baseline_version`.
 **Re-evaluation trigger:** A copilot-cli release that adds a documented
 `--json-schema`, `--response-format`, or equivalent flag or config key for
 hard-constrained schema output.  Track at:
-https://github.com/github/gh-copilot/releases (accessed 2026-05-25).
+https://github.com/github/copilot-cli/releases (accessed 2026-09-04). The legacy
+extension releases remain at
+https://github.com/github/gh-copilot/releases (accessed 2026-05-25) solely as the
+historical Story #633 source.
 
 Upstream discussion / issue link for tracking schema-forwarding support in
 GitHub Copilot CLI:
@@ -229,6 +238,10 @@ capability_evidence = None                        (* unchanged *)
 - **Current web outcome:** `Web_disabled`
 - **Current structured-output outcome:** false; the tested JSONL parser is dormant
 - **Unchanged schema outcome:** no native JSON Schema
+
+This section concerns the current standalone `github/copilot-cli` npm CLI. It
+does not infer its architecture from the historical `github/gh-copilot` GitHub
+CLI extension discussed in Sections 1–7.
 
 ### Authoritative public surfaces
 

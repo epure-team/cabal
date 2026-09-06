@@ -72,6 +72,11 @@ type write_result = Backend_config_writer.write_result =
       (** Artifact write refused before touching the filesystem because the
           managed namespace is unsafe.  The string contains a validation error. *)
 
+(** {b Migration note:} {!write_result}, which aliases
+    {!Backend_config_writer.write_result}, gained [Unsafe_project_path]. Update
+    exhaustive matches to handle this fail-closed path (or deliberately use a
+    wildcard). *)
+
 (** Per-artifact write result reported by setup. *)
 type artifact_write_outcome = Backend_config_writer.artifact_write_outcome = {
   artifact : artifact;  (** Artifact whose write was attempted. *)

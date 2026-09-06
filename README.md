@@ -554,9 +554,12 @@ computes attachment size and SHA-256 metadata from those bytes, and submits both
 in **one** `Task_runtime` invocation per evidence-backed media backend. Codex is
 currently the only selected backend and receives the strict draft 2020-12
 schema; quarantined Copilot is excluded by its disabled media capability. The
-response validator
-requires the exact image-derived blue/red result, so constant structural
-compliance cannot pass. A
+shared request plan distinguishes native schema, absent schema, and
+validate-and-retry execution. A future evidence-backed non-native media backend
+receives the schema-less prompt with `json_schema = None` and must complete in
+exactly one initial call; CBL-08 does not reinterpret that branch as
+validate-and-retry. The response validator requires the exact image-derived
+blue/red result, so constant structural compliance cannot pass. A
 credential-free inspector parses PNG chunks, stored DEFLATE scanlines, dimensions,
 and RGB pixels. The JPEG is pinned by byte count and SHA-256, its SOF dimensions
 are parsed independently, and only that reviewed golden is assigned red
@@ -642,6 +645,16 @@ exhaustive `Runtime_dispatch.error` matches must handle `Backend_quarantined`.
 There is no optional default because trusted registration must not silently omit
 the security state.
 
+Other source migrations in this release are also explicit: exhaustive
+`Backend_config_writer.write_result` and `Backend_config_gen.write_result`
+matches must handle `Unsafe_project_path`, while exhaustive
+`Task_preflight.capability_error` matches must handle `Mcp_unsupported`. The
+quarantined Copilot compatibility seams moved to their exact replacements:
+`Copilot_cli.build_command` becomes `Copilot_cli.Private.build_command`, and
+`Copilot_cli.parse_stdout_text` becomes
+`Copilot_cli.Private.parse_stdout_text`. Forwarding aliases are intentionally not
+retained because these are not production transport APIs.
+
 `Registry.register` remains the legacy runtime-only compatibility API. It always
 installs a raw, untrusted entry and clears any validated pairing for the same id;
 `Runtime_dispatch` rejects it before preflight side effects, version/availability
@@ -660,7 +673,10 @@ must replace the whole validated entry.
    transaction, hosts must ensure that no hostile same-UID process concurrently
    mutates parent, target, or temporary workspace pathnames: portable OCaml does
    not expose the required descriptor-relative `openat`/`renameat`/`unlinkat`
-   primitives.
+   primitives. Within that precondition, strict-JSON backend-project writes
+   validate the target, metadata sidecars, and any backup as regular-or-missing
+   before publishing any file; an unsafe auxiliary path leaves all of those files
+   unchanged.
 3. Failed-turn error strings can be logged before full redaction is applied. Avoid embedding credentials in backend error text and prefer redacted logging surfaces.
 4. Timeout coverage is still incomplete for all subprocess phases, including spawn and stdin-write edge cases.
 5. Additional compatibility and safety regression coverage is still being added, including hardening around adapter/credential flows.

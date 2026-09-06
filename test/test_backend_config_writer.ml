@@ -370,6 +370,96 @@ let test_symlinked_parent_never_writes_outside_workspace () =
       Filename.concat ".." (Filename.basename outside)) ;
   run_case "absolute" (fun ~project:_ ~outside -> outside)
 
+let strict_json_artifact () =
+  make_artifact ~ownership:W.Backend_project {|{"setting":true}|}
+
+let strict_json_paths project =
+  let target = Filename.concat project "config/test.cfg" in
+  (target, target ^ ".cabal-meta.json", target ^ ".cabal-backup")
+
+let expect_unsafe_write project artifact =
+  match W.write_artifact ~project_dir:project ~force:false artifact with
+  | W.Unsafe_project_path _ -> ()
+  | _ -> Alcotest.fail "unsafe strict-JSON auxiliary path was accepted"
+
+let test_strict_json_symlink_sidecar_is_rejected_before_target_publish () =
+  with_project_dir (fun project ->
+      Unix.mkdir (Filename.concat project "config") 0o755 ;
+      let target, sidecar, backup = strict_json_paths project in
+      let outside = Filename.temp_file "cabal-cw-sidecar-outside-" ".json" in
+      Fun.protect
+        ~finally:(fun () -> if Sys.file_exists outside then Unix.unlink outside)
+        (fun () ->
+          let sentinel = "outside sidecar sentinel\n" in
+          let channel = open_out_bin outside in
+          output_string channel sentinel ;
+          close_out channel ;
+          Unix.symlink outside sidecar ;
+          expect_unsafe_write project (strict_json_artifact ()) ;
+          Alcotest.(check bool) "target remains absent" false
+            (Sys.file_exists target) ;
+          Alcotest.(check bool) "backup remains absent" false
+            (Sys.file_exists backup) ;
+          Alcotest.(check bool) "sidecar remains a symlink" true
+            ((Unix.lstat sidecar).st_kind = Unix.S_LNK) ;
+          Alcotest.(check string) "sidecar link is unchanged" outside
+            (Unix.readlink sidecar) ;
+          Alcotest.(check string) "outside file is unchanged" sentinel
+            (read_file outside)))
+
+let test_strict_json_nonregular_sidecar_is_rejected_before_target_publish () =
+  with_project_dir (fun project ->
+      Unix.mkdir (Filename.concat project "config") 0o755 ;
+      let target, sidecar, backup = strict_json_paths project in
+      Unix.mkdir sidecar 0o755 ;
+      let sentinel_path = Filename.concat sidecar "sentinel" in
+      let sentinel = "nonregular sidecar sentinel\n" in
+      let channel = open_out_bin sentinel_path in
+      output_string channel sentinel ;
+      close_out channel ;
+      expect_unsafe_write project (strict_json_artifact ()) ;
+      Alcotest.(check bool) "target remains absent" false
+        (Sys.file_exists target) ;
+      Alcotest.(check bool) "backup remains absent" false
+        (Sys.file_exists backup) ;
+      Alcotest.(check bool) "sidecar directory remains" true
+        ((Unix.lstat sidecar).st_kind = Unix.S_DIR) ;
+      Alcotest.(check string) "sidecar directory is unchanged" sentinel
+        (read_file sentinel_path))
+
+let test_strict_json_symlink_backup_is_rejected_before_any_publish () =
+  with_project_dir (fun project ->
+      let artifact = strict_json_artifact () in
+      (match W.write_artifact ~project_dir:project ~force:false artifact with
+      | W.Written _ -> ()
+      | _ -> Alcotest.fail "strict-JSON fixture setup failed") ;
+      let target, sidecar, backup = strict_json_paths project in
+      let modified = "user-modified target\n" in
+      let channel = open_out_bin target in
+      output_string channel modified ;
+      close_out channel ;
+      let sidecar_before = read_file sidecar in
+      let outside = Filename.temp_file "cabal-cw-backup-outside-" ".json" in
+      Fun.protect
+        ~finally:(fun () -> if Sys.file_exists outside then Unix.unlink outside)
+        (fun () ->
+          let sentinel = "outside backup sentinel\n" in
+          let channel = open_out_bin outside in
+          output_string channel sentinel ;
+          close_out channel ;
+          Unix.symlink outside backup ;
+          (match W.write_artifact ~project_dir:project ~force:true artifact with
+          | W.Unsafe_project_path _ -> ()
+          | _ -> Alcotest.fail "unsafe strict-JSON backup path was accepted") ;
+          Alcotest.(check string) "target is unchanged" modified
+            (read_file target) ;
+          Alcotest.(check string) "sidecar is unchanged" sidecar_before
+            (read_file sidecar) ;
+          Alcotest.(check bool) "backup remains a symlink" true
+            ((Unix.lstat backup).st_kind = Unix.S_LNK) ;
+          Alcotest.(check string) "outside file is unchanged" sentinel
+            (read_file outside)))
+
 let () =
   Random.self_init () ;
   Alcotest.run
@@ -421,5 +511,16 @@ let () =
             `Quick test_symlinked_parent_never_writes_outside_workspace;
           Alcotest.test_case "target symlink cannot escape" `Quick
             test_symlink_target_never_writes_outside_workspace;
+          Alcotest.test_case
+            "strict JSON rejects a symlink sidecar before target publication"
+            `Quick
+            test_strict_json_symlink_sidecar_is_rejected_before_target_publish;
+          Alcotest.test_case
+            "strict JSON rejects a nonregular sidecar before target publication"
+            `Quick
+            test_strict_json_nonregular_sidecar_is_rejected_before_target_publish;
+          Alcotest.test_case
+            "strict JSON rejects a symlink backup before any publication" `Quick
+            test_strict_json_symlink_backup_is_rejected_before_any_publish;
         ] );
     ]

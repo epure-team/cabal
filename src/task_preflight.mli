@@ -80,6 +80,10 @@ type capability_error =
   | Read_only_unsupported
   | Session_resume_unsupported
 
+(** {b Migration note:} {!capability_error} gained [Mcp_unsupported]. Exhaustive
+    matches must handle it (or deliberately use a wildcard); hosts should reroute
+    or reject the MCP-bearing task rather than bypassing preflight. *)
+
 (** Preflight failure category. *)
 type error = Input of input_error | Capability of capability_error
 
