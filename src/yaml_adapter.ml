@@ -228,10 +228,23 @@ let make_backend (cfg : config) : Agentic_backend.t =
     let parse_stdout_for_id =
       match structured_parser_for_id with
       | Some (parse_stdout, _, _) -> Some parse_stdout
-      | None when cfg.name = "copilot-cli" -> Some Copilot_cli.parse_stdout_text
       | None -> None
 
     let run_task ~sw ~env ?context ?on_raw_line (spec : task_spec) =
+      if cfg.name = "copilot-cli" && cfg.source = "builtin" then
+        {
+          status = Failed "Built-in Copilot YAML transport is disabled";
+          files_changed = [];
+          report = None;
+          elapsed = duration_of_seconds 0.0;
+          cost = None;
+          stdout = "";
+          agent_text = "";
+          stderr = "Built-in Copilot YAML transport is disabled";
+          exit_code = -1;
+          session_id = None;
+        }
+      else
       let args = invocation_argv cfg in
       let strict_builtin_claude =
         cfg.name = "claude-code" && cfg.source = "builtin"

@@ -9,10 +9,64 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Quarantined Copilot CLI transport investigation (CBL-07E).** Copilot CLI
+  remains pinned to baseline `1.0.54` but advertises no media or structured-output
+  support. Hardened bootstrap binds a typed incomplete-MCP-isolation quarantine,
+  and central dispatch rejects every task immediately after validated registry
+  lookup, before capability/input preflight, staging, version/availability
+  processes, project setup, or backend spawn. Source inspection showed
+  user, workspace, installed-plugin, built-in, and account-controlled ODR MCP
+  discovery; `--disable-builtin-mcps` and isolated `COPILOT_HOME` do not cover
+  every source, and upstream exposes no complete disable flag. The retained
+  candidate adapter would consume only centrally sealed attachment paths,
+  preserve caller order with repeated `--attachment` flags, isolate and
+  remove `COPILOT_HOME`, and narrow prompt mode to `view,grep,glob` with
+  explicit shell/write/memory/URL denial and no blanket path or URL approval.
+  The dormant parser recursively rejects duplicate keys throughout every object
+  and array before semantics, including opaque arguments, attachment objects,
+  and skills. Exact public JSONL envelopes and payloads, numeric kinds/ranges,
+  object-valued tool arguments, and paired successful allowlisted tool events are
+  then validated before text, UUID session, usage, or rebuilt callbacks are
+  released; returned raw stdout/stderr and arguments are withheld.
+  Project MCP artifacts are neither generated nor overwritten.
+  Media, positive web, read-only, resume/reuse, and MCP claims remain disabled;
+  the bundled YAML route is non-executable. Authenticated `1.0.54` attachment
+  behavior was observed, but no positive media evidence is recorded because
+  complete MCP discovery isolation is unproven. The credential-free
+  `--self-test` exhaustively covers mode validators, protocol failures, process
+  faults, interruption, and output sanitization. Historical authenticated media
+  and web observations remain investigation data only and do not back capability
+  claims.
+- **Runtime execution-policy migration.** `Runtime_entry.create` now requires
+  explicit `~execution_policy`; exhaustive patterns over its private record must
+  add the readable field or `_`, and exhaustive `Runtime_dispatch.error` matches
+  must handle `Backend_quarantined`. There is deliberately no enabling default
+  that would let trusted registration omit quarantine state.
+- **Additional exhaustive/API migrations.** Exhaustive
+  `Backend_config_writer.write_result` / `Backend_config_gen.write_result`
+  matches must add `Unsafe_project_path`, and exhaustive
+  `Task_preflight.capability_error` matches must add `Mcp_unsupported`. Replace
+  `Copilot_cli.build_command` with `Copilot_cli.Private.build_command` and
+  `Copilot_cli.parse_stdout_text` with
+  `Copilot_cli.Private.parse_stdout_text`; no forwarding aliases retain these
+  quarantined seams as production-level APIs.
+- **Owned atomic backend-config publication.** Managed artifacts now use unique
+  same-directory `O_EXCL` temporary files created as `0600`, bounded collision
+  retries, device/inode ownership checks before cleanup and rename, and atomic
+  replacement. An observed inode mismatch blocks deliberate cleanup or
+  publication of that mismatched pathname. This does not close hostile same-UID
+  namespace races: callers must prevent concurrent parent, target, and temporary
+  pathname mutation for the full transaction because portable OCaml does not
+  expose descriptor-relative `openat`/`renameat`/`unlinkat`. Subject to that
+  precondition, strict-JSON backend-project writes prevalidate the target,
+  current/legacy metadata sidecars, and force-mode backup before publishing any
+  file; an unsafe auxiliary path leaves all three unchanged.
 - **Central media + schema E2E proof (CBL-08 P0).** A new authenticated,
   `CABAL_E2E_TESTS=1`-gated harness selects evidence-backed media descriptors and
   exercises Codex PNG/JPEG upload plus native JSON Schema in one hardened
-  `Task_runtime` invocation. Runtime-generated 64×64 fixtures carry computed
+  `Task_runtime` invocation. Copilot is excluded because its media capability is
+  disabled pending complete pre-spawn MCP isolation.
+  Runtime-generated 64×64 fixtures carry computed
   size/SHA-256 metadata; a strict schema plus an exact semantic assertion makes
   the response image-dependent. The proof checks the validated descriptor/runtime
   binding, enforced baseline, explicit limits, sealed upload intent, exactly one
@@ -20,7 +74,11 @@ by the date a change merged to `main`.
   normalized output, session/usage protocol events, exactly one terminal, and
   attempt/tool lifecycle pairing by attempt and stable identity, with tool events
   confined between the exact attempt's start and finish. It selects only
-  positive-media descriptors with valid native draft 2020-12 evidence, skips
+  evidence-valid positive-media descriptors and attaches draft 2020-12 schema
+  only to independently evidence-valid native-schema backends. Its typed request
+  plan distinguishes native schema, absent schema, and validate-and-retry: a
+  future non-native positive-media backend receives the schema-less prompt with
+  no schema and is valid only with one initial backend call. It skips
   genuine absent binaries only, and fails other lookup or installed
   probe/authentication errors. Credential-free PNG pixel inspection and fixed
   JPEG golden/dimension provenance reject corruption and arbitrary color labels.

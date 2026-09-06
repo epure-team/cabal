@@ -125,7 +125,9 @@ let test_opencode_setup_project_config_has_outcome () =
       | Some (Backend_config_gen.Skipped_user_content path) ->
           Alcotest.failf "AC3: unexpected skip of user content at %s" path
       | Some (Backend_config_gen.Invalid_managed_namespace msg) ->
-          Alcotest.failf "AC3: unexpected invalid namespace: %s" msg)
+          Alcotest.failf "AC3: unexpected invalid namespace: %s" msg
+      | Some (Backend_config_gen.Unsafe_project_path msg) ->
+          Alcotest.failf "AC3: unexpected unsafe project path: %s" msg)
 
 (* AC3: generated artifact has the expected fixed path opencode.json *)
 let test_opencode_artifact_fixed_path () =

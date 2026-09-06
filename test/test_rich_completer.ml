@@ -110,6 +110,7 @@ let register ?(session_resume = false) ?(read_only = false) ?(media_types = [])
         ~descriptor
         ~runtime_capabilities:descriptor.capabilities
         ~origin:Runtime_entry.Custom
+        ~execution_policy:Runtime_entry.Dispatch_enabled
         ~version_policy:Runtime_entry.No_version_gate
     with
     | Ok entry -> entry

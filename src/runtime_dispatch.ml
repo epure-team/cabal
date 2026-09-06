@@ -9,6 +9,7 @@ type error =
   | Invalid_timeout
   | Backend_not_registered
   | Runtime_registration_untrusted
+  | Backend_quarantined of Runtime_entry.quarantine_reason
   | Preflight_failed of Task_preflight.error
   | Backend_version_unsupported
   | Version_check_failed
@@ -33,6 +34,9 @@ let render_error = function
   | Backend_not_registered -> "requested backend is not registered at runtime"
   | Runtime_registration_untrusted ->
       "requested backend is raw-registered and not trusted for central dispatch"
+  | Backend_quarantined reason ->
+      "requested backend is quarantined: "
+      ^ Runtime_entry.render_quarantine_reason reason
   | Preflight_failed error -> Task_preflight.render_error error
   | Backend_version_unsupported ->
       "installed backend version does not satisfy the required stable baseline"
@@ -320,6 +324,12 @@ let prepare_with ~prepare_inputs ~cleanup_status ~sw ~env ~limits ~backend_id
     | Some (Registry.Validated entry) -> Ok entry
     | Some (Registry.Raw _) -> Error Runtime_registration_untrusted
     | None -> Error Backend_not_registered
+  in
+  let* () =
+    match entry.Runtime_entry.execution_policy with
+    | Runtime_entry.Dispatch_enabled -> Ok ()
+    | Runtime_entry.Dispatch_quarantined reason ->
+        Error (Backend_quarantined reason)
   in
   let backend = entry.Runtime_entry.backend in
   let descriptor = entry.effective_descriptor in
@@ -635,27 +645,29 @@ module Private = struct
 
   let cleanup_retry_limit = cleanup_retry_limit
 
-  let prepare_inputs_with_hooks ?on_staging_directory ?on_staged_file
-      ?on_cleanup_attempt ~limits spec =
+  let prepare_inputs_with_hooks ?on_prepare_inputs ?on_staging_directory
+      ?on_staged_file ?on_cleanup_attempt ~limits spec =
+    Option.iter (fun callback -> callback ()) on_prepare_inputs ;
     Task_preflight.Private.prepare_inputs_with_hooks ?on_staging_directory
       ?on_staged_file ?on_cleanup_attempt ~limits spec
 
   let prepare_with_input_hooks ~sw ~env ~limits ~backend_id ?context
-      ?on_staging_directory ?on_staged_file ?on_cleanup_attempt spec =
+      ?on_prepare_inputs ?on_staging_directory ?on_staged_file
+      ?on_cleanup_attempt spec =
     let cleanup_status = Atomic.make Backend_types.Cleanup_not_required in
     prepare_with
       ~prepare_inputs:
-        (prepare_inputs_with_hooks ?on_staging_directory ?on_staged_file
-           ?on_cleanup_attempt)
+        (prepare_inputs_with_hooks ?on_prepare_inputs ?on_staging_directory
+           ?on_staged_file ?on_cleanup_attempt)
       ~cleanup_status ~sw ~env ~limits ~backend_id ?context spec
 
   let start_task_with_input_hooks ~sw ~env ~limits ~backend_id ?on_event
-      ?on_raw_line ?on_staging_directory ?on_staged_file ?on_cleanup_attempt spec
-      =
+      ?on_raw_line ?on_prepare_inputs ?on_staging_directory ?on_staged_file
+      ?on_cleanup_attempt spec =
     start_task_with_preparer
       ~prepare_inputs:
-        (prepare_inputs_with_hooks ?on_staging_directory ?on_staged_file
-           ?on_cleanup_attempt)
+        (prepare_inputs_with_hooks ?on_prepare_inputs ?on_staging_directory
+           ?on_staged_file ?on_cleanup_attempt)
       ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec
 
   let start_task = start_task

@@ -65,9 +65,17 @@ type write_result = Backend_config_writer.write_result =
   | Skipped_user_content of string
       (** A user-authored file (no namespace marker) exists at the path;
           it was not touched.  The string is the full path. *)
+  | Unsafe_project_path of string
+      (** A path was malformed, unreadable, non-regular, or contained a
+          symlink component, so no write was attempted. *)
   | Invalid_managed_namespace of string
       (** Artifact write refused before touching the filesystem because the
           managed namespace is unsafe.  The string contains a validation error. *)
+
+(** {b Migration note:} {!write_result}, which aliases
+    {!Backend_config_writer.write_result}, gained [Unsafe_project_path]. Update
+    exhaustive matches to handle this fail-closed path (or deliberately use a
+    wildcard). *)
 
 (** Per-artifact write result reported by setup. *)
 type artifact_write_outcome = Backend_config_writer.artifact_write_outcome = {
@@ -173,7 +181,8 @@ val generate : backend_id:string -> artifact option
     configuration artifact required by [backend_id].  Most backends produce a
     single artifact; Gemini CLI produces [.gemini/settings.json], and Copilot
     CLI additionally produces [.github/copilot/settings.json] and
-    [.github/mcp.json].  Strict JSON artifacts carry no inline managed
+    [.github/lsp.json], but deliberately no project MCP artifact. Strict JSON
+    artifacts carry no inline managed
     metadata; write-time ownership is tracked by a sidecar file.
 
     {pre}
@@ -183,7 +192,9 @@ val generate : backend_id:string -> artifact option
     Returns artifacts in write order, with the primary artifact first.  Returns
     [[]] for unknown backends or backends without a project config surface.
     Supplying [mcp_servers] serializes them into backend-native strict JSON
-    artifacts; pass [[]] to produce empty MCP server maps.
+    artifacts where the backend supports MCP; Copilot ignores them because it
+    advertises [Mcp_none]. Pass [[]] to produce empty MCP server maps where
+    applicable.
 
     {violators}
     (none)
@@ -324,9 +335,10 @@ type setup_result = Backend_config_writer.setup_result = {
           whether the project config was applied. *)
   write_outcomes : artifact_write_outcome list;
       (** Per-artifact outcomes in write order.  Includes secondary strict JSON
-          artifacts such as [.gemini/settings.json] and [.github/mcp.json], so
-          runtime adapters can detect when MCP configuration was skipped or
-          refused even if the primary instruction file was written. *)
+          artifacts such as [.github/copilot/settings.json] and
+          [.github/lsp.json], so runtime adapters can detect when configuration
+          was skipped or refused even if the primary instruction file was
+          written. *)
 }
 
 (** [setup_project_config ~mcp_servers ~backend_id ~project_dir ~force]

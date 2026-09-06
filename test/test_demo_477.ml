@@ -9,7 +9,7 @@
 
     Covers:
     - AC #650: Version parsing exists for Claude Code, Codex, OpenCode, Gemini CLI, Copilot CLI
-    - AC #651: Baselines are Claude 2.1.117, Codex 0.131.0, OpenCode 1.14.20, Gemini 0.38.2, Copilot 1.0.34
+    - AC #651: Baselines are Claude 2.1.117, Codex 0.131.0, OpenCode 1.14.20, Gemini 0.38.2, Copilot 1.0.54
     - AC #652: Gate blocks below-baseline with actionable message including --force-backend
     - AC #653: Each backend's version format and comparison behavior are covered *)
 
@@ -125,8 +125,8 @@ let test_baseline_copilot_cli () =
   let d = find_desc "copilot-cli" in
   Alcotest.check
     result_semver
-    "copilot-cli baseline is 1.0.34"
-    (ok 1 0 34)
+    "copilot-cli baseline is 1.0.54"
+    (ok 1 0 54)
     (Backend_version.of_string d.Backend_registry.baseline_version)
 
 (* AC #652 *)
@@ -293,7 +293,7 @@ let () =
           Alcotest.test_case "opencode 1.14.20" `Quick test_baseline_opencode;
           Alcotest.test_case "gemini-cli 0.38.2" `Quick test_baseline_gemini_cli;
           Alcotest.test_case
-            "copilot-cli 1.0.34"
+            "copilot-cli 1.0.54"
             `Quick
             test_baseline_copilot_cli;
         ] );

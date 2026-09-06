@@ -62,6 +62,7 @@ type capability_error =
       requested : Backend_types.web_access;
       maximum : Backend_types.web_access;
     }
+  | Mcp_unsupported
   | Read_only_unsupported
   | Session_resume_unsupported
 
@@ -146,6 +147,7 @@ let render_capability_error = function
       "backend does not support requested JPEG attachments"
   | Unsupported_web_access _ ->
       "backend does not support the requested web access level"
+  | Mcp_unsupported -> "backend does not support requested MCP servers"
   | Read_only_unsupported ->
       "backend does not support the requested read-only mode"
   | Session_resume_unsupported ->
@@ -864,6 +866,10 @@ let validate_capabilities ~descriptor spec =
             }))
   else if spec.read_only && not capabilities.read_only_support then
     Error (Capability Read_only_unsupported)
+  else if
+    spec.mcp_servers <> []
+    && capabilities.mcp_support = Backend_registry.Mcp_none
+  then Error (Capability Mcp_unsupported)
   else if
     Option.is_some spec.resume_session_id && not capabilities.session_resume
   then Error (Capability Session_resume_unsupported)

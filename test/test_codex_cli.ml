@@ -1004,10 +1004,12 @@ let test_e2e_harness_declares_per_backend_model_env_vars () =
     [
       "CABAL_E2E_MODEL_CLAUDE_CODE";
       "CABAL_E2E_MODEL_CODEX";
-      "CABAL_E2E_MODEL_COPILOT_CLI";
       "CABAL_E2E_MODEL_OPENCODE";
       "CABAL_E2E_MODEL_GEMINI_CLI";
-    ]
+    ] ;
+  Alcotest.(check bool)
+    "quarantined Copilot has no executable E2E model contract" false
+    (contains_substring source "CABAL_E2E_MODEL_COPILOT_CLI")
 
 let test_e2e_harness_declares_backend_specific_defaults () =
   let source = e2e_config_source () in
@@ -1020,10 +1022,12 @@ let test_e2e_harness_declares_backend_specific_defaults () =
     [
       "| \"claude-code\" -> Some \"haiku\"";
       "| \"codex\" -> None";
-      "| \"copilot-cli\" -> Some \"claude-haiku-4.5\"";
       "| \"opencode\" -> Some \"openai/gpt-5.4-mini\"";
       "| \"gemini-cli\" -> Some \"gemini-3-flash-preview\"";
-    ]
+    ] ;
+  Alcotest.(check bool)
+    "quarantined Copilot has no executable E2E default" false
+    (contains_substring source "claude-haiku-4.5")
 
 let test_demo_627_defaults_to_multi_backend_run () =
   let source = demo_627_source () in

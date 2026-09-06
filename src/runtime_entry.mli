@@ -21,6 +21,22 @@ type version_policy =
       (** Skip stability comparison. Used for generic YAML adapters whose
           upstream version formats are not part of Cabal's stable contract. *)
 
+(** Backend-neutral reason why central task dispatch is disabled. *)
+type quarantine_reason =
+  | Incomplete_mcp_isolation
+      (** The backend cannot prove an empty effective MCP server set before
+          process start, including for tasks that request no MCP servers. *)
+
+(** Central execution policy bound into the immutable validated entry. *)
+type execution_policy =
+  | Dispatch_enabled
+      (** Central dispatch may proceed through preflight, version, availability,
+          configuration, and task execution. *)
+  | Dispatch_quarantined of quarantine_reason
+      (** Central dispatch rejects immediately after resolving the entry and
+          before capability preflight, attachment preparation, version or
+          availability processes, project configuration, or backend execution. *)
+
 (** Pure entry-construction failure. *)
 type validation_error =
   | Invalid_runtime_id
@@ -43,17 +59,22 @@ type t = private {
   effective_descriptor : Backend_registry.descriptor;
   runtime_capabilities : Backend_registry.capabilities;
   origin : implementation_origin;
+  execution_policy : execution_policy;
   version_policy : version_policy;
 }
 
 (** [render_validation_error error] returns a sanitized structural diagnostic. *)
 val render_validation_error : validation_error -> string
 
+(** [render_quarantine_reason reason] returns a fixed sanitized explanation. *)
+val render_quarantine_reason : quarantine_reason -> string
+
 (** [valid_runtime_id value] checks the canonical backend-id syntax without
     performing I/O. *)
 val valid_runtime_id : string -> bool
 
-(** [create ~backend ~descriptor ~runtime_capabilities ~origin ~version_policy]
+(** [create ~backend ~descriptor ~runtime_capabilities ~origin
+    ~execution_policy ~version_policy]
     validates all structural fields and evidence, exact equality between the
     effective descriptor and the independently supplied full runtime capability
     snapshot, and the two capability booleans represented directly by
@@ -63,5 +84,13 @@ val create :
   descriptor:Backend_registry.descriptor ->
   runtime_capabilities:Backend_registry.capabilities ->
   origin:implementation_origin ->
+  execution_policy:execution_policy ->
   version_policy:version_policy ->
   (t, validation_error) result
+
+(** {b Migration note:} [execution_policy] is a new mandatory argument to
+    {!create}; existing call sites must pass [Dispatch_enabled] unless they are
+    intentionally binding a typed quarantine. No optional default is supplied,
+    so trusted registration code cannot silently omit this security state.
+    {!t} also gained the readable private field [execution_policy]; exhaustive
+    private-record patterns must name it or end with [_]. *)

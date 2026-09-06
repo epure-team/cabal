@@ -41,6 +41,7 @@ let assert_transport_revoked label ~backend_id ~attachment context =
 let descriptor_for ?(session_resume = false) ?(native = false)
     ?(read_only = false) ?(binary_name = "dispatch-test")
     ?(baseline_version = "1.0.0") ?(media_types = [])
+    ?(mcp_support = Backend_registry.Mcp_none)
     ?(web_maximum = Backend_types.Web_disabled) id =
   let native_json_schema_output_evidence =
     if native then
@@ -70,7 +71,7 @@ let descriptor_for ?(session_resume = false) ?(native = false)
         structured_output = true;
         streaming_output = false;
         session_resume;
-        mcp_support = Backend_registry.Mcp_none;
+        mcp_support;
         read_only_support = read_only;
         project_config_surface = Backend_registry.Config_none;
         precedence_confidence = Backend_registry.Low;
@@ -140,16 +141,19 @@ let diagnostic_messages events =
     !events
 
 let register_pair ?session_resume ?native ?read_only ?binary_name
-    ?baseline_version ?media_types ?web_maximum ?(origin = Runtime_entry.Custom)
+    ?baseline_version ?media_types ?mcp_support ?web_maximum
+    ?(origin = Runtime_entry.Custom)
+    ?(execution_policy = Runtime_entry.Dispatch_enabled)
     ?(version_policy = Runtime_entry.Enforce_baseline) ~id backend =
   let descriptor =
     descriptor_for ?session_resume ?native ?read_only ?binary_name
-      ?baseline_version ?media_types ?web_maximum id
+      ?baseline_version ?media_types ?mcp_support ?web_maximum id
   in
   let entry =
     match
       Runtime_entry.create ~backend ~descriptor
-        ~runtime_capabilities:descriptor.capabilities ~origin ~version_policy
+        ~runtime_capabilities:descriptor.capabilities ~origin ~execution_policy
+        ~version_policy
     with
     | Ok entry -> entry
     | Error error -> Alcotest.fail (Runtime_entry.render_validation_error error)
@@ -202,10 +206,11 @@ let read_file path =
     (fun () -> really_input_string channel (in_channel_length channel))
 
 let spec ?(working_dir = ".") ?(read_only = false) ?resume_session_id
-    ?json_schema ?(attachments = []) ?(web_access = Backend_types.Web_disabled)
-    ?timeout () =
+    ?json_schema ?(attachments = []) ?(mcp_servers = [])
+    ?(web_access = Backend_types.Web_disabled) ?timeout () =
   Backend_types.make_task_spec ~prompt:"dispatch test" ~working_dir ~read_only
-    ?resume_session_id ?json_schema ~attachments ~web_access ?timeout ()
+    ?resume_session_id ?json_schema ~attachments ~mcp_servers ~web_access ?timeout
+    ()
 
 let run ~env ~sw ~backend_id ?(limits = limits) spec =
   Runtime_dispatch.run_task ~sw ~env ~limits ~backend_id spec
@@ -251,11 +256,12 @@ let test_runtime_descriptor_mismatches_cannot_be_registered () =
   Alcotest.(check bool)
     "session mismatch cannot produce a validated entry" true
     (Result.is_error
-       (Runtime_entry.create ~backend:session_backend
-          ~descriptor:session_descriptor
-          ~runtime_capabilities:session_descriptor.capabilities
-          ~origin:Runtime_entry.Custom
-          ~version_policy:Runtime_entry.Enforce_baseline));
+        (Runtime_entry.create ~backend:session_backend
+           ~descriptor:session_descriptor
+           ~runtime_capabilities:session_descriptor.capabilities
+           ~origin:Runtime_entry.Custom
+           ~execution_policy:Runtime_entry.Dispatch_enabled
+           ~version_policy:Runtime_entry.Enforce_baseline));
   Alcotest.(check bool)
     "session mismatch leaves registry empty" true
     (Option.is_none (Registry.find_entry session_id));
@@ -273,11 +279,12 @@ let test_runtime_descriptor_mismatches_cannot_be_registered () =
   Alcotest.(check bool)
     "native mismatch cannot produce a validated entry" true
     (Result.is_error
-       (Runtime_entry.create ~backend:native_backend
-          ~descriptor:native_descriptor
-          ~runtime_capabilities:native_descriptor.capabilities
-          ~origin:Runtime_entry.Custom
-          ~version_policy:Runtime_entry.Enforce_baseline));
+        (Runtime_entry.create ~backend:native_backend
+           ~descriptor:native_descriptor
+           ~runtime_capabilities:native_descriptor.capabilities
+           ~origin:Runtime_entry.Custom
+           ~execution_policy:Runtime_entry.Dispatch_enabled
+           ~version_policy:Runtime_entry.Enforce_baseline));
   Alcotest.(check int) "native mismatch call count" 0 !native_calls
 
 let test_raw_claude_override_invalidates_validated_pair () =
@@ -334,6 +341,77 @@ let test_raw_claude_override_invalidates_validated_pair () =
     (Sys.file_exists version_marker);
   Alcotest.(check int) "raw override availability calls" 0 !availability_calls;
   Alcotest.(check int) "raw override backend calls" 0 !backend_calls
+
+let test_quarantined_copilot_stops_before_every_dispatch_side_effect () =
+  with_registry @@ fun () ->
+  with_temp_dir "copilot-quarantine-order" @@ fun temp_dir ->
+  let version_marker = Filename.concat temp_dir "version-process" in
+  let fake_copilot = Filename.concat temp_dir "copilot" in
+  write_executable fake_copilot
+    (Printf.sprintf
+       "#!/bin/sh\nprintf 'version process ran\\n' >> %s\nprintf '%%s\\n' \
+        '1.0.54'\n"
+       (Filename.quote version_marker)) ;
+  let descriptor =
+    match Backend_registry.find "copilot-cli" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Copilot descriptor missing"
+  in
+  let availability_calls = ref 0 in
+  let preparation_calls = ref 0 in
+  let config_setup_calls = ref 0 in
+  let task_process_calls = ref 0 in
+  let backend =
+    make_backend ~id:"copilot-cli" ~calls:task_process_calls
+      ~availability:(fun ~sw:_ ~env:_ ->
+        incr availability_calls ;
+        true)
+      (fun ~sw:_ ~env:_ ?on_raw_line:_ _ ->
+        incr config_setup_calls ;
+        success ())
+  in
+  let entry =
+    match
+      Runtime_entry.create ~backend ~descriptor
+        ~runtime_capabilities:descriptor.capabilities
+        ~origin:Runtime_entry.Handwritten
+        ~execution_policy:
+          (Runtime_entry.Dispatch_quarantined
+             Runtime_entry.Incomplete_mcp_isolation)
+        ~version_policy:Runtime_entry.Enforce_baseline
+    with
+    | Ok entry -> entry
+    | Error error -> Alcotest.fail (Runtime_entry.render_validation_error error)
+  in
+  Registry.register_validated entry ;
+  with_path_prefix temp_dir @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let handle =
+    Runtime_dispatch.Private.start_task_with_input_hooks ~sw ~env ~limits
+      ~backend_id:"copilot-cli"
+      ~on_prepare_inputs:(fun () -> incr preparation_calls)
+      (spec ~working_dir:temp_dir ~mcp_servers:[] ())
+  in
+  (match Runtime_dispatch.Private.await handle with
+  | Error
+      (Runtime_dispatch.Backend_quarantined
+         Runtime_entry.Incomplete_mcp_isolation) ->
+      ()
+  | Error error ->
+      Alcotest.failf "unexpected quarantine error: %s"
+        (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "quarantined Copilot task reached execution") ;
+  Alcotest.(check bool)
+    "no version subprocess" false (Sys.file_exists version_marker) ;
+  Alcotest.(check int) "no availability check" 0 !availability_calls ;
+  Alcotest.(check int)
+    "no attachment preparation or staging" 0 !preparation_calls ;
+  Alcotest.(check int) "no project config setup" 0 !config_setup_calls ;
+  Alcotest.(check int) "no backend task process" 0 !task_process_calls ;
+  Alcotest.(check bool)
+    "no project config artifact" false
+    (Sys.file_exists (Filename.concat temp_dir ".github"))
 
 let test_invalid_preflight_never_spawns_or_calls_backend () =
   with_registry @@ fun () ->
@@ -624,6 +702,68 @@ let test_capability_rejection_precedes_attachment_staging () =
       Alcotest.(check int)
         (label ^ " performs no availability side effect") 0 !availability_calls)
     cases
+
+let test_mcp_rejection_precedes_staging_and_subprocesses () =
+  with_registry @@ fun () ->
+  with_temp_dir "mcp-before-staging" @@ fun temp_dir ->
+  let png = "\x89PNG\r\n\x1a\nMCP ordering" in
+  write_binary_file (Filename.concat temp_dir "image.png") png;
+  let attachment =
+    Backend_types.
+      {
+        id = "image";
+        path = "image.png";
+        media_type = Png;
+        sha256 = Digestif.SHA256.(to_hex (digest_string png));
+        size_bytes = String.length png;
+      }
+  in
+  let server : Backend_types.mcp_server_config =
+    {name = "hostile"; command = "must-not-run"; args = []; env = []}
+  in
+  let version_marker = Filename.concat temp_dir "version-ran" in
+  let binary_name = Filename.concat temp_dir "mcp-backend" in
+  write_executable binary_name
+    (Printf.sprintf
+       "#!/bin/sh\nprintf 'ran\\n' > %s\nprintf '1.0.0\\n'\n"
+       (Filename.quote version_marker));
+  let availability_calls = ref 0 in
+  let backend_calls = ref 0 in
+  let id = "dispatch-mcp-before-staging" in
+  register_pair ~id ~binary_name ~media_types:[Backend_types.Png]
+    (make_backend ~id ~calls:backend_calls
+       ~availability:(fun ~sw:_ ~env:_ ->
+         incr availability_calls;
+         true)
+       (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ()));
+  let staging_directories = ref 0 in
+  let staged_files = ref 0 in
+  let limits =
+    Task_preflight.
+      {max_attachments = 1; max_file_size_bytes = 64; max_total_size_bytes = 64}
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  (match
+     Runtime_dispatch.Private.prepare_with_input_hooks ~sw ~env ~limits
+       ~backend_id:id
+       ~on_staging_directory:(fun _ -> incr staging_directories)
+       ~on_staged_file:(fun _ _ -> incr staged_files)
+       (spec ~working_dir:temp_dir ~attachments:[attachment]
+          ~mcp_servers:[server] ())
+   with
+  | Error
+      (Runtime_dispatch.Preflight_failed
+         (Task_preflight.Capability Task_preflight.Mcp_unsupported)) ->
+      ()
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_error error)
+  | Ok _ -> Alcotest.fail "Mcp_none accepted a task MCP server");
+  Alcotest.(check int) "no staging directory" 0 !staging_directories;
+  Alcotest.(check int) "no staged file" 0 !staged_files;
+  Alcotest.(check bool) "no version process" false
+    (Sys.file_exists version_marker);
+  Alcotest.(check int) "no availability call" 0 !availability_calls;
+  Alcotest.(check int) "no backend call" 0 !backend_calls
 
 let test_enforcer_uses_resolved_backend_snapshot_for_retry () =
   with_registry @@ fun () ->
@@ -2408,6 +2548,9 @@ let () =
             `Quick test_runtime_descriptor_mismatches_cannot_be_registered;
           Alcotest.test_case "raw Claude override invalidates validated pairing"
             `Quick test_raw_claude_override_invalidates_validated_pair;
+          Alcotest.test_case
+            "quarantined Copilot stops before every dispatch side effect" `Quick
+            test_quarantined_copilot_stops_before_every_dispatch_side_effect;
           Alcotest.test_case "invalid preflight never spawns or calls" `Quick
             test_invalid_preflight_never_spawns_or_calls_backend;
           Alcotest.test_case
@@ -2416,6 +2559,9 @@ let () =
           Alcotest.test_case
             "capability rejection precedes attachment staging" `Quick
             test_capability_rejection_precedes_attachment_staging;
+          Alcotest.test_case
+            "MCP rejection precedes staging and subprocesses" `Quick
+            test_mcp_rejection_precedes_staging_and_subprocesses;
           Alcotest.test_case "hardened Codex uses proven media transport"
             `Quick test_hardened_codex_dispatch_uses_proven_media_transport;
         ] );

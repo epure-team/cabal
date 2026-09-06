@@ -5,13 +5,12 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Tests for Story #483 — Copilot parity uplift (Copilot CLI 1.0.34).
+(** Tests for Story #483 — Copilot project configuration compatibility.
 
     Covers:
     - AC1: Supported Copilot project config files are created or updated
     - AC2: LSP config generation is integrated
-    - AC3: MCP/config support improved, no prerelease behavior, no unapproved
-           MCP entries activated
+    - AC3: MCP is fail-closed, with no project artifact or activation language
     - AC4: Stable limitations are documented *)
 
 open Cabal
@@ -86,14 +85,12 @@ let minimal_spec () : Backend_types.task_spec =
     json_schema = None;
   }
 
-let check_failed_with_mcp_path result path =
+let check_failed_with_unsupported_mcp result =
   match result.Backend_types.status with
   | Backend_types.Failed msg ->
       Alcotest.(check bool) "failure mentions MCP" true (contains_str msg "MCP") ;
-      Alcotest.(check bool)
-        "failure mentions MCP path"
-        true
-        (contains_str msg path)
+      Alcotest.(check bool) "failure is explicit" true
+        (contains_str msg "unsupported")
   | _ -> Alcotest.fail "expected Copilot run_task to fail before invocation"
 
 (** {1 AC1 — Project-scoped config files created or updated} *)
@@ -216,47 +213,77 @@ let test_ac2_config_has_lsp_section () =
         true
         (contains_str lower "lsp")
 
-(** {1 AC3 — MCP/config improved, no prerelease, no unapproved entries} *)
+(** {1 AC3 — MCP fail-closed without project activation} *)
 
-(* AC3: MCP support mode reflects the project .github/mcp.json file. *)
-let test_ac3_copilot_mcp_support_is_config_file () =
+(* AC3: the quarantined runtime exposes no MCP transport. *)
+let test_ac3_copilot_mcp_support_is_none () =
   let open Backend_registry in
   match find "copilot-cli" with
   | None -> Alcotest.fail "copilot-cli descriptor not found"
   | Some d ->
       Alcotest.(check bool)
-        "AC3: copilot-cli mcp_support = Mcp_config_file"
+        "AC3: copilot-cli mcp_support = Mcp_none"
         true
-        (d.capabilities.mcp_support = Mcp_config_file)
+        (d.capabilities.mcp_support = Mcp_none)
 
-(* AC3: generated config contains an MCP reference section. *)
-let test_ac3_config_contains_mcp_reference () =
+(* AC3: generated instructions explain why MCP and runtime execution are
+   unavailable without suggesting that project MCP configuration is usable. *)
+let test_ac3_config_documents_mcp_quarantine () =
   match Backend_config_gen.generate ~backend_id:"copilot-cli" with
   | None -> Alcotest.fail "expected artifact for copilot-cli"
   | Some a ->
       let lower = String.lowercase_ascii a.Backend_config_gen.content in
+      Alcotest.(check bool) "AC3: config documents MCP" true
+        (contains_str lower "mcp") ;
+      Alcotest.(check bool) "AC3: config documents runtime quarantine" true
+        (contains_str lower "runtime is quarantined") ;
       Alcotest.(check bool)
-        "AC3: config contains MCP reference"
+        "AC3: config documents unproven complete MCP isolation"
         true
-        (contains_str lower "mcp")
+        (contains_str lower "complete mcp discovery isolation is unproven")
 
-let test_ac3_config_points_to_project_mcp_json () =
-  match Backend_config_gen.generate ~backend_id:"copilot-cli" with
-  | None -> Alcotest.fail "expected artifact for copilot-cli"
-  | Some a ->
-      let content = a.Backend_config_gen.content in
-      Alcotest.(check bool)
-        "AC3: config points MCP setup to .github/mcp.json"
-        true
-        (contains_str content ".github/mcp.json") ;
-      Alcotest.(check bool)
-        "AC3: project MCP path is primary, not additional-mcp-config"
-        false
-        (contains_str content "--additional-mcp-config")
+let test_ac3_generated_artifacts_exclude_mcp_activation () =
+  let artifacts =
+    Backend_config_gen.generate_all ~backend_id:"copilot-cli"
+      ~mcp_servers:[epure_mcp_server ()]
+  in
+  Alcotest.(check bool)
+    "AC3: no .github/mcp.json artifact"
+    false
+    (List.exists
+       (fun artifact ->
+         artifact.Backend_config_writer.project_relative_path
+         = ".github/mcp.json")
+       artifacts) ;
+  let activation_markers =
+    [
+      ".github/mcp.json";
+      "--additional-mcp-config";
+      "\"mcpservers\"";
+      "enable mcp";
+      "mcp enabled";
+      "activate mcp";
+      "mcp activation";
+      "configure mcp servers";
+    ]
+  in
+  List.iter
+    (fun artifact ->
+      let content =
+        String.lowercase_ascii artifact.Backend_config_writer.content
+      in
+      List.iter
+        (fun marker ->
+          Alcotest.(check bool)
+            ("AC3: generated artifacts omit MCP activation marker " ^ marker)
+            false
+            (contains_str content marker))
+        activation_markers)
+    artifacts
 
-let test_ac3_build_command_prefers_project_mcp_discovery () =
+let test_ac3_build_command_ignores_transient_mcp_config () =
   let cmd, _stdin =
-    Copilot_cli.build_command
+    Copilot_cli.Private.build_command
       ~mcp_config_path:(Some "/tmp/transient-mcp.json")
       (minimal_spec ())
   in
@@ -265,7 +292,7 @@ let test_ac3_build_command_prefers_project_mcp_discovery () =
     false
     (List.mem "--additional-mcp-config" cmd)
 
-let test_ac3_run_fails_when_user_mcp_config_blocks_requested_mcp () =
+let test_ac3_requested_mcp_rejection_preserves_user_config () =
   with_tmpdir (fun dir ->
       let mcp_path = Filename.concat dir ".github/mcp.json" in
       let original = {|{"mcpServers":{"user":{"command":"user-mcp"}}}|} in
@@ -273,13 +300,13 @@ let test_ac3_run_fails_when_user_mcp_config_blocks_requested_mcp () =
       Eio_posix.run @@ fun env ->
       Eio.Switch.run @@ fun sw ->
       let result = Copilot_cli.run_task ~sw ~env (task_spec_with_mcp dir) in
-      check_failed_with_mcp_path result ".github/mcp.json" ;
+      check_failed_with_unsupported_mcp result ;
       Alcotest.(check string)
         "user-authored MCP config unchanged"
         original
         (read_file mcp_path))
 
-let test_ac3_run_fails_when_hash_mismatch_blocks_requested_mcp () =
+let test_ac3_requested_mcp_rejection_preserves_config_after_setup () =
   with_tmpdir (fun dir ->
       ignore
         (Backend_config_gen.setup_project_config
@@ -293,15 +320,14 @@ let test_ac3_run_fails_when_hash_mismatch_blocks_requested_mcp () =
       Eio_posix.run @@ fun env ->
       Eio.Switch.run @@ fun sw ->
       let result = Copilot_cli.run_task ~sw ~env (task_spec_with_mcp dir) in
-      check_failed_with_mcp_path result ".github/mcp.json" ;
+      check_failed_with_unsupported_mcp result ;
       Alcotest.(check string)
-        "hash-mismatched MCP config unchanged"
+        "user MCP config created after setup remains unchanged"
         modified
         (read_file mcp_path))
 
-(* AC3: the MCP section is disabled/template-only — no active MCP server
-   entries activated in the generated file. *)
-let test_ac3_config_mcp_disabled () =
+(* AC3: explanatory MCP prose contains no active MCP server configuration. *)
+let test_ac3_config_has_no_active_mcp_servers () =
   match Backend_config_gen.generate ~backend_id:"copilot-cli" with
   | None -> Alcotest.fail "expected artifact for copilot-cli"
   | Some a ->
@@ -348,9 +374,7 @@ let test_ac3_config_no_secrets () =
 
 (** {1 AC4 — Stable limitations are documented} *)
 
-(* AC4: the generated config documents the stable limitations of Copilot CLI
-   1.0.34 (streaming, structured output, session resume, read-only, file
-   reading are not available in the stable channel). *)
+(* AC4: generated project instructions continue to document limitations. *)
 let test_ac4_limitations_documented () =
   match Backend_config_gen.generate ~backend_id:"copilot-cli" with
   | None -> Alcotest.fail "expected artifact for copilot-cli"
@@ -361,17 +385,34 @@ let test_ac4_limitations_documented () =
         true
         ((contains_str lower "stable" && contains_str lower "limitation")
         || contains_str lower "not supported"
-        || contains_str lower "not available")
+        || contains_str lower "not available") ;
+      Alcotest.(check bool)
+        "AC4: config records authenticated attachment observation"
+        true
+        (contains_str lower
+           "authenticated copilot cli 1.0.54 attachment behavior was observed") ;
+      Alcotest.(check bool)
+        "AC4: config records no positive media evidence"
+        true
+        (contains_str lower "no positive media evidence is recorded") ;
+      Alcotest.(check bool)
+        "AC4: config says dormant JSONL is not a structured-output capability"
+        true
+        (contains_str lower "structured_output: disabled while quarantined") ;
+      Alcotest.(check bool)
+        "AC4: config does not claim active sealed PNG/JPEG transport"
+        false
+        (contains_str lower "transports sealed png/jpeg")
 
-(* AC4: baseline version is the stable 1.0.34. *)
+(* AC4: baseline version is the exact investigated Copilot version. *)
 let test_ac4_baseline_is_stable () =
   let open Backend_registry in
   match find "copilot-cli" with
   | None -> Alcotest.fail "copilot-cli descriptor not found"
   | Some d ->
       Alcotest.(check string)
-        "AC4: baseline_version = 1.0.34 (stable)"
-        "1.0.34"
+        "AC4: baseline_version = 1.0.54 (stable)"
+        "1.0.54"
         d.baseline_version
 
 (* AC4: capability flags accurately reflect stable limitations. *)
@@ -382,25 +423,48 @@ let test_ac4_capability_flags_reflect_stable_limits () =
   | Some d ->
       let caps = d.capabilities in
       Alcotest.(check bool)
-        "AC4: streaming_output = false (not in stable 1.0.34)"
+        "AC4: streaming_output = false"
         false
         caps.streaming_output ;
       Alcotest.(check bool)
-        "AC4: structured_output = false (not in stable 1.0.34)"
+        "AC4: structured_output = false while quarantined"
         false
         caps.structured_output ;
       Alcotest.(check bool)
-        "AC4: session_resume = false (not in stable 1.0.34)"
+        "AC4: session_resume = false"
         false
         caps.session_resume ;
       Alcotest.(check bool)
-        "AC4: read_only_support = false (not in stable 1.0.34)"
+        "AC4: read_only_support = false"
         false
         caps.read_only_support ;
       Alcotest.(check bool)
-        "AC4: file_reading = false (not in stable 1.0.34)"
+        "AC4: file_reading = false"
         false
-        caps.file_reading
+        caps.file_reading ;
+      Alcotest.(check bool) "AC4: mcp_support = Mcp_none" true
+        (caps.mcp_support = Mcp_none) ;
+      Alcotest.(check (list bool))
+        "AC4: media support and evidence are disabled"
+        [true; true]
+        [
+          caps.media_support.media_types = [];
+          caps.media_support.evidence = None;
+        ] ;
+      Alcotest.(check (list bool))
+        "AC4: web support and evidence are disabled"
+        [true; true]
+        [
+          caps.web_support.maximum = Backend_types.Web_disabled;
+          caps.web_support.evidence = None;
+        ] ;
+      Alcotest.(check (list bool))
+        "AC4: native schema and evidence are disabled"
+        [true; true]
+        [
+          not caps.native_json_schema_output;
+          caps.native_json_schema_output_evidence = None;
+        ]
 
 (** {1 Suite} *)
 
@@ -446,36 +510,36 @@ let () =
             `Quick
             test_ac2_config_has_lsp_section;
         ] );
-      ( "AC3 MCP improved, no prerelease, no unapproved entries",
+      ( "AC3 MCP fail-closed without activation",
         [
           Alcotest.test_case
-            "mcp_support = Mcp_config_file (.github/mcp.json)"
+            "hardened runtime mcp_support = Mcp_none"
             `Quick
-            test_ac3_copilot_mcp_support_is_config_file;
+            test_ac3_copilot_mcp_support_is_none;
           Alcotest.test_case
-            "config contains MCP reference"
+            "config documents MCP quarantine"
             `Quick
-            test_ac3_config_contains_mcp_reference;
+            test_ac3_config_documents_mcp_quarantine;
           Alcotest.test_case
-            "config points to .github/mcp.json"
+            "generated artifacts exclude MCP activation"
             `Quick
-            test_ac3_config_points_to_project_mcp_json;
+            test_ac3_generated_artifacts_exclude_mcp_activation;
           Alcotest.test_case
-            "build_command prefers project MCP discovery"
+            "build_command ignores transient MCP config"
             `Quick
-            test_ac3_build_command_prefers_project_mcp_discovery;
+            test_ac3_build_command_ignores_transient_mcp_config;
           Alcotest.test_case
-            "requested MCP fails clearly when project MCP is user-authored"
+            "requested MCP rejection preserves user project config"
             `Quick
-            test_ac3_run_fails_when_user_mcp_config_blocks_requested_mcp;
+            test_ac3_requested_mcp_rejection_preserves_user_config;
           Alcotest.test_case
-            "requested MCP fails clearly on project MCP hash mismatch"
+            "requested MCP rejection preserves config created after setup"
             `Quick
-            test_ac3_run_fails_when_hash_mismatch_blocks_requested_mcp;
+            test_ac3_requested_mcp_rejection_preserves_config_after_setup;
           Alcotest.test_case
-            "MCP section disabled/template-only by default"
+            "generated instructions contain no active MCP servers"
             `Quick
-            test_ac3_config_mcp_disabled;
+            test_ac3_config_has_no_active_mcp_servers;
           Alcotest.test_case
             "no secret keywords in generated config"
             `Quick
@@ -488,7 +552,7 @@ let () =
             `Quick
             test_ac4_limitations_documented;
           Alcotest.test_case
-            "baseline = 1.0.34 (stable, not prerelease)"
+            "baseline = 1.0.54 (investigated version)"
             `Quick
             test_ac4_baseline_is_stable;
           Alcotest.test_case

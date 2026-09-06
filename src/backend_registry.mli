@@ -29,11 +29,14 @@
 
 (** How a backend receives MCP server configuration. *)
 type mcp_support =
-  | Mcp_none  (** Backend ignores [task_spec.mcp_servers]; MCP not supported. *)
+  | Mcp_none
+      (** MCP is unsupported. Central capability preflight rejects every
+          nonempty [task_spec.mcp_servers] request before attachment staging,
+          version probing, project configuration, or backend execution. *)
   | Mcp_config_file
       (** Backend reads MCP config from a file passed explicitly at invocation
           (e.g. [claude --mcp-config <path>]) or from a project config file
-          written by Épure (e.g. [opencode.json] or [.github/mcp.json]). *)
+          written by the host through Cabal (e.g. [opencode.json]). *)
   | Mcp_config_flag
       (** Backend receives MCP config via a dedicated CLI flag. *)
   | Mcp_user_settings
@@ -87,14 +90,16 @@ type web_support = {
       (** Reproducible evidence for a positive web claim. *)
 }
 
-(** Static capability flags for a backend at its stable baseline version.
+(** Static capability flags for usable Cabal behavior at a backend's stable
+    baseline version.
 
-    These are build-time facts about what Épure supports for each backend,
-    not runtime checks. *)
+    These are build-time facts about what Épure exposes through its approved
+    transport, not runtime checks or dormant upstream mechanics. *)
 type capabilities = {
   structured_output : bool;
-      (** True when the backend emits machine-readable structured output
-          (JSON or JSONL) that Épure can parse for cost, session IDs, etc. *)
+      (** True when the approved, dispatchable transport emits machine-readable
+          structured output (JSON or JSONL) that Épure parses for cost, session
+          IDs, etc. An unreachable parser behind a quarantine remains false. *)
   streaming_output : bool;
       (** True when the backend can emit output incrementally (stream-json or
           NDJSON), enabling real-time display. *)
@@ -150,8 +155,9 @@ type descriptor = {
           single source of truth for binary names — never hardcode them
           elsewhere. *)
   baseline_version : string;
-      (** Stable upstream version Épure requires as minimum.
-          Checked at backend startup; below-baseline → refuse to run. *)
+      (** Stable upstream version Épure requires as minimum for a dispatchable
+          transport. [Enforce_baseline] checks it before execution; a centrally
+          quarantined entry stops before probing the installed version. *)
   capabilities : capabilities;
       (** Static capability flags for this backend at baseline. *)
 }

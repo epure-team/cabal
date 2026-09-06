@@ -41,7 +41,12 @@ type write_result =
   | Refused_hash_mismatch of string
   | Backed_up_and_written of {path : string; backup_path : string}
   | Skipped_user_content of string
+  | Unsafe_project_path of string
   | Invalid_managed_namespace of string
+
+(** {b Migration note:} {!write_result} gained [Unsafe_project_path]. Exhaustive
+    matches must handle it (or deliberately use a wildcard) and must treat it as
+    a fail-closed refusal rather than retrying through an unchecked path. *)
 
 (** Per-artifact result produced by [setup_artifacts]. *)
 type artifact_write_outcome = {
@@ -155,14 +160,26 @@ val managed_body_hash :
 (** [write_artifact ~project_dir ~force artifact] writes [artifact] using the
     generic ownership policy.
 
-    {b Path-traversal contract:} [artifact.project_relative_path] is appended
-    to [project_dir] verbatim. Cabal does not normalise [..] segments. The
-    caller (host application) is responsible for ensuring the path stays
-    within [project_dir]; passing a value containing [..] or an absolute
-    path will silently write outside the project tree. Use
-    {!Backend_types.validate_namespace} for the [managed_namespace] half of
-    the contract — that side is enforced here and returns
-    [Invalid_managed_namespace _]. *)
+    {b Caller precondition:} no hostile same-UID process may mutate, rename, or
+    replace the workspace's parent, target, or temporary pathnames for the full
+    write transaction. Subject to that precondition, the project root is resolved
+    once, absolute paths and traversal components are rejected, every existing
+    parent/target component is checked with [lstat], unique same-directory
+    temporary files are opened with [O_EXCL] at mode [0600], and successful
+    writes use atomic replacement. Recorded device/inode checks avoid deliberately
+    cleaning up or publishing a temporary pathname when a mismatch is observed;
+    exclusive-open collisions are retried without intentionally removing the
+    colliding path, and symlink components fail with [Unsafe_project_path].
+    For strict-JSON [Backend_project] artifacts, the target, current/legacy
+    metadata sidecars, and any force-mode backup path are all required to be
+    regular-or-missing before the first file is published. An unsafe auxiliary
+    path therefore returns [Unsafe_project_path] without mutating the target,
+    sidecar, or backup.
+
+    Portable OCaml exposes no descriptor-relative
+    [openat]/[renameat]/[unlinkat] surface, so [lstat] and inode checks retain
+    pathname check/use windows and are defense in depth, not isolation from such
+    concurrent namespace mutation. *)
 val write_artifact :
   project_dir:string -> force:bool -> artifact -> write_result
 
@@ -181,3 +198,31 @@ val setup_artifacts :
     config precedence over user-global config. *)
 val precedence_warning_for :
   backend_id:string -> write_outcome:write_result option -> string option
+
+(** Security-only project path inspection shared with hardened adapters. *)
+module Private : sig
+  type project_file_read = Missing | File of string | Unsafe
+
+  (** Inspect a workspace-relative regular file without following any existing
+      parent or target symlink. Missing components return [Missing]; malformed,
+      unreadable, non-regular, or racy paths return [Unsafe]. *)
+  val inspect_project_file :
+    project_dir:string -> relative_path:string -> project_file_read
+
+  (** Deterministic failure/collision hook for the production atomic writer.
+      [nonce_for_attempt] controls only the validated basename suffix; temporary
+      files always remain beside the target. [after_write] runs after complete
+      write and [fsync], while the owned descriptor is still open. Ordinary
+      failure cleanup closes the descriptor and conditionally unlinks after an
+      observed device/inode match. This deterministic hook does not model or
+      close hostile concurrent pathname replacement races; the caller
+      precondition on {!write_artifact} still applies. *)
+  val atomic_write_file_with_hooks :
+    ?managed_namespace:Backend_types.managed_namespace ->
+    ?nonce_for_attempt:(int -> string) ->
+    ?after_write:(string -> unit) ->
+    project_root:string ->
+    relative_path:string ->
+    string ->
+    unit
+end

@@ -249,6 +249,39 @@ let test_hardened_registers_exact_approved_runtime () =
     false
     (Agentic_backend.supports_session_resume pi)
 
+let test_hardened_copilot_quarantine_and_capability_truth () =
+  with_empty_registry @@ fun () ->
+  expect_ok
+    (Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins
+       ()) ;
+  let copilot = validated_entry "copilot-cli" in
+  let static_descriptor =
+    match Backend_registry.find "copilot-cli" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Copilot descriptor missing"
+  in
+  Alcotest.(check bool)
+    "Copilot dispatch policy carries the typed MCP-isolation quarantine" true
+    (copilot.execution_policy
+    = Runtime_entry.Dispatch_quarantined
+        Runtime_entry.Incomplete_mcp_isolation) ;
+  Alcotest.(check bool)
+    "catalog structured output is false while transport is quarantined" false
+    static_descriptor.capabilities.structured_output ;
+  Alcotest.(check bool)
+    "effective structured output is false while transport is quarantined" false
+    copilot.effective_descriptor.capabilities.structured_output ;
+  Alcotest.(check bool)
+    "independent runtime structured output is false while quarantined" false
+    copilot.runtime_capabilities.structured_output ;
+  ["claude-code"; "codex"; "gemini-cli"; "opencode"; "pi"]
+  |> List.iter (fun id ->
+         let entry = validated_entry id in
+         Alcotest.(check bool)
+           (id ^ " remains dispatch-enabled") true
+           (entry.execution_policy = Runtime_entry.Dispatch_enabled))
+
 let test_hardened_ignores_home_and_project_adapters () =
   with_empty_registry @@ fun () ->
   with_temp_dir "home" @@ fun home ->
@@ -851,6 +884,9 @@ let () =
             "registers exact approved runtime"
             `Quick
             test_hardened_registers_exact_approved_runtime;
+          Alcotest.test_case
+            "Copilot quarantine and capability truth are aligned" `Quick
+            test_hardened_copilot_quarantine_and_capability_truth;
           Alcotest.test_case
             "trusts exact positive Codex media and web capabilities"
             `Quick

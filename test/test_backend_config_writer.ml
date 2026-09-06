@@ -100,6 +100,7 @@ let test_write_fresh_file_succeeds () =
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Backed_up_and_written _ -> "Backed_up_and_written"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> "Invalid_managed_namespace"
             | Written _ -> assert false))
 
@@ -117,6 +118,7 @@ let test_write_twice_is_idempotent () =
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Backed_up_and_written _ -> "Backed_up_and_written"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> "Invalid_managed_namespace"
             | Written _ | Already_current -> assert false))
 
@@ -142,7 +144,8 @@ let test_backend_project_refuses_hash_mismatch_then_force_overwrites () =
           Alcotest.fail
             "expected refusal or skip on user-modified file without force"
       | Refused_hash_mismatch _ | Skipped_user_content _ | Already_current
-      | Backed_up_and_written _ | Invalid_managed_namespace _ ->
+      | Backed_up_and_written _ | Unsafe_project_path _
+      | Invalid_managed_namespace _ ->
           ()) ;
       let forced =
         W.write_artifact ~project_dir:project ~force:true artifact_v2
@@ -174,6 +177,7 @@ let test_backend_project_refuses_hash_mismatch_then_force_overwrites () =
             | Already_current -> "Already_current"
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> "Invalid_managed_namespace"
             | Written _ | Backed_up_and_written _ -> assert false))
 
@@ -205,7 +209,256 @@ let test_invalid_managed_namespace_refuses_write () =
             | Refused_hash_mismatch _ -> "Refused_hash_mismatch"
             | Backed_up_and_written _ -> "Backed_up_and_written"
             | Skipped_user_content _ -> "Skipped_user_content"
+            | Unsafe_project_path _ -> "Unsafe_project_path"
             | Invalid_managed_namespace _ -> assert false))
+
+let test_stale_legacy_temp_does_not_poison_atomic_write () =
+  with_project_dir (fun project ->
+      let config_dir = Filename.concat project "config" in
+      Unix.mkdir config_dir 0o755 ;
+      let temp_path = Filename.concat config_dir "test.cfg.cabal-tmp" in
+      let sentinel = "stale legacy temporary data\n" in
+      let channel = open_out_bin temp_path in
+      output_string channel sentinel ;
+      close_out channel ;
+      let artifact = make_artifact ~ownership:Epure_owned "new data\n" in
+      (match W.write_artifact ~project_dir:project ~force:false artifact with
+      | W.Written path ->
+          Alcotest.(check string) "target content" "new data\n" (read_file path)
+      | _ -> Alcotest.fail "stale legacy temp poisoned a fresh atomic write") ;
+      Alcotest.(check bool)
+        "unowned legacy temporary file is preserved" true
+        (Sys.file_exists temp_path) ;
+      Alcotest.(check string)
+        "unowned legacy temporary content is unchanged" sentinel
+        (read_file temp_path))
+
+let test_post_write_failure_cleans_only_owned_temp () =
+  with_project_dir (fun project ->
+      let observed_temp = ref None in
+      let observed_mode = ref None in
+      let injected = Failure "injected post-write failure" in
+      let propagated =
+        try
+          W.Private.atomic_write_file_with_hooks ~project_root:project
+            ~relative_path:"config/test.cfg"
+            ~after_write:(fun temp_path ->
+              observed_temp := Some temp_path ;
+              observed_mode := Some ((Unix.lstat temp_path).st_perm land 0o777) ;
+              raise injected)
+            "new data\n" ;
+          false
+        with Failure message -> message = "injected post-write failure"
+      in
+      Alcotest.(check bool) "injected failure propagated" true propagated ;
+      Alcotest.(check (option int))
+        "owned temporary file is created with mode 0600" (Some 0o600)
+        !observed_mode ;
+      Option.iter
+        (fun temp_path ->
+          Alcotest.(check bool)
+            "owned temporary file is removed after failure" false
+            (Sys.file_exists temp_path))
+        !observed_temp ;
+      Alcotest.(check bool)
+        "failed write never publishes target" false
+        (Sys.file_exists (Filename.concat project "config/test.cfg")))
+
+let test_unique_temp_collision_retries_without_deleting_unowned_file () =
+  with_project_dir (fun project ->
+      let config_dir = Filename.concat project "config" in
+      Unix.mkdir config_dir 0o755 ;
+      let target = Filename.concat config_dir "test.cfg" in
+      let collision = target ^ ".cabal-tmp-collision" in
+      let winner = target ^ ".cabal-tmp-winner" in
+      let sentinel = "concurrent writer data\n" in
+      let channel = open_out_bin collision in
+      output_string channel sentinel ;
+      close_out channel ;
+      let attempts = ref 0 in
+      W.Private.atomic_write_file_with_hooks ~project_root:project
+        ~relative_path:"config/test.cfg"
+        ~nonce_for_attempt:(fun attempt ->
+          incr attempts ;
+          if attempt = 0 then "collision" else "winner")
+        "new data\n" ;
+      Alcotest.(check int) "one O_EXCL collision was retried" 2 !attempts ;
+      Alcotest.(check string)
+        "colliding unowned file is unchanged" sentinel (read_file collision) ;
+      Alcotest.(check bool)
+        "successful owned temp was renamed" false (Sys.file_exists winner) ;
+      Alcotest.(check string) "target content" "new data\n" (read_file target))
+
+let test_observed_temp_inode_mismatch_is_rejected () =
+  with_project_dir (fun project ->
+      let replacement_path = ref None in
+      let sentinel = "mismatched replacement fixture\n" in
+      let rejected =
+        try
+          W.Private.atomic_write_file_with_hooks ~project_root:project
+            ~relative_path:"config/test.cfg"
+            ~nonce_for_attempt:(fun _ -> "replaced")
+            ~after_write:(fun temp_path ->
+              Unix.unlink temp_path ;
+              let channel = open_out_bin temp_path in
+              output_string channel sentinel ;
+              close_out channel ;
+              replacement_path := Some temp_path)
+            "new data\n" ;
+          false
+        with Unix.Unix_error (Unix.EAGAIN, _, _) -> true
+      in
+      Alcotest.(check bool)
+        "observed inode mismatch is rejected before publish" true rejected ;
+      Alcotest.(check bool)
+        "target is not published" false
+        (Sys.file_exists (Filename.concat project "config/test.cfg")) ;
+      Option.iter
+        (fun path ->
+          Alcotest.(check bool) "mismatched replacement is preserved" true
+            (Sys.file_exists path) ;
+          Alcotest.(check string) "mismatched replacement is unchanged" sentinel
+            (read_file path))
+        !replacement_path)
+
+let test_symlink_target_never_writes_outside_workspace () =
+  with_project_dir (fun project ->
+      let outside = Filename.temp_file "cabal-cw-outside-target-" ".cfg" in
+      Fun.protect
+        ~finally:(fun () -> if Sys.file_exists outside then Unix.unlink outside)
+        (fun () ->
+          let sentinel = "outside sentinel\n" in
+          let channel = open_out_bin outside in
+          output_string channel sentinel ;
+          close_out channel ;
+          let config_dir = Filename.concat project "config" in
+          Unix.mkdir config_dir 0o755 ;
+          Unix.symlink outside (Filename.concat config_dir "test.cfg") ;
+          let artifact = make_artifact ~ownership:Epure_owned "new data\n" in
+          (match W.write_artifact ~project_dir:project ~force:false artifact with
+          | W.Unsafe_project_path _ -> ()
+          | _ -> Alcotest.fail "symlink target was accepted") ;
+          Alcotest.(check string)
+            "outside symlink target is unchanged" sentinel (read_file outside)))
+
+let test_symlinked_parent_never_writes_outside_workspace () =
+  let run_case label target_for_symlink =
+    with_project_dir (fun project ->
+        let outside = Filename.temp_dir ("cabal-cw-outside-" ^ label) "" in
+        Fun.protect
+          ~finally:(fun () -> rm_rf outside)
+          (fun () ->
+            let target = target_for_symlink ~project ~outside in
+            Unix.symlink target (Filename.concat project ".github") ;
+            let artifact =
+              {
+                W.backend_id = "test-backend";
+                ownership = W.Backend_project;
+                managed_namespace = BT.default_managed_namespace;
+                project_relative_path = ".github/mcp.json";
+                content = {|{"mcpServers":{"hostile":{"command":"run"}}}|};
+              }
+            in
+            (match W.write_artifact ~project_dir:project ~force:false artifact with
+            | W.Unsafe_project_path _ -> ()
+            | _ -> Alcotest.fail (label ^ " parent symlink was accepted")) ;
+            Alcotest.(check bool)
+              (label ^ " wrote nothing outside") false
+              (Sys.file_exists (Filename.concat outside "mcp.json"))))
+  in
+  run_case "relative" (fun ~project:_ ~outside ->
+      Filename.concat ".." (Filename.basename outside)) ;
+  run_case "absolute" (fun ~project:_ ~outside -> outside)
+
+let strict_json_artifact () =
+  make_artifact ~ownership:W.Backend_project {|{"setting":true}|}
+
+let strict_json_paths project =
+  let target = Filename.concat project "config/test.cfg" in
+  (target, target ^ ".cabal-meta.json", target ^ ".cabal-backup")
+
+let expect_unsafe_write project artifact =
+  match W.write_artifact ~project_dir:project ~force:false artifact with
+  | W.Unsafe_project_path _ -> ()
+  | _ -> Alcotest.fail "unsafe strict-JSON auxiliary path was accepted"
+
+let test_strict_json_symlink_sidecar_is_rejected_before_target_publish () =
+  with_project_dir (fun project ->
+      Unix.mkdir (Filename.concat project "config") 0o755 ;
+      let target, sidecar, backup = strict_json_paths project in
+      let outside = Filename.temp_file "cabal-cw-sidecar-outside-" ".json" in
+      Fun.protect
+        ~finally:(fun () -> if Sys.file_exists outside then Unix.unlink outside)
+        (fun () ->
+          let sentinel = "outside sidecar sentinel\n" in
+          let channel = open_out_bin outside in
+          output_string channel sentinel ;
+          close_out channel ;
+          Unix.symlink outside sidecar ;
+          expect_unsafe_write project (strict_json_artifact ()) ;
+          Alcotest.(check bool) "target remains absent" false
+            (Sys.file_exists target) ;
+          Alcotest.(check bool) "backup remains absent" false
+            (Sys.file_exists backup) ;
+          Alcotest.(check bool) "sidecar remains a symlink" true
+            ((Unix.lstat sidecar).st_kind = Unix.S_LNK) ;
+          Alcotest.(check string) "sidecar link is unchanged" outside
+            (Unix.readlink sidecar) ;
+          Alcotest.(check string) "outside file is unchanged" sentinel
+            (read_file outside)))
+
+let test_strict_json_nonregular_sidecar_is_rejected_before_target_publish () =
+  with_project_dir (fun project ->
+      Unix.mkdir (Filename.concat project "config") 0o755 ;
+      let target, sidecar, backup = strict_json_paths project in
+      Unix.mkdir sidecar 0o755 ;
+      let sentinel_path = Filename.concat sidecar "sentinel" in
+      let sentinel = "nonregular sidecar sentinel\n" in
+      let channel = open_out_bin sentinel_path in
+      output_string channel sentinel ;
+      close_out channel ;
+      expect_unsafe_write project (strict_json_artifact ()) ;
+      Alcotest.(check bool) "target remains absent" false
+        (Sys.file_exists target) ;
+      Alcotest.(check bool) "backup remains absent" false
+        (Sys.file_exists backup) ;
+      Alcotest.(check bool) "sidecar directory remains" true
+        ((Unix.lstat sidecar).st_kind = Unix.S_DIR) ;
+      Alcotest.(check string) "sidecar directory is unchanged" sentinel
+        (read_file sentinel_path))
+
+let test_strict_json_symlink_backup_is_rejected_before_any_publish () =
+  with_project_dir (fun project ->
+      let artifact = strict_json_artifact () in
+      (match W.write_artifact ~project_dir:project ~force:false artifact with
+      | W.Written _ -> ()
+      | _ -> Alcotest.fail "strict-JSON fixture setup failed") ;
+      let target, sidecar, backup = strict_json_paths project in
+      let modified = "user-modified target\n" in
+      let channel = open_out_bin target in
+      output_string channel modified ;
+      close_out channel ;
+      let sidecar_before = read_file sidecar in
+      let outside = Filename.temp_file "cabal-cw-backup-outside-" ".json" in
+      Fun.protect
+        ~finally:(fun () -> if Sys.file_exists outside then Unix.unlink outside)
+        (fun () ->
+          let sentinel = "outside backup sentinel\n" in
+          let channel = open_out_bin outside in
+          output_string channel sentinel ;
+          close_out channel ;
+          Unix.symlink outside backup ;
+          (match W.write_artifact ~project_dir:project ~force:true artifact with
+          | W.Unsafe_project_path _ -> ()
+          | _ -> Alcotest.fail "unsafe strict-JSON backup path was accepted") ;
+          Alcotest.(check string) "target is unchanged" modified
+            (read_file target) ;
+          Alcotest.(check string) "sidecar is unchanged" sidecar_before
+            (read_file sidecar) ;
+          Alcotest.(check bool) "backup remains a symlink" true
+            ((Unix.lstat backup).st_kind = Unix.S_LNK) ;
+          Alcotest.(check string) "outside file is unchanged" sentinel
+            (read_file outside)))
 
 let () =
   Random.self_init () ;
@@ -241,5 +494,33 @@ let () =
             "invalid managed namespace refuses to write"
             `Quick
             test_invalid_managed_namespace_refuses_write;
+          Alcotest.test_case
+            "stale legacy temporary file does not poison writes" `Quick
+            test_stale_legacy_temp_does_not_poison_atomic_write;
+          Alcotest.test_case
+            "post-write failure cleans only the owned temporary file" `Quick
+            test_post_write_failure_cleans_only_owned_temp;
+          Alcotest.test_case
+            "unique temporary collision retries safely" `Quick
+            test_unique_temp_collision_retries_without_deleting_unowned_file;
+          Alcotest.test_case
+            "observed temporary inode mismatch is rejected" `Quick
+            test_observed_temp_inode_mismatch_is_rejected;
+          Alcotest.test_case
+            "relative and absolute parent symlinks cannot escape"
+            `Quick test_symlinked_parent_never_writes_outside_workspace;
+          Alcotest.test_case "target symlink cannot escape" `Quick
+            test_symlink_target_never_writes_outside_workspace;
+          Alcotest.test_case
+            "strict JSON rejects a symlink sidecar before target publication"
+            `Quick
+            test_strict_json_symlink_sidecar_is_rejected_before_target_publish;
+          Alcotest.test_case
+            "strict JSON rejects a nonregular sidecar before target publication"
+            `Quick
+            test_strict_json_nonregular_sidecar_is_rejected_before_target_publish;
+          Alcotest.test_case
+            "strict JSON rejects a symlink backup before any publication" `Quick
+            test_strict_json_symlink_backup_is_rejected_before_any_publish;
         ] );
     ]

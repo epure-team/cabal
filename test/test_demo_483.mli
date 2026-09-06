@@ -5,6 +5,6 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Tests for Story #483 — Copilot parity uplift (Copilot CLI 1.0.34).
+(** Tests for Story #483 — Copilot project configuration compatibility.
 
     This module is a test executable; it exposes no public values. *)

@@ -247,12 +247,11 @@ let test_copilot_generate_all_paths () =
     List.map (fun a -> a.Backend_config_gen.project_relative_path) artifacts
   in
   Alcotest.(check (list string))
-    "copilot-cli artifacts include instructions, settings, LSP, and MCP"
+    "copilot-cli artifacts include instructions, settings, and LSP only"
     [
       ".github/copilot-instructions.md";
       ".github/copilot/settings.json";
       ".github/lsp.json";
-      ".github/mcp.json";
     ]
     paths
 
@@ -575,65 +574,19 @@ let test_copilot_settings_json_is_strict_minimal () =
     | `Assoc _ -> true
     | _ -> false)
 
-let test_copilot_project_mcp_json_default_empty () =
-  let artifacts = get_artifacts "copilot-cli" in
-  let mcp = artifact_by_path artifacts ".github/mcp.json" in
-  let json = Yojson.Safe.from_string mcp.Backend_config_gen.content in
-  Alcotest.(check (option bool))
-    "legacy servers key absent"
-    None
-    (Option.map (fun _ -> true) (json_field "servers" json)) ;
-  match json_field "mcpServers" json with
-  | Some (`Assoc []) -> ()
-  | Some other ->
-      Alcotest.failf
-        "expected empty mcpServers object, got %s"
-        (Yojson.Safe.to_string other)
-  | None -> Alcotest.fail "expected mcpServers in .github/mcp.json"
-
-let test_copilot_project_mcp_json_includes_servers () =
-  let artifacts =
-    get_artifacts ~mcp_servers:[epure_mcp_server ()] "copilot-cli"
-  in
-  let mcp = artifact_by_path artifacts ".github/mcp.json" in
-  let json = Yojson.Safe.from_string mcp.Backend_config_gen.content in
-  match json_field "mcpServers" json with
-  | Some (`Assoc servers) -> (
-      match List.assoc_opt "epure" servers with
-      | Some (`Assoc fields) ->
-          Alcotest.(check (option string))
-            "Copilot MCP type"
-            (Some "local")
-            (match List.assoc_opt "type" fields with
-            | Some (`String s) -> Some s
-            | _ -> None) ;
-          Alcotest.(check (option string))
-            "Copilot MCP command"
-            (Some "epure-mcp-server")
-            (match List.assoc_opt "command" fields with
-            | Some (`String s) -> Some s
-            | _ -> None) ;
-          Alcotest.(check bool)
-            "Copilot MCP args"
-            true
-            (match List.assoc_opt "args" fields with
-            | Some (`List [`String "--stdio"]) -> true
-            | _ -> false) ;
-          Alcotest.(check bool)
-            "Copilot MCP env"
-            true
-            (match List.assoc_opt "env" fields with
-            | Some (`Assoc env) ->
-                List.mem ("EPURE_PROJECT", `String "$EPURE_PROJECT") env
-            | _ -> false) ;
-          Alcotest.(check bool)
-            "Copilot MCP tools default to wildcard"
-            true
-            (match List.assoc_opt "tools" fields with
-            | Some (`List [`String "*"]) -> true
-            | _ -> false)
-      | _ -> Alcotest.fail "expected epure MCP server in .github/mcp.json")
-  | _ -> Alcotest.fail "expected Copilot mcpServers object"
+let test_copilot_project_mcp_json_is_never_generated () =
+  List.iter
+    (fun mcp_servers ->
+      let artifacts = get_artifacts ~mcp_servers "copilot-cli" in
+      Alcotest.(check bool)
+        "Copilot project MCP artifact absent"
+        false
+        (List.exists
+           (fun artifact ->
+             artifact.Backend_config_gen.project_relative_path
+             = ".github/mcp.json")
+           artifacts))
+    [[]; [epure_mcp_server ()]]
 
 let test_copilot_lsp_json_default_empty () =
   let artifacts = get_artifacts "copilot-cli" in
@@ -706,7 +659,8 @@ let test_write_creates_file () =
             | Backend_config_gen.Skipped_user_content s -> "Skipped:" ^ s
             | Backend_config_gen.Written _ -> "Written"
             | Backend_config_gen.Invalid_managed_namespace s ->
-                "Invalid namespace:" ^ s))
+                "Invalid namespace:" ^ s
+            | Backend_config_gen.Unsafe_project_path s -> "Unsafe path:" ^ s))
 
 let test_write_idempotent () =
   with_tmpdir (fun dir ->
@@ -868,7 +822,8 @@ let test_write_opencode_rewrites_legacy_metadata_keys () =
             | Backend_config_gen.Skipped_user_content s -> "Skipped:" ^ s
             | Backend_config_gen.Written _ -> "Written"
             | Backend_config_gen.Invalid_managed_namespace s ->
-                "Invalid namespace:" ^ s))
+                "Invalid namespace:" ^ s
+            | Backend_config_gen.Unsafe_project_path s -> "Unsafe path:" ^ s))
 
 let test_setup_opencode_migrates_legacy_metadata_preserving_mcp () =
   with_tmpdir (fun dir ->
@@ -919,7 +874,8 @@ let test_setup_opencode_migrates_legacy_metadata_preserving_mcp () =
             | Backend_config_gen.Skipped_user_content s -> "Skipped:" ^ s
             | Backend_config_gen.Written _ -> "Written"
             | Backend_config_gen.Invalid_managed_namespace s ->
-                "Invalid namespace:" ^ s)
+                "Invalid namespace:" ^ s
+            | Backend_config_gen.Unsafe_project_path s -> "Unsafe path:" ^ s)
       | None -> Alcotest.fail "expected write outcome for opencode") ;
       let content = read_file path in
       List.iter
@@ -1199,7 +1155,7 @@ let test_setup_project_config_copilot_writes_config () =
         true
         (Sys.file_exists expected))
 
-let test_setup_project_config_copilot_writes_settings_and_mcp () =
+let test_setup_project_config_copilot_writes_settings_and_lsp_only () =
   with_tmpdir (fun dir ->
       ignore
         (Backend_config_gen.setup_project_config
@@ -1213,11 +1169,15 @@ let test_setup_project_config_copilot_writes_settings_and_mcp () =
             (rel ^ " written")
             true
             (Sys.file_exists (Filename.concat dir rel)))
-        [".github/copilot/settings.json"; ".github/mcp.json"] ;
+        [".github/copilot/settings.json"] ;
       Alcotest.(check bool)
         ".github/lsp.json written"
         true
         (Sys.file_exists (Filename.concat dir ".github/lsp.json")) ;
+      Alcotest.(check bool)
+        "does not write project MCP config"
+        false
+        (Sys.file_exists (Filename.concat dir ".github/mcp.json")) ;
       Alcotest.(check bool)
         "does not write user-global ~/.copilot/config.json"
         false
@@ -1247,19 +1207,22 @@ let test_setup_project_config_copilot_writes_detected_lsp_servers () =
             (List.mem_assoc "typescript" servers)
       | _ -> Alcotest.fail "expected lspServers object")
 
-let test_setup_project_config_copilot_writes_project_mcp_servers () =
+let test_setup_project_config_copilot_preserves_project_mcp_config () =
   with_tmpdir (fun dir ->
+      Unix.mkdir (Filename.concat dir ".github") 0o755 ;
+      let path = Filename.concat dir ".github/mcp.json" in
+      let user_content = {|{"mcpServers":{"user":{"command":"user-mcp"}}}|} in
+      write_file path user_content ;
       ignore
         (Backend_config_gen.setup_project_config
            ~backend_id:"copilot-cli"
            ~project_dir:dir
            ~force:false
            ~mcp_servers:[epure_mcp_server ()]) ;
-      let path = Filename.concat dir ".github/mcp.json" in
-      let json = Yojson.Safe.from_string (read_file path) in
-      match json_field "mcpServers" json with
-      | Some (`Assoc servers) when List.mem_assoc "epure" servers -> ()
-      | _ -> Alcotest.fail "expected epure MCP server in .github/mcp.json")
+      Alcotest.(check string)
+        "Copilot project MCP config remains user-owned"
+        user_content
+        (read_file path))
 
 let test_sidecar_managed_json_preserves_user_settings () =
   with_tmpdir (fun dir ->
@@ -1396,7 +1359,9 @@ let test_opencode_mcp_injection_no_hash_mismatch () =
       | Backend_config_gen.Backed_up_and_written _ ->
           Alcotest.fail "unexpected Backed_up: force was false"
       | Backend_config_gen.Invalid_managed_namespace msg ->
-          Alcotest.failf "unexpected invalid namespace: %s" msg) ;
+          Alcotest.failf "unexpected invalid namespace: %s" msg
+      | Backend_config_gen.Unsafe_project_path msg ->
+          Alcotest.failf "unexpected unsafe path: %s" msg) ;
       (* Third write (idempotency after second) must also be clean *)
       inject_mcp_into_opencode path ;
       match
@@ -1640,7 +1605,8 @@ let test_setup_returns_written_outcome_for_copilot () =
             | Backend_config_gen.Skipped_user_content s -> "Skipped:" ^ s
             | Backend_config_gen.Written _ -> "Written"
             | Backend_config_gen.Invalid_managed_namespace s ->
-                "Invalid namespace:" ^ s))
+                "Invalid namespace:" ^ s
+            | Backend_config_gen.Unsafe_project_path s -> "Unsafe path:" ^ s))
 
 let test_setup_returns_refused_outcome_on_hash_mismatch () =
   with_tmpdir (fun dir ->
@@ -1748,7 +1714,7 @@ let test_setup_reports_secondary_gemini_settings_refusal () =
             (read_file path)
       | _ -> Alcotest.fail "expected .gemini/settings.json hash refusal")
 
-let test_setup_reports_secondary_copilot_mcp_skip () =
+let test_setup_omits_copilot_mcp_outcome_and_preserves_user_file () =
   with_tmpdir (fun dir ->
       let path = Filename.concat dir ".github/mcp.json" in
       let original = {|{"mcpServers":{"user":{"command":"user-mcp"}}}|} in
@@ -1761,20 +1727,23 @@ let test_setup_reports_secondary_copilot_mcp_skip () =
           ~force:false
       in
       Alcotest.(check int)
-        "copilot setup reports instructions, settings, LSP, and MCP outcomes"
-        4
+        "copilot setup reports instructions, settings, and LSP outcomes"
+        3
         (List.length r.Backend_config_gen.write_outcomes) ;
-      let outcome = setup_outcome_for_path r ".github/mcp.json" in
-      match outcome.Backend_config_gen.result with
-      | Backend_config_gen.Skipped_user_content skipped_path ->
-          Alcotest.(check string) "skipped path" path skipped_path ;
-          Alcotest.(check string)
-            "user MCP config unchanged"
-            original
-            (read_file path)
-      | _ -> Alcotest.fail "expected .github/mcp.json to be skipped")
+      Alcotest.(check bool)
+        "no project MCP outcome"
+        false
+        (List.exists
+           (fun outcome ->
+             outcome.Backend_config_gen.artifact.project_relative_path
+             = ".github/mcp.json")
+           r.Backend_config_gen.write_outcomes) ;
+      Alcotest.(check string)
+        "user MCP config unchanged"
+        original
+        (read_file path))
 
-let test_setup_reports_secondary_copilot_mcp_refusal () =
+let test_setup_never_creates_copilot_mcp_artifact () =
   with_tmpdir (fun dir ->
       ignore
         (Backend_config_gen.setup_project_config
@@ -1783,8 +1752,6 @@ let test_setup_reports_secondary_copilot_mcp_refusal () =
            ~project_dir:dir
            ~force:false) ;
       let path = Filename.concat dir ".github/mcp.json" in
-      let modified = {|{"mcpServers":{"user":{"command":"modified"}}}|} in
-      write_file path modified ;
       let r =
         Backend_config_gen.setup_project_config
           ~mcp_servers:[epure_mcp_server ()]
@@ -1792,14 +1759,18 @@ let test_setup_reports_secondary_copilot_mcp_refusal () =
           ~project_dir:dir
           ~force:false
       in
-      let outcome = setup_outcome_for_path r ".github/mcp.json" in
-      match outcome.Backend_config_gen.result with
-      | Backend_config_gen.Refused_hash_mismatch _ ->
-          Alcotest.(check string)
-            "hash-mismatched MCP config unchanged"
-            modified
-            (read_file path)
-      | _ -> Alcotest.fail "expected .github/mcp.json hash refusal")
+      Alcotest.(check bool)
+        "project MCP file remains absent"
+        false
+        (Sys.file_exists path) ;
+      Alcotest.(check bool)
+        "project MCP outcome remains absent"
+        false
+        (List.exists
+           (fun outcome ->
+             outcome.Backend_config_gen.artifact.project_relative_path
+             = ".github/mcp.json")
+           r.Backend_config_gen.write_outcomes))
 
 (** {1 NEW — precedence_warning_for adapts to write_outcome} *)
 
@@ -2050,13 +2021,9 @@ let () =
             `Quick
             test_copilot_settings_json_is_strict_minimal;
           Alcotest.test_case
-            "copilot project MCP JSON is empty by default"
+            "copilot project MCP JSON is never generated"
             `Quick
-            test_copilot_project_mcp_json_default_empty;
-          Alcotest.test_case
-            "copilot project MCP JSON includes supplied servers"
-            `Quick
-            test_copilot_project_mcp_json_includes_servers;
+            test_copilot_project_mcp_json_is_never_generated;
           Alcotest.test_case
             "copilot LSP JSON is empty by default"
             `Quick
@@ -2181,17 +2148,17 @@ let () =
             `Quick
             test_setup_project_config_copilot_writes_config;
           Alcotest.test_case
-            "copilot-cli: writes settings, LSP, and project MCP files"
+            "copilot-cli: writes settings and LSP but no project MCP file"
             `Quick
-            test_setup_project_config_copilot_writes_settings_and_mcp;
+            test_setup_project_config_copilot_writes_settings_and_lsp_only;
           Alcotest.test_case
             "copilot-cli: writes detected LSP servers"
             `Quick
             test_setup_project_config_copilot_writes_detected_lsp_servers;
           Alcotest.test_case
-            "copilot-cli: writes project MCP servers"
+            "copilot-cli: preserves project MCP config"
             `Quick
-            test_setup_project_config_copilot_writes_project_mcp_servers;
+            test_setup_project_config_copilot_preserves_project_mcp_config;
           Alcotest.test_case
             "strict JSON sidecar policy preserves user settings"
             `Quick
@@ -2235,13 +2202,13 @@ let () =
             `Quick
             test_setup_reports_secondary_gemini_settings_refusal;
           Alcotest.test_case
-            "copilot MCP skip is reported and preserved"
+            "copilot MCP is omitted and user file is preserved"
             `Quick
-            test_setup_reports_secondary_copilot_mcp_skip;
+            test_setup_omits_copilot_mcp_outcome_and_preserves_user_file;
           Alcotest.test_case
-            "copilot MCP hash refusal is reported and preserved"
+            "copilot MCP artifact is never created"
             `Quick
-            test_setup_reports_secondary_copilot_mcp_refusal;
+            test_setup_never_creates_copilot_mcp_artifact;
         ] );
       ( "NEW precedence_warning conditional on write_outcome",
         [

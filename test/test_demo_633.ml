@@ -7,7 +7,7 @@
 
 (** Tests for Story #633 — Native JSON schema wiring for copilot-cli (AC2(b)).
 
-    Outcome: documented non-support.  At baseline_version 1.0.34, the
+    Outcome: documented non-support.  At baseline_version 1.0.54, the
     copilot-cli does not expose a CLI surface for forwarding a JSON schema
     into the underlying GitHub Copilot API invocation — no [--json-schema],
     [--response-format], or equivalent flag exists, and the copilot CLI
@@ -20,7 +20,7 @@
 
     Covers:
     - AC1: Investigation note exists at the canonical path, cites
-           baseline_version 1.0.34, and records at least one source URL and
+           baseline_version 1.0.54, and records at least one source URL and
            an accessed-on date (NFR-U3).
     - AC2(b): copilot-cli descriptor has native_json_schema_output = false
               (NFR-R1 pinning test).
@@ -95,7 +95,7 @@ let test_investigation_note_exists () =
     true
     (Sys.file_exists path)
 
-(** AC1: The investigation note must cite the baseline_version (1.0.34) so
+(** AC1: The investigation note must cite the baseline_version (1.0.54) so
     that the version range consulted is pinned to the descriptor. *)
 let test_investigation_note_cites_baseline_version () =
   let path = investigation_note_path () in
@@ -104,9 +104,9 @@ let test_investigation_note_cites_baseline_version () =
   else begin
     let content = read_file path in
     Alcotest.(check bool)
-      "investigation note cites baseline_version 1.0.34"
+      "investigation note cites baseline_version 1.0.54"
       true
-      (contains_substring content "1.0.34")
+      (contains_substring content "1.0.54")
   end
 
 (** AC1: The investigation note must cite at least one authoritative source URL
@@ -217,7 +217,7 @@ let () =
             `Quick
             test_investigation_note_exists;
           Alcotest.test_case
-            "investigation note cites baseline_version 1.0.34"
+            "investigation note cites baseline_version 1.0.54"
             `Quick
             test_investigation_note_cites_baseline_version;
           Alcotest.test_case

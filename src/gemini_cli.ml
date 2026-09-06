@@ -694,6 +694,10 @@ let setup_outcome_reason = function
         _;
       } ->
       "managed namespace was invalid"
+  | Some
+      {Backend_config_writer.result = Backend_config_writer.Unsafe_project_path _; _}
+    ->
+      "project path was unsafe"
 
 let mcp_settings_error_if_needed setup mcp_servers =
   match mcp_servers with

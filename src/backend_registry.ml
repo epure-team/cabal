@@ -216,13 +216,13 @@ let builtin_backends =
       id = "copilot-cli";
       display_name = "Copilot CLI";
       binary_name = "copilot";
-      baseline_version = "1.0.34";
+      baseline_version = "1.0.54";
       capabilities =
         {
           structured_output = false;
           streaming_output = false;
           session_resume = false;
-          mcp_support = Mcp_config_file;
+          mcp_support = Mcp_none;
           read_only_support = false;
           project_config_surface = Config_fixed_path;
           precedence_confidence = Low;
@@ -329,8 +329,11 @@ let unsupported_capability_notes_data =
       evidence_url =
         "https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically";
       note =
-        "Copilot programmatic CLI docs document prompt forms and silent mode, \
-         but no JSON or schema-structured output mode is documented.";
+        "Authenticated Copilot CLI 1.0.54 JSONL was observed and its dormant \
+         parser remains tested, but Cabal exposes no usable structured output \
+         while central task execution is quarantined. Public capabilities \
+         describe usable Cabal behavior rather than unreachable upstream \
+         mechanics.";
     };
     {
       backend_id = "copilot-cli";
@@ -369,8 +372,23 @@ let unsupported_capability_notes_data =
         "https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/run-cli-programmatically";
       note =
         "Copilot programmatic docs document prompt forms and flags, but no \
-         arbitrary prompt file-reference ingestion surface is documented for \
-         Épure file refs.";
+          arbitrary prompt file-reference ingestion surface is documented for \
+          Épure file refs.";
+    };
+    {
+      backend_id = "copilot-cli";
+      feature = "media_support";
+      evidence_url =
+        "https://github.com/github/copilot-cli/blob/v1.0.54/README.md";
+      note =
+        "Authenticated Copilot CLI 1.0.54 attachment behavior was observed, \
+         but it is historical investigation data, not positive media evidence. \
+         The CLI can \
+         discover MCP servers from user, workspace, installed-plugin, built-in, \
+         and account-controlled ODR sources; --disable-builtin-mcps covers only \
+         built-ins and no flag disables every source before process start. \
+         Complete MCP discovery isolation is therefore unproven, so the \
+         hardened runtime is quarantined and advertises no media support.";
     };
   ]
 

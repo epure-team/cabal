@@ -10,8 +10,10 @@
     [Extensible] preserves {!Adapter_loader.register_all} precedence and probe
     behavior. [Hardened_builtins] ignores user/project adapters, stages only the
     six approved embedded ids, replaces the five handwritten implementations,
-    validates each against an independent full runtime-capability mapping and
-    approved static descriptor, and atomically publishes the complete set.
+    validates each against an independent full runtime-capability mapping,
+    central execution policy, and approved static descriptor, then atomically
+    publishes the complete set. Copilot is published with a typed quarantine
+    because complete MCP isolation is unproven.
 
     Registry state is startup state for one OCaml domain. Bootstrap and custom
     registration must finish before concurrent task execution. *)
@@ -101,8 +103,10 @@ val validate_backend_capabilities :
     explicitly paired with both [sw] and [env]. Static version metadata is
     validated, but no CLI installation, authentication, or network access is
     required when probes are disabled. Approved entries use
-    {!Runtime_entry.Enforce_baseline}. Any pre-commit failure leaves runtime and
-    descriptor registries unchanged. *)
+    {!Runtime_entry.Enforce_baseline}. All are dispatch-enabled except Copilot,
+    whose {!Runtime_entry.Dispatch_quarantined} policy prevents every preflight,
+    version, availability, configuration, and task side effect. Any pre-commit
+    failure leaves runtime and descriptor registries unchanged. *)
 val register_runtime :
   ?project_dir:string ->
   ?sw:Eio.Switch.t ->

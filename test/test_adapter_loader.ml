@@ -343,6 +343,48 @@ let test_builtin_adapters_registered () =
       | Some _ -> ())
     expected
 
+let contains_text text needle =
+  let text_length = String.length text in
+  let needle_length = String.length needle in
+  let rec loop offset =
+    if offset + needle_length > text_length then false
+    else if String.sub text offset needle_length = needle then true
+    else loop (offset + 1)
+  in
+  needle_length = 0 || loop 0
+
+let test_builtin_copilot_yaml_is_non_executable () =
+  let backends =
+    match Adapter_loader.embedded_backends () with
+    | Ok backends -> backends
+    | Error message -> Alcotest.fail message
+  in
+  let backend =
+    match
+      List.find_opt
+        (fun backend -> Agentic_backend.id backend = "copilot-cli")
+        backends
+    with
+    | Some backend -> backend
+    | None -> Alcotest.fail "built-in Copilot YAML is missing"
+  in
+  (match Yaml_adapter.config_of backend with
+  | None -> Alcotest.fail "built-in Copilot YAML metadata is missing"
+  | Some config ->
+      Alcotest.(check bool)
+        "bundled Copilot YAML has no blanket approval flag" false
+        (contains_text config.invocation_command "--yolo")) ;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let spec = Backend_types.make_task_spec ~prompt:"must not run" ~working_dir:"." () in
+  let result = Agentic_backend.run_task backend ~sw ~env spec in
+  match result.status with
+  | Backend_types.Failed message ->
+      Alcotest.(check bool)
+        "bundled Copilot YAML fails closed" true
+        (contains_text message "disabled")
+  | _ -> Alcotest.fail "bundled Copilot YAML remained executable"
+
 let rec flag_value flag = function
   | candidate :: value :: _ when candidate = flag -> Some value
   | _ :: rest -> flag_value flag rest
@@ -819,6 +861,10 @@ let () =
             "builtins registered"
             `Quick
             test_builtin_adapters_registered;
+          Alcotest.test_case
+            "built-in Copilot YAML is non-executable"
+            `Quick
+            test_builtin_copilot_yaml_is_non_executable;
           Alcotest.test_case
             "built-in Claude caps native web tools"
             `Quick

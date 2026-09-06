@@ -5,14 +5,22 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Pure normalized-event assertions shared by CBL-08 structural/live tests. *)
+(** Pure request planning and normalized-event assertions shared by CBL-08
+    structural/live tests. *)
 
 open Cabal
 
 type protocol_requirements = {
   session : bool;
   usage : bool;
-  tool : bool;
+  exact_tools : (string * int) list;
+}
+
+type schema_execution = No_schema | Native_schema | Validate_and_retry
+
+type media_task_plan = {
+  schema_execution : schema_execution;
+  spec : Backend_types.task_spec;
 }
 
 type trace_error =
@@ -24,12 +32,36 @@ type trace_error =
   | Required_session_missing
   | Required_usage_missing
   | Required_tool_lifecycle_missing
+  | Required_tool_lifecycle_mismatch
   | Tool_lifecycle_disagreement
   | Delivery_was_truncated
 
 let protocol_requirements_for_backend = function
-  | "codex" -> {session = true; usage = true; tool = false}
-  | _ -> {session = false; usage = false; tool = false}
+  | "codex" -> {session = true; usage = true; exact_tools = []}
+  | "copilot-cli" ->
+      (* Historical observation contract only: this is neither capability
+         evidence nor an executable CBL-08 selection for quarantined Copilot. *)
+      {session = true; usage = true; exact_tools = [("view", 2)]}
+  | _ -> {session = false; usage = false; exact_tools = []}
+
+let make_media_task_plan ~(descriptor : Backend_registry.descriptor) ~fixtures
+    ~working_dir ~attachments ~model =
+  let native = E2e_harness_config.valid_native_schema_descriptor descriptor in
+  let schema_execution = if native then Native_schema else No_schema in
+  let json_schema =
+    if native then Some (Media_web_schema_fixture.schema fixtures) else None
+  in
+  let prompt =
+    if native then Media_web_schema_fixture.prompt
+    else Media_web_schema_fixture.prompt_without_native_schema fixtures
+  in
+  let spec =
+    Backend_types.make_task_spec ~prompt ~working_dir ~timeout:180.0
+      ~expected_outputs:[] ~attachments ~web_access:Backend_types.Web_disabled
+      ~managed_namespace:E2e_harness_config.managed_namespace ?model
+      ~read_only:descriptor.capabilities.read_only_support ?json_schema ()
+  in
+  {schema_execution; spec}
 
 let outcome_of_status = function
   | Backend_types.Success -> Task_event.Attempt_succeeded
@@ -259,7 +291,8 @@ let validate_tool_lifecycle ~attempt_numbers events =
                 let key = (event.attempt, identity) in
                 if List.mem key active_tools then Error Tool_lifecycle_disagreement
                 else
-                  loop attempt_states (key :: active_tools) (started + 1) rest)
+                    loop attempt_states (key :: active_tools) (tool.name :: started)
+                      rest)
         | Task_event.Tool_finished {id; name} -> (
             match
               ( attempt_is_active event.attempt attempt_states,
@@ -278,7 +311,15 @@ let validate_tool_lifecycle ~attempt_numbers events =
             else loop attempt_states active_tools started rest
         | _ -> loop attempt_states active_tools started rest)
   in
-  loop attempt_states [] 0 events
+  Result.map List.rev (loop attempt_states [] [] events)
+
+let tool_counts names =
+  List.fold_left
+    (fun counts name ->
+      let count = Option.value ~default:0 (List.assoc_opt name counts) in
+      (name, count + 1) :: List.remove_assoc name counts)
+    [] names
+  |> List.sort compare
 
 let expected_attachment_delivery = function
   | Backend_types.Initial_attempt | Backend_types.Fresh_attempt ->
@@ -299,7 +340,7 @@ let valid_attempt_delivery ~attachments (attempt : Backend_types.task_attempt) =
   && attempt.delivery.attachment_delivery
      = expected_attachment_delivery attempt.kind
 
-let valid_native_attempt ~attachments
+let valid_single_attempt ~attachments
     (execution : Backend_types.task_execution) =
   match execution.attempts with
   | [attempt] ->
@@ -312,14 +353,30 @@ let valid_native_attempt ~attachments
       && attempt.result = execution.final_result
   | [] | _ :: _ :: _ -> false
 
-let valid_attempts ~native ~attachments
+let valid_validate_and_retry_attempts ~attachments
     (execution : Backend_types.task_execution) =
-  let attempts = execution.attempts in
-  attempts <> []
-  && List.length attempts <= 2
-  && attempts_are_contiguous attempts
-  && List.for_all (valid_attempt_delivery ~attachments) attempts
-  && (not native || valid_native_attempt ~attachments execution)
+  match execution.attempts with
+  | [_] -> valid_single_attempt ~attachments execution
+  | [first; second] ->
+      attempts_are_contiguous execution.attempts
+      && first.kind = Backend_types.Initial_attempt
+      && first.result.status = Backend_types.Success
+      && first.schema_validation_error <> None
+      && valid_attempt_delivery ~attachments first
+      && (second.kind = Backend_types.Fresh_attempt
+         || second.kind = Backend_types.Resumed_attempt)
+      && second.result.status = Backend_types.Success
+      && second.schema_validation_error = None
+      && valid_attempt_delivery ~attachments second
+      && execution.final_result.status = Backend_types.Success
+      && second.result = execution.final_result
+  | [] | _ :: _ :: _ -> false
+
+let valid_attempts ~schema_execution ~attachments execution =
+  match schema_execution with
+  | No_schema | Native_schema -> valid_single_attempt ~attachments execution
+  | Validate_and_retry ->
+      valid_validate_and_retry_attempts ~attachments execution
 
 let delivery_truncated events =
   List.exists
@@ -356,6 +413,10 @@ let validate_event_trace ~requirements execution events =
           match validate_tool_lifecycle ~attempt_numbers events with
           | Error _ as error -> error
           | Ok tools_started ->
-              if requirements.tool && tools_started = 0 then
-                Error Required_tool_lifecycle_missing
+              let expected = List.sort compare requirements.exact_tools in
+              let actual = tool_counts tools_started in
+              if expected = [] then Ok ()
+              else if tools_started = [] then Error Required_tool_lifecycle_missing
+              else if actual <> expected then
+                Error Required_tool_lifecycle_mismatch
               else Ok ()

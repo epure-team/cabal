@@ -9,6 +9,12 @@ type implementation_origin = Handwritten | Yaml | Custom
 
 type version_policy = Enforce_baseline | No_version_gate
 
+type quarantine_reason = Incomplete_mcp_isolation
+
+type execution_policy =
+  | Dispatch_enabled
+  | Dispatch_quarantined of quarantine_reason
+
 type validation_error =
   | Invalid_runtime_id
   | Runtime_id_mismatch
@@ -26,8 +32,12 @@ type t = {
   effective_descriptor : Backend_registry.descriptor;
   runtime_capabilities : Backend_registry.capabilities;
   origin : implementation_origin;
+  execution_policy : execution_policy;
   version_policy : version_policy;
 }
+
+let render_quarantine_reason = function
+  | Incomplete_mcp_isolation -> "complete MCP discovery isolation is unproven"
 
 let render_validation_error = function
   | Invalid_runtime_id -> "runtime backend id is structurally invalid"
@@ -68,7 +78,8 @@ let valid_runtime_id value =
 
 let ( let* ) result continuation = Result.bind result continuation
 
-let create ~backend ~descriptor ~runtime_capabilities ~origin ~version_policy =
+let create ~backend ~descriptor ~runtime_capabilities ~origin ~execution_policy
+    ~version_policy =
   let runtime_id = Agentic_backend.id backend in
   if not (valid_runtime_id runtime_id) then Error Invalid_runtime_id
   else if runtime_id <> descriptor.Backend_registry.id then
@@ -106,5 +117,6 @@ let create ~backend ~descriptor ~runtime_capabilities ~origin ~version_policy =
           effective_descriptor = descriptor;
           runtime_capabilities;
           origin;
+          execution_policy;
           version_policy;
         }
