@@ -140,16 +140,29 @@ let test_nested_environment_inside_object_redacted () =
   in
   Alcotest.(check bool) "nested env leaks" false (leaks "ghp_secrettoken" j)
 
-let test_extended_yojson_containers_are_exhaustive () =
-  let tuple = `Tuple [`Assoc [("prompt", `String "tuple-secret")]] in
-  let variant =
-    `Variant ("Envelope", Some (`Assoc [("token", `String "variant-secret")]))
-  in
-  Alcotest.(check bool) "tuple secret redacted" false (leaks "tuple-secret" tuple) ;
-  Alcotest.(check bool)
-    "variant secret redacted"
-    false
-    (leaks "variant-secret" variant)
+let test_legacy_yojson_containers_are_redacted_when_supported () =
+  [
+    ( "tuple secret redacted",
+      "tuple-secret",
+      {|({"prompt":"tuple-secret"})|},
+      {|({"prompt":"[redacted:12 chars]"})|} );
+    ( "variant secret redacted",
+      "variant-secret",
+      {|<"Envelope":{"token":"variant-secret"}>|},
+      {|<"Envelope":{"token":"[redacted:14 chars]"}>|} );
+  ]
+  |> List.iter (fun (label, secret, source, expected_source) ->
+         match
+           try Some (Yojson.Safe.from_string source)
+           with Yojson.Json_error _ -> None
+         with
+         | None -> ()
+         | Some json ->
+             Alcotest.(check bool) label false (leaks secret json) ;
+             Alcotest.check json_eq
+               (label ^ " without changing the legacy container")
+               (Yojson.Safe.from_string expected_source)
+               (sanitize json))
 
 (* ---- error fields ---------------------------------------------------------*)
 
@@ -231,8 +244,8 @@ let () =
             `Quick
             test_nested_environment_inside_object_redacted;
           Alcotest.test_case
-            "tuple and variant containers"
+            "legacy tuple and variant containers when supported"
             `Quick
-            test_extended_yojson_containers_are_exhaustive;
+            test_legacy_yojson_containers_are_redacted_when_supported;
         ] );
     ]

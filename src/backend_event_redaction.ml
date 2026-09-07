@@ -212,8 +212,15 @@ let value_pattern_redactable s = contains_url_credentials s || is_jwt_like s
 
 (** Compute a compact representation of the JSON structure (field names and
     types only, no values) for hashing. *)
+(* Yojson 3 narrows [Safe.t] to standard JSON. Widening the view keeps the
+   Yojson 2 legacy cases matchable without requiring them in [Safe.t]. *)
+type extended_safe_json =
+  [ Yojson.Safe.t
+  | `Tuple of Yojson.Safe.t list
+  | `Variant of string * Yojson.Safe.t option ]
+
 let rec shape_of_json (json : Yojson.Safe.t) =
-  match json with
+  match (json :> extended_safe_json) with
   | `Assoc fields ->
       let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
       "{"
@@ -245,9 +252,20 @@ let compute_shape_hash json =
 (** Walk the JSON tree and redact sensitive string values.  [parent_field] is
     the field name under which this value appears (used for policy lookup).
     [count] accumulates the number of redactions performed. *)
+let legacy_tuple items =
+  Yojson.Safe.from_string
+    ("(" ^ String.concat "," (List.map Yojson.Safe.to_string items) ^ ")")
+
+let legacy_variant tag value =
+  let tag = Yojson.Safe.to_string (`String tag) in
+  let argument =
+    Option.fold ~none:"" ~some:(fun json -> ":" ^ Yojson.Safe.to_string json) value
+  in
+  Yojson.Safe.from_string ("<" ^ tag ^ argument ^ ">")
+
 let rec redact_json ~parent_field (count : int ref) (json : Yojson.Safe.t) :
     Yojson.Safe.t =
-  match json with
+  match (json :> extended_safe_json) with
   | `Null | `Bool _ | `Int _ | `Float _ | `Intlit _ ->
       (* Scalar non-string values are always safe. *)
       json
@@ -280,10 +298,11 @@ let rec redact_json ~parent_field (count : int ref) (json : Yojson.Safe.t) :
       (* Items in a list inherit the parent field name for policy lookup. *)
       `List (List.map (fun item -> redact_json ~parent_field count item) items)
   | `Tuple items ->
-      `Tuple (List.map (fun item -> redact_json ~parent_field count item) items)
+      legacy_tuple
+        (List.map (fun item -> redact_json ~parent_field count item) items)
   | `Variant (tag, value) ->
-      `Variant
-        (tag, Option.map (fun item -> redact_json ~parent_field count item) value)
+      legacy_variant tag
+        (Option.map (fun item -> redact_json ~parent_field count item) value)
 
 (* -------------------------------------------------------------------------- *)
 (* Public API                                                                  *)

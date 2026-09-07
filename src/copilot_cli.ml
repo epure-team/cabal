@@ -418,8 +418,15 @@ let protocol_error category =
 
 module String_set = Set.Make (String)
 
+(* Yojson 3 narrows [Safe.t] to standard JSON. Widening the view retains the
+   explicit fail-closed cases when compiling against Yojson 2. *)
+type extended_safe_json =
+  [ Yojson.Safe.t
+  | `Tuple of Yojson.Safe.t list
+  | `Variant of string * Yojson.Safe.t option ]
+
 let rec validate_no_duplicate_object_fields (json : Yojson.Safe.t) =
-  match json with
+  match (json :> extended_safe_json) with
   | `Assoc fields ->
       let rec validate_fields seen = function
         | [] -> Ok ()

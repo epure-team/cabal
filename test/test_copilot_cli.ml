@@ -568,6 +568,22 @@ let test_verify_terminal_stdout_rejects_malformed_and_nonterminal_streams () =
             (contains_substr message private_payload))
     cases
 
+let test_protocol_rejects_non_object_and_legacy_json_values () =
+  let rejection = "Copilot protocol rejected: non-standard JSON value" in
+  let expect_legacy_rejection source =
+    match
+      try Some (Yojson.Safe.from_string source) with Yojson.Json_error _ -> None
+    with
+    | None -> expect_protocol_rejection "unsupported legacy JSON syntax" source
+    | Some _ -> (
+        match Copilot_cli.Private.verify_terminal_stdout source with
+        | Error message -> Alcotest.(check string) "legacy value" rejection message
+        | Ok _ -> Alcotest.fail "legacy non-standard JSON value was accepted")
+  in
+  expect_protocol_rejection "standard non-object" "[]\n" ;
+  expect_legacy_rejection {|("tuple")|} ;
+  expect_legacy_rejection {|<"Variant">|}
+
 let test_normalized_events_require_paired_successful_tools () =
   let private_path = "/private/image.png" in
   (match
@@ -1365,6 +1381,9 @@ let command_tests =
     ( "malformed and nonterminal JSONL fail sanitized",
       `Quick,
       test_verify_terminal_stdout_rejects_malformed_and_nonterminal_streams );
+    ( "standard non-object and legacy JSON values fail closed",
+      `Quick,
+      test_protocol_rejects_non_object_and_legacy_json_values );
     ( "normalized events require paired successful tools",
       `Quick,
       test_normalized_events_require_paired_successful_tools );
