@@ -69,14 +69,14 @@ type backend_observation = {
   specs : Backend_types.task_spec list ref;
 }
 
-let make_backend ?(session_resume = false) ?(available = fun () -> true) ~id
-    run =
+let make_backend ?(session_resume = false) ?(available = fun () -> true)
+    ?(name = "Rich completer test backend") ~id run =
   let observation =
     {calls = ref 0; availability_calls = ref 0; specs = ref []}
   in
   let module Backend = struct
     let id = id
-    let name = "Rich completer test backend"
+    let name = name
     let models = []
     let models_probe = None
 
@@ -98,26 +98,37 @@ let make_backend ?(session_resume = false) ?(available = fun () -> true) ~id
   end in
   ((module Backend : Agentic_backend.S), observation)
 
-let register ?(session_resume = false) ?(read_only = false) ?(media_types = [])
-    ?(web = Backend_types.Web_disabled) id backend =
-  let descriptor =
-    descriptor_for ~session_resume ~read_only ~media_types ~web id
-  in
+let create_entry ?(origin = Runtime_entry.Custom)
+    ?(execution_policy = Runtime_entry.Dispatch_enabled)
+    ?(version_policy = Runtime_entry.No_version_gate) ~descriptor backend =
   let entry =
     match
       Runtime_entry.create
         ~backend
         ~descriptor
         ~runtime_capabilities:descriptor.capabilities
-        ~origin:Runtime_entry.Custom
-        ~execution_policy:Runtime_entry.Dispatch_enabled
-        ~version_policy:Runtime_entry.No_version_gate
+        ~origin
+        ~execution_policy
+        ~version_policy
     with
     | Ok entry -> entry
     | Error error ->
         Alcotest.fail (Runtime_entry.render_validation_error error)
   in
-  Registry.register_validated entry
+  entry
+
+let register ?(session_resume = false) ?(read_only = false) ?(media_types = [])
+    ?(web = Backend_types.Web_disabled) id backend =
+  let descriptor =
+    descriptor_for ~session_resume ~read_only ~media_types ~web id
+  in
+  Registry.register_validated (create_entry ~descriptor backend)
+
+let validated_entry id =
+  match Registry.find_entry id with
+  | Some (Registry.Validated entry) -> entry
+  | Some (Registry.Raw _) -> Alcotest.failf "%s is raw-registered" id
+  | None -> Alcotest.failf "%s is not registered" id
 
 let success ?(text = valid_json) ?session_id ?cost () =
   Backend_types.make_task_result
@@ -172,7 +183,8 @@ let make_attachment workspace =
       size_bytes = String.length contents;
     }
 
-let get_rich ~sw ~env ~limits ~backend_name ~working_dir ?(read_only = false) () =
+let get_rich ~sw ~env ~limits ~backend_name ~working_dir ?expected_entry
+    ?(read_only = false) () =
   match
     Backend_completer.make_rich
       ~sw
@@ -180,6 +192,7 @@ let get_rich ~sw ~env ~limits ~backend_name ~working_dir ?(read_only = false) ()
       ~limits
       ~backend_name
       ~working_dir
+      ?expected_entry
       ~read_only
       ()
   with
@@ -439,6 +452,171 @@ let test_rich_text_and_events_never_promote_raw_output () =
   in
   Alcotest.(check bool) "raw stdout absent from events" false promoted
 
+let test_expected_hardened_entry_rejects_prelookup_replacement () =
+  with_registry @@ fun () ->
+  (match
+     Runtime_bootstrap.register_runtime
+       ~profile:Runtime_bootstrap.Hardened_builtins ()
+   with
+  | Ok () -> ()
+  | Error error -> Alcotest.fail (Runtime_bootstrap.render_error error));
+  let expected_entry = validated_entry "opencode" in
+  let replacement, replacement_observation =
+    make_backend ~id:"opencode"
+      ~name:(Agentic_backend.name expected_entry.Runtime_entry.backend)
+      (fun ~env:_ ~context:_ ~call:_ _ -> success ~text:"replacement" ())
+  in
+  let replacement_entry =
+    create_entry ~descriptor:expected_entry.effective_descriptor
+      ~origin:expected_entry.origin
+      ~execution_policy:expected_entry.execution_policy
+      ~version_policy:expected_entry.version_policy replacement
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let complete =
+    get_rich ~sw ~env ~limits:no_attachment_limits ~backend_name:"opencode"
+      ~working_dir:"/tmp" ~expected_entry ()
+  in
+  Registry.register_validated replacement_entry;
+  let request =
+    Backend_completer.make_completion_request ~system_prompt:"system"
+      ~prompt:"prompt" ()
+  in
+  (match complete request with
+  | Error
+      ({
+         cause =
+           Runtime_dispatch.Dispatch_failure
+             Runtime_dispatch.Expected_entry_mismatch;
+         event_trace;
+       } as error) ->
+      Alcotest.(check string)
+        "identity failure is sanitized"
+        "registered backend entry does not match the expected entry identity"
+        (Backend_completer.render_rich_completion_error error);
+      Alcotest.(check bool)
+        "failed terminal delivered" true (terminal_is_last event_trace.events)
+  | Error error ->
+      Alcotest.failf "unexpected expected-entry error: %s"
+        (Backend_completer.render_rich_completion_error error)
+  | Ok _ -> Alcotest.fail "equal-looking replacement passed the identity guard");
+  Alcotest.(check int)
+    "replacement availability not checked" 0
+    !(replacement_observation.availability_calls);
+  Alcotest.(check int) "replacement not called" 0 !(replacement_observation.calls)
+
+let test_expected_entry_does_not_trust_raw_replacement () =
+  with_registry @@ fun () ->
+  let original, _ =
+    make_backend ~id:"rich-expected-raw"
+      (fun ~env:_ ~context:_ ~call:_ _ -> success ~text:"original" ())
+  in
+  register "rich-expected-raw" original;
+  let expected_entry = validated_entry "rich-expected-raw" in
+  let raw, raw_observation =
+    make_backend ~id:"rich-expected-raw"
+      (fun ~env:_ ~context:_ ~call:_ _ -> success ~text:"raw" ())
+  in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let complete =
+    get_rich ~sw ~env ~limits:no_attachment_limits
+      ~backend_name:"rich-expected-raw" ~working_dir:"/tmp" ~expected_entry ()
+  in
+  Registry.register raw;
+  let request =
+    Backend_completer.make_completion_request ~system_prompt:"system"
+      ~prompt:"prompt" ()
+  in
+  (match complete request with
+  | Error
+      {
+        cause =
+          Runtime_dispatch.Dispatch_failure
+            Runtime_dispatch.Runtime_registration_untrusted;
+        _;
+      } ->
+      ()
+  | Error error ->
+      Alcotest.failf "unexpected raw replacement error: %s"
+        (Backend_completer.render_rich_completion_error error)
+  | Ok _ -> Alcotest.fail "expected entry minted authority for a raw replacement");
+  Alcotest.(check int) "raw replacement not called" 0 !(raw_observation.calls)
+
+let test_expected_entry_for_wrong_id_fails_before_backend () =
+  with_registry @@ fun () ->
+  let selected, selected_observation =
+    make_backend ~id:"rich-selected"
+      (fun ~env:_ ~context:_ ~call:_ _ -> success ~text:"selected" ())
+  in
+  let other, other_observation =
+    make_backend ~id:"rich-other"
+      (fun ~env:_ ~context:_ ~call:_ _ -> success ~text:"other" ())
+  in
+  register "rich-selected" selected;
+  register "rich-other" other;
+  let expected_entry = validated_entry "rich-other" in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let complete =
+    get_rich ~sw ~env ~limits:no_attachment_limits
+      ~backend_name:"rich-selected" ~working_dir:"/tmp" ~expected_entry ()
+  in
+  let request =
+    Backend_completer.make_completion_request ~system_prompt:"system"
+      ~prompt:"prompt" ()
+  in
+  (match complete request with
+  | Error
+      {
+        cause =
+          Runtime_dispatch.Dispatch_failure
+            Runtime_dispatch.Expected_entry_mismatch;
+        _;
+      } ->
+      ()
+  | Error error ->
+      Alcotest.failf "unexpected wrong-id guard error: %s"
+        (Backend_completer.render_rich_completion_error error)
+  | Ok _ -> Alcotest.fail "entry for another id passed the identity guard");
+  Alcotest.(check int)
+    "selected availability not checked" 0
+    !(selected_observation.availability_calls);
+  Alcotest.(check int) "selected backend not called" 0 !(selected_observation.calls);
+  Alcotest.(check int) "other backend not called" 0 !(other_observation.calls)
+
+let test_omitted_expected_entry_preserves_call_time_resolution () =
+  with_registry @@ fun () ->
+  let original, original_observation =
+    make_backend ~id:"rich-dynamic"
+      (fun ~env:_ ~context:_ ~call:_ _ -> success ~text:"original" ())
+  in
+  let replacement, replacement_observation =
+    make_backend ~id:"rich-dynamic"
+      (fun ~env:_ ~context:_ ~call:_ _ -> success ~text:"replacement" ())
+  in
+  register "rich-dynamic" original;
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let complete =
+    get_rich ~sw ~env ~limits:no_attachment_limits
+      ~backend_name:"rich-dynamic" ~working_dir:"/tmp" ()
+  in
+  register "rich-dynamic" replacement;
+  let request =
+    Backend_completer.make_completion_request ~system_prompt:"system"
+      ~prompt:"prompt" ()
+  in
+  (match complete request with
+  | Ok response ->
+      Alcotest.(check string)
+        "replacement selected at call time" "replacement" response.text
+  | Error error ->
+      Alcotest.fail (Backend_completer.render_rich_completion_error error));
+  Alcotest.(check int) "original not called" 0 !(original_observation.calls);
+  Alcotest.(check int) "replacement called" 1 !(replacement_observation.calls)
+
 let test_prepared_snapshot_and_two_attempt_detail () =
   with_registry @@ fun () ->
   let replacement_calls = ref 0 in
@@ -446,6 +624,9 @@ let test_prepared_snapshot_and_two_attempt_detail () =
     make_backend ~id:"rich-snapshot" (fun ~env:_ ~context:_ ~call:_ _ ->
         incr replacement_calls ;
         success ~text:{|{"replacement":true}|} ())
+  in
+  let replacement_entry =
+    create_entry ~descriptor:(descriptor_for "rich-snapshot") replacement
   in
   let original, observation =
     make_backend ~id:"rich-snapshot" (fun ~env:_ ~context ~call _ ->
@@ -456,7 +637,7 @@ let test_prepared_snapshot_and_two_attempt_detail () =
               (Task_event.Tool_started {id = Some "tool"; name = "read"}))
           context ;
         if call = 1 then begin
-          Registry.register replacement ;
+          Registry.register_validated replacement_entry ;
           success
             ~text:"not-json"
             ~session_id:"first-session"
@@ -470,6 +651,7 @@ let test_prepared_snapshot_and_two_attempt_detail () =
             ())
   in
   register "rich-snapshot" original ;
+  let expected_entry = validated_entry "rich-snapshot" in
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let complete =
@@ -479,6 +661,7 @@ let test_prepared_snapshot_and_two_attempt_detail () =
       ~limits:no_attachment_limits
       ~backend_name:"rich-snapshot"
       ~working_dir:"/tmp"
+      ~expected_entry
       ()
   in
   let request =
@@ -700,6 +883,18 @@ let () =
         ] );
       ( "central dispatch",
         [
+          Alcotest.test_case
+            "expected hardened entry rejects prelookup replacement" `Quick
+            test_expected_hardened_entry_rejects_prelookup_replacement;
+          Alcotest.test_case
+            "expected entry does not trust raw replacement" `Quick
+            test_expected_entry_does_not_trust_raw_replacement;
+          Alcotest.test_case
+            "expected entry for wrong id fails before backend" `Quick
+            test_expected_entry_for_wrong_id_fails_before_backend;
+          Alcotest.test_case
+            "omitted expected entry keeps call-time resolution" `Quick
+            test_omitted_expected_entry_preserves_call_time_resolution;
           Alcotest.test_case
             "preflight before side effects"
             `Quick

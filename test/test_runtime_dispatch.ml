@@ -140,7 +140,7 @@ let diagnostic_messages events =
           Some message)
     !events
 
-let register_pair ?session_resume ?native ?read_only ?binary_name
+let make_pair ?session_resume ?native ?read_only ?binary_name
     ?baseline_version ?media_types ?mcp_support ?web_maximum
     ?(origin = Runtime_entry.Custom)
     ?(execution_policy = Runtime_entry.Dispatch_enabled)
@@ -158,7 +158,15 @@ let register_pair ?session_resume ?native ?read_only ?binary_name
     | Ok entry -> entry
     | Error error -> Alcotest.fail (Runtime_entry.render_validation_error error)
   in
-  Registry.register_validated entry
+  entry
+
+let register_pair ?session_resume ?native ?read_only ?binary_name
+    ?baseline_version ?media_types ?mcp_support ?web_maximum ?origin
+    ?execution_policy ?version_policy ~id backend =
+  Registry.register_validated
+    (make_pair ?session_resume ?native ?read_only ?binary_name ?baseline_version
+       ?media_types ?mcp_support ?web_maximum ?origin ?execution_policy
+       ?version_policy ~id backend)
 
 let rec remove_tree path =
   if Sys.file_exists path then
@@ -804,6 +812,51 @@ let test_enforcer_uses_resolved_backend_snapshot_for_retry () =
   | Error error -> Alcotest.fail (Runtime_dispatch.render_error error));
   Alcotest.(check int) "initial backend handles both attempts" 2 !first_calls;
   Alcotest.(check int) "replacement is not used in flight" 0 !replacement_calls
+
+let test_expected_snapshot_survives_replacement_during_availability () =
+  with_registry @@ fun () ->
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let id = "dispatch-expected-snapshot" in
+  let availability_started, resolve_availability_started =
+    Eio.Promise.create ()
+  in
+  let continue_availability, resolve_continue_availability =
+    Eio.Promise.create ()
+  in
+  let original_calls = ref 0 in
+  let replacement_calls = ref 0 in
+  let original =
+    make_pair ~id ~version_policy:Runtime_entry.No_version_gate
+      (make_backend ~id ~calls:original_calls
+         ~availability:(fun ~sw:_ ~env:_ ->
+           Eio.Promise.resolve resolve_availability_started ();
+           Eio.Promise.await continue_availability;
+           true)
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ~text:"original" ()))
+  in
+  let replacement =
+    make_pair ~id ~version_policy:Runtime_entry.No_version_gate
+      (make_backend ~id ~calls:replacement_calls
+         ~availability:(fun ~sw:_ ~env:_ -> true)
+         (fun ~sw:_ ~env:_ ?on_raw_line:_ _ -> success ~text:"replacement" ()))
+  in
+  Registry.register_validated original;
+  let handle =
+    Task_runtime.start_task ~sw ~env ~limits ~backend_id:id
+      ~expected_entry:original (spec ())
+  in
+  Eio.Promise.await availability_started;
+  Registry.register_validated replacement;
+  Eio.Promise.resolve resolve_continue_availability ();
+  (match Task_runtime.await handle with
+  | Ok result ->
+      Alcotest.(check string)
+        "captured original executes" "original" result.Backend_types.agent_text
+  | Error error -> Alcotest.fail (Runtime_dispatch.render_error error));
+  Task_runtime.await_event_delivery handle;
+  Alcotest.(check int) "captured original called once" 1 !original_calls;
+  Alcotest.(check int) "replacement never called" 0 !replacement_calls
 
 let test_dispatch_context_exposes_requested_delivery () =
   with_registry @@ fun () ->
@@ -2569,6 +2622,9 @@ let () =
         [
           Alcotest.test_case "schema retry keeps resolved backend snapshot"
             `Quick test_enforcer_uses_resolved_backend_snapshot_for_retry;
+          Alcotest.test_case
+            "expected snapshot survives availability-time replacement" `Quick
+            test_expected_snapshot_survives_replacement_during_availability;
           Alcotest.test_case "dispatch context exposes requested delivery"
             `Quick test_dispatch_context_exposes_requested_delivery;
           Alcotest.test_case

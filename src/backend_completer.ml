@@ -184,8 +184,8 @@ let run_version_gate ~env ~backend_name =
 let legacy_zero_attachment_limits : Task_preflight.limits =
   {max_attachments = 0; max_file_size_bytes = 0; max_total_size_bytes = 0}
 
-let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?model ?mcp_servers
-    ?(read_only = false) () =
+let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?expected_entry ?model
+    ?mcp_servers ?(read_only = false) () =
   if not (Runtime_bootstrap.valid_runtime_id backend_name) then
     Error "backend routing id is structurally invalid"
   else
@@ -206,6 +206,7 @@ let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?model ?mcp_servers
             ~env
             ~limits
             ~backend_id:backend_name
+            ?expected_entry
             ~on_event:(Task_event.Private.collect_bounded collector)
             spec
         in

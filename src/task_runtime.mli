@@ -12,12 +12,16 @@ type t
 
 (** [start_task] starts one owner fiber under a private cancellation scope.
     The caller switch remains the parent scope, so its cancellation propagates
-    to the task. Each handle is isolated from sibling handles. *)
+    to the task. Each handle is isolated from sibling handles. [expected_entry]
+    is the optional physical-identity guard documented by
+    {!Runtime_dispatch.prepare}; omission preserves dynamic call-time
+    resolution. *)
 val start_task :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?expected_entry:Runtime_entry.t ->
   ?on_event:(Task_event.t -> unit) ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->
@@ -50,6 +54,7 @@ val run_task :
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?expected_entry:Runtime_entry.t ->
   ?on_event:(Task_event.t -> unit) ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->
@@ -65,6 +70,7 @@ val run_task_detailed :
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?expected_entry:Runtime_entry.t ->
   ?on_event:(Task_event.t -> unit) ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->

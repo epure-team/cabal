@@ -120,3 +120,11 @@ let create ~backend ~descriptor ~runtime_capabilities ~origin ~execution_policy
           execution_policy;
           version_policy;
         }
+
+let validate entry =
+  Result.map
+    (fun _ -> ())
+    (create ~backend:entry.backend ~descriptor:entry.effective_descriptor
+       ~runtime_capabilities:entry.runtime_capabilities ~origin:entry.origin
+       ~execution_policy:entry.execution_policy
+       ~version_policy:entry.version_policy)

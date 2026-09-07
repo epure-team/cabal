@@ -25,6 +25,12 @@ type error =
   | Invalid_timeout
   | Backend_not_registered
   | Runtime_registration_untrusted
+  | Runtime_entry_invalid of Runtime_entry.validation_error
+      (** The looked-up validated token no longer passes its complete pure
+          runtime/descriptor/capability consistency checks. *)
+  | Expected_entry_mismatch
+      (** The trusted current entry is not physically identical to the optional
+          entry expected by the caller. *)
   | Backend_quarantined of Runtime_entry.quarantine_reason
       (** The resolved validated entry disables central task dispatch. *)
   | Preflight_failed of Task_preflight.error
@@ -38,8 +44,9 @@ type error =
       (** Untrusted low-level error. Use {!render_error}, which redacts it,
           rather than displaying this payload directly. *)
 
-(** {b Migration note:} {!error} gained [Backend_quarantined]. Exhaustive
-    matches must add that constructor, normally rendering it through
+(** {b Migration note:} {!error} gained [Runtime_entry_invalid] and
+    [Expected_entry_mismatch] in addition to [Backend_quarantined]. Exhaustive
+    matches must add those constructors, normally rendering them through
     {!render_error}, or deliberately use a wildcard for forward compatibility. *)
 
 (** Central detailed failure. [Dispatch_failure] covers resolution, preflight,
@@ -85,15 +92,23 @@ type prepared
 (** Resolve, reject any typed quarantine, validate capabilities, preflight and
     seal attachment bytes,
     version-check, and availability-check a task exactly once, returning the
-    entry snapshot used by execution and retries. Quarantine rejection occurs
-    immediately after validated entry lookup; capability rejection occurs before
-    staging allocation or attachment reads. Abandoned pending values are cleaned
-    when [sw] releases; an executing owner retains sole cleanup responsibility. *)
+    entry snapshot used by execution and retries. The initial registry lookup,
+    complete entry revalidation, optional [expected_entry] physical-identity
+    comparison using [(==)], and exact backend capture are one non-yielding
+    section. A mismatch fails without granting trust to the expected value.
+    There is no later registry lookup for this invocation, so mutation after
+    capture cannot change version, availability, preflight, or schema-attempt
+    execution. Quarantine rejection occurs immediately after capture; capability
+    rejection occurs before staging allocation or attachment reads. Abandoned
+    pending values are cleaned when [sw] releases; an executing owner retains
+    sole cleanup responsibility. This atomicity assumes the registry's documented
+    single-domain mutation model. *)
 val prepare :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?expected_entry:Runtime_entry.t ->
   ?context:Task_execution_context.t ->
   Backend_types.task_spec ->
   (prepared, error) result
@@ -142,6 +157,7 @@ module Private : sig
     env:Eio_unix.Stdenv.base ->
     limits:Task_preflight.limits ->
     backend_id:string ->
+    ?expected_entry:Runtime_entry.t ->
     ?context:Task_execution_context.t ->
     ?on_prepare_inputs:(unit -> unit) ->
     ?on_staging_directory:(string -> unit) ->
@@ -155,6 +171,7 @@ module Private : sig
     env:Eio_unix.Stdenv.base ->
     limits:Task_preflight.limits ->
     backend_id:string ->
+    ?expected_entry:Runtime_entry.t ->
     ?on_event:(Task_event.t -> unit) ->
     ?on_raw_line:(string -> unit) ->
     ?on_prepare_inputs:(unit -> unit) ->
@@ -169,6 +186,7 @@ module Private : sig
     env:Eio_unix.Stdenv.base ->
     limits:Task_preflight.limits ->
     backend_id:string ->
+    ?expected_entry:Runtime_entry.t ->
     ?on_event:(Task_event.t -> unit) ->
     ?on_raw_line:(string -> unit) ->
     Backend_types.task_spec ->
@@ -195,6 +213,10 @@ end
     {!Runtime_entry.No_version_gate}, stability probing/comparison is skipped.
     Availability must still pass under both policies.
 
+    [expected_entry], when supplied, adds the exact physical-identity guard
+    documented on {!prepare}; it is checked independently on every invocation.
+    Omitting it preserves dynamic call-time resolution.
+
     [limits] is mandatory caller policy; Cabal supplies no product default.
     Attachment size, digest, magic, and staged bytes come from one authorized
     opened descriptor/read. Staged files live outside the workspace in a private
@@ -218,6 +240,7 @@ val run_task :
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?expected_entry:Runtime_entry.t ->
   ?on_event:(Task_event.t -> unit) ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->
@@ -240,6 +263,7 @@ val run_task_detailed :
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?expected_entry:Runtime_entry.t ->
   ?on_event:(Task_event.t -> unit) ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->

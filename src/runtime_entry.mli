@@ -88,6 +88,12 @@ val create :
   version_policy:version_policy ->
   (t, validation_error) result
 
+(** [validate entry] re-runs {!create}'s complete pure structural,
+    descriptor-evidence, capability-snapshot, and runtime-capability checks on
+    the exact entry without replacing its physical identity. It performs no I/O
+    or registry lookup. *)
+val validate : t -> (unit, validation_error) result
+
 (** {b Migration note:} [execution_policy] is a new mandatory argument to
     {!create}; existing call sites must pass [Dispatch_enabled] unless they are
     intentionally binding a typed quarantine. No optional default is supplied,

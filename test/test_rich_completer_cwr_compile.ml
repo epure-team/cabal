@@ -72,7 +72,13 @@ let run_step (complete : Backend_completer.rich_completer) attachment =
         error.event_trace.events,
         error.event_trace.omitted_events )
 
+let make_guarded ~sw ~env ~limits ~backend_name ~working_dir
+    (expected_entry : Runtime_entry.t) =
+  Backend_completer.make_rich ~sw ~env ~limits ~backend_name ~working_dir
+    ~expected_entry ()
+
 let () =
   let execution = default_execution () in
   assert (execution.cleanup_status = Backend_types.Cleanup_not_required);
-  ignore run_step
+  ignore run_step;
+  ignore make_guarded

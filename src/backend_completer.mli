@@ -170,6 +170,16 @@ val make :
     {!Json_schema_enforcer.run_task_detailed}. The one prepared immutable backend
     snapshot is retained for every schema attempt.
 
+    [expected_entry], when supplied, is checked on every invocation against the
+    trusted current registry entry by physical identity. Registry lookup,
+    complete entry consistency validation, identity comparison, and exact
+    backend capture occur in one non-yielding central-dispatch section. A stale,
+    unregistered, raw, forged, equal-looking, or wrong-id value grants no
+    authority and fails through typed sanitized dispatch errors. Once captured,
+    later registry mutation cannot change the backend used by version,
+    availability, preflight, or either schema attempt. Omitting the argument
+    preserves dynamic call-time resolution.
+
     [limits] is mandatory caller policy; Cabal supplies no media limits.
     [read_only=true] is checked against the resolved effective descriptor during
     central preflight before availability or backend execution. [model] and
@@ -190,6 +200,7 @@ val make_rich :
   limits:Task_preflight.limits ->
   backend_name:string ->
   working_dir:string ->
+  ?expected_entry:Runtime_entry.t ->
   ?model:string ->
   ?mcp_servers:Backend_types.mcp_server_config list ->
   ?read_only:bool ->
