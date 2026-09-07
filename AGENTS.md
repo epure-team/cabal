@@ -336,16 +336,24 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - `Backend_completer.make_rich` must use the central `Task_runtime` detailed
   handle. It must not invoke `Agentic_backend` or `Json_schema_enforcer`
   directly. `Runtime_dispatch.prepare` resolves one validated effective entry,
-  and that immutable backend snapshot owns every CBL-05 attempt.
-- `make_rich ?expected_entry` passes the optional guard on every invocation.
-  Central dispatch performs exactly one registry lookup, then revalidates the
-  current entry, compares it to the expected token with physical identity
-  (`==`), and captures the exact entry/backend in the same non-yielding section.
-  The expected value is not authority: raw, unregistered, forged, equal-looking,
-  stale, and wrong-id values fail through typed sanitized dispatch errors. There
-  is no later registry lookup for version, availability, preflight, or schema
-  retries. Omitting the guard preserves dynamic call-time replacement. This
-  guarantee assumes the documented single-domain registry mutation model.
+  and that immutable entry snapshot owns every CBL-05 attempt; derive its
+  backend from the entry rather than storing a redundant snapshot field.
+- Guarding is additive: `Backend_completer.make_rich_with_entry`,
+  `Runtime_dispatch.prepare_with_entry`,
+  `Runtime_dispatch.Private.start_task_with_entry`,
+  `Runtime_dispatch.run_task_with_entry`,
+  `Runtime_dispatch.run_task_detailed_with_entry`,
+  `Task_runtime.start_task_with_entry`, `Task_runtime.run_task_with_entry`, and
+  `Task_runtime.run_task_detailed_with_entry` require `expected_entry`. Preserve
+  the exact first-class function types of all existing unguarded APIs; those
+  wrappers retain dynamic call-time replacement. Guarded dispatch performs
+  exactly one registry lookup, then revalidates the current entry, compares it
+  to the expected token with physical identity (`==`), and captures only the
+  immutable entry, deriving the backend from it. The expected value is not
+  authority: raw, unregistered, forged, equal-looking, stale, and wrong-id values
+  fail through typed sanitized dispatch errors. There is no later registry
+  lookup for version, availability, preflight, or schema retries. This guarantee
+  assumes the documented single-domain registry mutation model.
 - `Runtime_dispatch.run_task_detailed`, `Task_runtime.run_task_detailed`, and
   `Task_runtime.await_detailed` share the legacy handle's CBL-03/04 preflight,
   version policy, availability, absolute deadline, cancellation/process

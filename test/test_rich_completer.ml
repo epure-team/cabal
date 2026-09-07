@@ -183,21 +183,20 @@ let make_attachment workspace =
       size_bytes = String.length contents;
     }
 
-let get_rich ~sw ~env ~limits ~backend_name ~working_dir ?expected_entry
-    ?(read_only = false) () =
-  match
-    Backend_completer.make_rich
-      ~sw
-      ~env
-      ~limits
-      ~backend_name
-      ~working_dir
-      ?expected_entry
-      ~read_only
-      ()
-  with
+let unwrap_rich = function
   | Ok completer -> completer
   | Error error -> Alcotest.fail error
+
+let get_rich ~sw ~env ~limits ~backend_name ~working_dir ?(read_only = false) () =
+  Backend_completer.make_rich ~sw ~env ~limits ~backend_name ~working_dir
+    ~read_only ()
+  |> unwrap_rich
+
+let get_rich_with_entry ~sw ~env ~limits ~backend_name ~working_dir
+    ~expected_entry ?(read_only = false) () =
+  Backend_completer.make_rich_with_entry ~sw ~env ~limits ~backend_name
+    ~working_dir ~expected_entry ~read_only ()
+  |> unwrap_rich
 
 let get_legacy ~sw ~env ~backend_name ~working_dir () =
   match
@@ -475,7 +474,8 @@ let test_expected_hardened_entry_rejects_prelookup_replacement () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let complete =
-    get_rich ~sw ~env ~limits:no_attachment_limits ~backend_name:"opencode"
+    get_rich_with_entry ~sw ~env ~limits:no_attachment_limits
+      ~backend_name:"opencode"
       ~working_dir:"/tmp" ~expected_entry ()
   in
   Registry.register_validated replacement_entry;
@@ -521,7 +521,7 @@ let test_expected_entry_does_not_trust_raw_replacement () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let complete =
-    get_rich ~sw ~env ~limits:no_attachment_limits
+    get_rich_with_entry ~sw ~env ~limits:no_attachment_limits
       ~backend_name:"rich-expected-raw" ~working_dir:"/tmp" ~expected_entry ()
   in
   Registry.register raw;
@@ -560,7 +560,7 @@ let test_expected_entry_for_wrong_id_fails_before_backend () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let complete =
-    get_rich ~sw ~env ~limits:no_attachment_limits
+    get_rich_with_entry ~sw ~env ~limits:no_attachment_limits
       ~backend_name:"rich-selected" ~working_dir:"/tmp" ~expected_entry ()
   in
   let request =
@@ -586,7 +586,7 @@ let test_expected_entry_for_wrong_id_fails_before_backend () =
   Alcotest.(check int) "selected backend not called" 0 !(selected_observation.calls);
   Alcotest.(check int) "other backend not called" 0 !(other_observation.calls)
 
-let test_omitted_expected_entry_preserves_call_time_resolution () =
+let test_unguarded_make_rich_preserves_call_time_resolution () =
   with_registry @@ fun () ->
   let original, original_observation =
     make_backend ~id:"rich-dynamic"
@@ -655,7 +655,7 @@ let test_prepared_snapshot_and_two_attempt_detail () =
   Eio_posix.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let complete =
-    get_rich
+    get_rich_with_entry
       ~sw
       ~env
       ~limits:no_attachment_limits
@@ -893,8 +893,8 @@ let () =
             "expected entry for wrong id fails before backend" `Quick
             test_expected_entry_for_wrong_id_fails_before_backend;
           Alcotest.test_case
-            "omitted expected entry keeps call-time resolution" `Quick
-            test_omitted_expected_entry_preserves_call_time_resolution;
+            "unguarded make_rich keeps call-time resolution" `Quick
+            test_unguarded_make_rich_preserves_call_time_resolution;
           Alcotest.test_case
             "preflight before side effects"
             `Quick

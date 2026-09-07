@@ -184,8 +184,8 @@ let run_version_gate ~env ~backend_name =
 let legacy_zero_attachment_limits : Task_preflight.limits =
   {max_attachments = 0; max_file_size_bytes = 0; max_total_size_bytes = 0}
 
-let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?expected_entry ?model
-    ?mcp_servers ?(read_only = false) () =
+let make_rich_internal ~sw ~env ~limits ~backend_name ~working_dir ?expected_entry
+    ?model ?mcp_servers ?(read_only = false) () =
   if not (Runtime_bootstrap.valid_runtime_id backend_name) then
     Error "backend routing id is structurally invalid"
   else
@@ -200,15 +200,15 @@ let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?expected_entry ?model
             request
         in
         let collector = Task_event.Private.create_bounded_collector () in
+        let on_event = Task_event.Private.collect_bounded collector in
         let handle =
-          Task_runtime.start_task
-            ~sw
-            ~env
-            ~limits
-            ~backend_id:backend_name
-            ?expected_entry
-            ~on_event:(Task_event.Private.collect_bounded collector)
-            spec
+          match expected_entry with
+          | None ->
+              Task_runtime.start_task ~sw ~env ~limits ~backend_id:backend_name
+                ~on_event spec
+          | Some expected_entry ->
+              Task_runtime.start_task_with_entry ~sw ~env ~limits
+                ~backend_id:backend_name ~expected_entry ~on_event spec
         in
         let outcome = Task_runtime.await_detailed handle in
         Task_runtime.await_event_delivery handle ;
@@ -228,6 +228,16 @@ let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?expected_entry ?model
                 event_trace;
               }
         | Error cause -> Error {cause; event_trace})
+
+let make_rich ~sw ~env ~limits ~backend_name ~working_dir ?model ?mcp_servers
+    ?read_only () =
+  make_rich_internal ~sw ~env ~limits ~backend_name ~working_dir ?model
+    ?mcp_servers ?read_only ()
+
+let make_rich_with_entry ~sw ~env ~limits ~backend_name ~working_dir
+    ~expected_entry ?model ?mcp_servers ?read_only () =
+  make_rich_internal ~sw ~env ~limits ~backend_name ~working_dir ~expected_entry
+    ?model ?mcp_servers ?read_only ()
 
 let make_by_name_with_read_only ~read_only ~sw ~env ~backend_name ~working_dir
     ?model ?mcp_servers () =

@@ -7,6 +7,115 @@
 
 open Cabal
 
+(* The guarded API is additive: assigning every pre-guard entry point to its
+   original explicit first-class function type must continue to compile. *)
+type make_rich =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_name:string ->
+  working_dir:string ->
+  ?model:string ->
+  ?mcp_servers:Backend_types.mcp_server_config list ->
+  ?read_only:bool ->
+  unit ->
+  (Backend_completer.rich_completer, string) result
+
+type start_task =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  Backend_types.task_spec ->
+  Task_runtime.t
+
+type run_task =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  Backend_types.task_spec ->
+  (Backend_types.task_result, Runtime_dispatch.error) result
+
+type run_task_detailed =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  Backend_types.task_spec ->
+  Runtime_dispatch.detailed_outcome
+
+type prepare =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?context:Task_execution_context.t ->
+  Backend_types.task_spec ->
+  (Runtime_dispatch.prepared, Runtime_dispatch.error) result
+
+type prepare_with_input_hooks =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?context:Task_execution_context.t ->
+  ?on_prepare_inputs:(unit -> unit) ->
+  ?on_staging_directory:(string -> unit) ->
+  ?on_staged_file:(string -> Unix.file_descr -> unit) ->
+  ?on_cleanup_attempt:(unit -> unit) ->
+  Backend_types.task_spec ->
+  (Runtime_dispatch.prepared, Runtime_dispatch.error) result
+
+type private_start_task =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  Backend_types.task_spec ->
+  Runtime_dispatch.Private.task_handle
+
+type start_task_with_input_hooks =
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  ?on_prepare_inputs:(unit -> unit) ->
+  ?on_staging_directory:(string -> unit) ->
+  ?on_staged_file:(string -> Unix.file_descr -> unit) ->
+  ?on_cleanup_attempt:(unit -> unit) ->
+  Backend_types.task_spec ->
+  Runtime_dispatch.Private.task_handle
+
+let _legacy_make_rich : make_rich = Backend_completer.make_rich
+let _legacy_task_start : start_task = Task_runtime.start_task
+let _legacy_task_run : run_task = Task_runtime.run_task
+let _legacy_task_run_detailed : run_task_detailed = Task_runtime.run_task_detailed
+let _legacy_dispatch_prepare : prepare = Runtime_dispatch.prepare
+let _legacy_dispatch_run : run_task = Runtime_dispatch.run_task
+
+let _legacy_dispatch_run_detailed : run_task_detailed =
+  Runtime_dispatch.run_task_detailed
+
+let _legacy_private_prepare : prepare_with_input_hooks =
+  Runtime_dispatch.Private.prepare_with_input_hooks
+
+let _legacy_private_start : private_start_task =
+  Runtime_dispatch.Private.start_task
+
+let _legacy_private_start_with_hooks : start_task_with_input_hooks =
+  Runtime_dispatch.Private.start_task_with_input_hooks
+
 (* A future workflow runner can submit the complete DTO and consume structured
    execution without constructing [task_spec] or knowing a CLI output format. *)
 let consume_cleanup_status = function
@@ -74,8 +183,8 @@ let run_step (complete : Backend_completer.rich_completer) attachment =
 
 let make_guarded ~sw ~env ~limits ~backend_name ~working_dir
     (expected_entry : Runtime_entry.t) =
-  Backend_completer.make_rich ~sw ~env ~limits ~backend_name ~working_dir
-    ~expected_entry ()
+  Backend_completer.make_rich_with_entry ~sw ~env ~limits ~backend_name
+    ~working_dir ~expected_entry ()
 
 let () =
   let execution = default_execution () in

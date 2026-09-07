@@ -132,10 +132,7 @@ let check_availability ~sw ~env ~backend ~origin ~version_probe =
       in
       if available then Ok () else Error Backend_unavailable
 
-type runtime_snapshot = {
-  entry : Runtime_entry.t;
-  backend : Agentic_backend.t;
-}
+type runtime_snapshot = {entry : Runtime_entry.t}
 
 let resolve_snapshot ?expected_entry backend_id =
   match Registry.find_entry backend_id with
@@ -155,7 +152,7 @@ let resolve_snapshot ?expected_entry backend_id =
             Error Expected_entry_mismatch
         | None | Some _ -> Ok ()
       in
-      Ok {entry; backend = entry.backend}
+      Ok {entry}
   | Some (Registry.Raw _) -> Error Runtime_registration_untrusted
   | None -> Error Backend_not_registered
 
@@ -363,7 +360,7 @@ let prepare_with ~prepare_inputs ~cleanup_status ~sw ~env ~limits ~backend_id
     | Runtime_entry.Dispatch_quarantined reason ->
         Error (Backend_quarantined reason)
   in
-  let backend = runtime.backend in
+  let backend = entry.backend in
   let descriptor = entry.effective_descriptor in
   emit context (Task_event.Backend_selected { backend_id });
   Eio.Fiber.yield ();
@@ -452,10 +449,17 @@ let prepare_with ~prepare_inputs ~cleanup_status ~sw ~env ~limits ~backend_id
         (release_pending ~state ~release_hook ~inputs ~cleanup_status);
       raise error
 
-let prepare ~sw ~env ~limits ~backend_id ?expected_entry ?context spec =
+let prepare_internal ~sw ~env ~limits ~backend_id ?expected_entry ?context spec =
   let cleanup_status = Atomic.make Backend_types.Cleanup_not_required in
   prepare_with ~prepare_inputs:Task_preflight.prepare_inputs ~cleanup_status ~sw
     ~env ~limits ~backend_id ?expected_entry ?context spec
+
+let prepare ~sw ~env ~limits ~backend_id ?context spec =
+  prepare_internal ~sw ~env ~limits ~backend_id ?context spec
+
+let prepare_with_entry ~sw ~env ~limits ~backend_id ~expected_entry ?context
+    spec =
+  prepare_internal ~sw ~env ~limits ~backend_id ~expected_entry ?context spec
 
 let execute_prepared_detailed_with_progress ~sw ~env ?context ?on_raw_line
     ~progress prepared =
@@ -474,7 +478,7 @@ let execute_prepared_detailed_with_progress ~sw ~env ?context ?on_raw_line
                 protect Backend_execution_failed (fun () ->
                     Json_schema_enforcer.Private.run_task_detailed ~sw ~env
                       ~context ?on_raw_line ~progress
-                      ~backend:prepared.runtime.backend prepared.spec)
+                      ~backend:prepared.runtime.entry.backend prepared.spec)
               with
               | Error failure ->
                   dispatch_failure_with_progress ~progress
@@ -660,10 +664,14 @@ let start_task_with_preparer ~prepare_inputs ~sw ~env ~limits ~backend_id
   let cancellation, delivery_complete = Eio.Promise.await ready in
   { cancellation; detailed_outcome; delivery_complete; completed }
 
-let start_task ~sw ~env ~limits ~backend_id ?expected_entry ?on_event ?on_raw_line
-    spec =
+let start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
   start_task_with_preparer ~prepare_inputs:Task_preflight.prepare_inputs ~sw ~env
-    ~limits ~backend_id ?expected_entry ?on_event ?on_raw_line spec
+    ~limits ~backend_id ?on_event ?on_raw_line spec
+
+let start_task_with_entry ~sw ~env ~limits ~backend_id ~expected_entry ?on_event
+    ?on_raw_line spec =
+  start_task_with_preparer ~prepare_inputs:Task_preflight.prepare_inputs ~sw ~env
+    ~limits ~backend_id ~expected_entry ?on_event ?on_raw_line spec
 
 let cancel handle =
   if not (Atomic.get handle.completed) then
@@ -685,27 +693,27 @@ module Private = struct
     Task_preflight.Private.prepare_inputs_with_hooks ?on_staging_directory
       ?on_staged_file ?on_cleanup_attempt ~limits spec
 
-  let prepare_with_input_hooks ~sw ~env ~limits ~backend_id ?expected_entry
-      ?context
-      ?on_prepare_inputs ?on_staging_directory ?on_staged_file
-      ?on_cleanup_attempt spec =
+  let prepare_with_input_hooks ~sw ~env ~limits ~backend_id ?context
+      ?on_prepare_inputs ?on_staging_directory ?on_staged_file ?on_cleanup_attempt
+      spec =
     let cleanup_status = Atomic.make Backend_types.Cleanup_not_required in
     prepare_with
       ~prepare_inputs:
         (prepare_inputs_with_hooks ?on_prepare_inputs ?on_staging_directory
            ?on_staged_file ?on_cleanup_attempt)
-      ~cleanup_status ~sw ~env ~limits ~backend_id ?expected_entry ?context spec
+      ~cleanup_status ~sw ~env ~limits ~backend_id ?context spec
 
-  let start_task_with_input_hooks ~sw ~env ~limits ~backend_id ?expected_entry
-      ?on_event ?on_raw_line ?on_prepare_inputs ?on_staging_directory
-      ?on_staged_file ?on_cleanup_attempt spec =
+  let start_task_with_input_hooks ~sw ~env ~limits ~backend_id ?on_event
+      ?on_raw_line ?on_prepare_inputs ?on_staging_directory ?on_staged_file
+      ?on_cleanup_attempt spec =
     start_task_with_preparer
       ~prepare_inputs:
         (prepare_inputs_with_hooks ?on_prepare_inputs ?on_staging_directory
            ?on_staged_file ?on_cleanup_attempt)
-      ~sw ~env ~limits ~backend_id ?expected_entry ?on_event ?on_raw_line spec
+      ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec
 
   let start_task = start_task
+  let start_task_with_entry = start_task_with_entry
   let cancel = cancel
   let await = await
   let await_detailed = await_detailed
@@ -713,14 +721,22 @@ module Private = struct
   let project_prepared_detailed_outcome = project_prepared_detailed_outcome
 end
 
-let run_task ~sw ~env ~limits ~backend_id ?expected_entry ?on_event ?on_raw_line
-    spec =
-  start_task ~sw ~env ~limits ~backend_id ?expected_entry ?on_event ?on_raw_line
-    spec
+let run_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
+  start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec
   |> await
 
-let run_task_detailed ~sw ~env ~limits ~backend_id ?expected_entry ?on_event
+let run_task_with_entry ~sw ~env ~limits ~backend_id ~expected_entry ?on_event
     ?on_raw_line spec =
-  start_task ~sw ~env ~limits ~backend_id ?expected_entry ?on_event ?on_raw_line
-    spec
+  start_task_with_entry ~sw ~env ~limits ~backend_id ~expected_entry ?on_event
+    ?on_raw_line spec
+  |> await
+
+let run_task_detailed ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec =
+  start_task ~sw ~env ~limits ~backend_id ?on_event ?on_raw_line spec
+  |> await_detailed
+
+let run_task_detailed_with_entry ~sw ~env ~limits ~backend_id ~expected_entry
+    ?on_event ?on_raw_line spec =
+  start_task_with_entry ~sw ~env ~limits ~backend_id ~expected_entry ?on_event
+    ?on_raw_line spec
   |> await_detailed

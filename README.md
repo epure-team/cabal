@@ -228,23 +228,30 @@ central path as `Runtime_dispatch`/`Task_runtime`. The effective descriptor—no
 an independent static lookup—governs attachment, web, session, and optional
 read-only execution; validated runtime capability data also selects native or
 fallback schema enforcement. Version policy, availability, absolute deadline,
-cancellation/process ownership, and the prepared immutable backend snapshot all
+cancellation/process ownership, and the prepared immutable entry snapshot all
 remain in force across CBL-05 schema retries.
 
 Hosts that have already captured the exact validated entry they authorized may
-pass it as `~expected_entry` to `make_rich` (or to the central
-`Task_runtime`/`Runtime_dispatch` entry points). Every invocation still performs
-one initial registry lookup and revalidates the looked-up entry; in that same
-non-yielding section it compares the current entry to `expected_entry` with
-physical identity (`==`) and captures the exact entry/backend pair. A raw,
-unregistered, forged, equal-looking, or wrong-id expected value therefore grants
-no authority. A mismatch is the typed, sanitized
+use `Backend_completer.make_rich_with_entry`. The matching central guarded
+siblings are `Runtime_dispatch.prepare_with_entry`,
+`Runtime_dispatch.Private.start_task_with_entry`,
+`Runtime_dispatch.run_task_with_entry`, and
+`Runtime_dispatch.run_task_detailed_with_entry`. The host-facing handle facade
+provides `Task_runtime.start_task_with_entry`, `Task_runtime.run_task_with_entry`,
+and `Task_runtime.run_task_detailed_with_entry`. Each requires `~expected_entry`.
+Every guarded invocation still performs one initial registry lookup and
+revalidates the looked-up entry; in that same non-yielding section it compares
+the current entry to `expected_entry` with physical identity (`==`) and captures
+the immutable entry from which the backend is derived. A raw, unregistered,
+forged, equal-looking, or wrong-id expected value therefore grants no authority.
+A mismatch is the typed, sanitized
 `Runtime_dispatch.Expected_entry_mismatch` failure. After capture, registry
 mutation cannot change the descriptor, version policy, availability target,
 preflight authority, or backend used by either schema attempt, because the
-invocation performs no later registry lookup. Omitting `expected_entry` preserves
-the existing dynamic call-time replacement behavior. This guarantee follows the
-registry's documented single-OCaml-domain mutation model.
+invocation performs no later registry lookup. Existing unguarded APIs preserve
+their exact public function types and dynamic call-time replacement behavior.
+This guarantee follows the registry's documented single-OCaml-domain mutation
+model.
 
 On success, `execution` retains final status, every completed attempt and its
 delivery intent, validation errors, monotonic timings, costs/tokens, and final

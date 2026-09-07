@@ -9,18 +9,24 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
-- **Exact runtime-entry identity guard.** `Backend_completer.make_rich`,
-  `Task_runtime`, and `Runtime_dispatch` accept an additive optional
-  `expected_entry`. Central dispatch performs its sole registry lookup, complete
-  entry consistency revalidation, physical-identity (`==`) comparison, and exact
-  entry/backend capture in one non-yielding section. The expected value never
-  mints authority: raw, unregistered, forged, equal-looking, stale, and wrong-id
-  values fail with typed sanitized errors. No registry lookup occurs after
-  capture, so replacement during version/availability work or between schema
-  attempts cannot change the executed backend. Omitting the guard preserves
-  dynamic call-time resolution. Exhaustive `Runtime_dispatch.error` matches must
-  add `Runtime_entry_invalid` and `Expected_entry_mismatch` or use a deliberate
-  forward-compatible wildcard.
+- **Exact runtime-entry identity guard.** Additive guarded siblings
+  `Backend_completer.make_rich_with_entry`, `Runtime_dispatch.prepare_with_entry`,
+  `Runtime_dispatch.Private.start_task_with_entry`,
+  `Runtime_dispatch.run_task_with_entry`,
+  `Runtime_dispatch.run_task_detailed_with_entry`,
+  `Task_runtime.start_task_with_entry`, `Task_runtime.run_task_with_entry`, and
+  `Task_runtime.run_task_detailed_with_entry` require an `expected_entry`.
+  Existing APIs retain their exact public first-class function types and dynamic
+  call-time resolution. Central dispatch performs its sole registry lookup,
+  complete entry consistency revalidation, physical-identity (`==`) comparison,
+  and immutable entry capture with backend derivation in one non-yielding
+  section. The expected value never mints authority: raw, unregistered, forged,
+  equal-looking, stale, and wrong-id values fail with typed sanitized errors. No
+  registry lookup occurs after capture, so replacement during
+  version/availability work or between schema attempts cannot change the
+  executed backend. Exhaustive
+  `Runtime_dispatch.error` matches must add `Runtime_entry_invalid` and
+  `Expected_entry_mismatch` or use a deliberate forward-compatible wildcard.
 - **Quarantined Copilot CLI transport investigation (CBL-07E).** Copilot CLI
   remains pinned to baseline `1.0.54` but advertises no media or structured-output
   support. Hardened bootstrap binds a typed incomplete-MCP-isolation quarantine,

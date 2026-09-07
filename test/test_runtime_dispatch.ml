@@ -843,7 +843,7 @@ let test_expected_snapshot_survives_replacement_during_availability () =
   in
   Registry.register_validated original;
   let handle =
-    Task_runtime.start_task ~sw ~env ~limits ~backend_id:id
+    Task_runtime.start_task_with_entry ~sw ~env ~limits ~backend_id:id
       ~expected_entry:original (spec ())
   in
   Eio.Promise.await availability_started;
