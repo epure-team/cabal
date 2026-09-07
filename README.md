@@ -231,6 +231,21 @@ fallback schema enforcement. Version policy, availability, absolute deadline,
 cancellation/process ownership, and the prepared immutable backend snapshot all
 remain in force across CBL-05 schema retries.
 
+Hosts that have already captured the exact validated entry they authorized may
+pass it as `~expected_entry` to `make_rich` (or to the central
+`Task_runtime`/`Runtime_dispatch` entry points). Every invocation still performs
+one initial registry lookup and revalidates the looked-up entry; in that same
+non-yielding section it compares the current entry to `expected_entry` with
+physical identity (`==`) and captures the exact entry/backend pair. A raw,
+unregistered, forged, equal-looking, or wrong-id expected value therefore grants
+no authority. A mismatch is the typed, sanitized
+`Runtime_dispatch.Expected_entry_mismatch` failure. After capture, registry
+mutation cannot change the descriptor, version policy, availability target,
+preflight authority, or backend used by either schema attempt, because the
+invocation performs no later registry lookup. Omitting `expected_entry` preserves
+the existing dynamic call-time replacement behavior. This guarantee follows the
+registry's documented single-OCaml-domain mutation model.
+
 On success, `execution` retains final status, every completed attempt and its
 delivery intent, validation errors, monotonic timings, costs/tokens, and final
 session. A rich error distinguishes central `Dispatch_failure` from structured
@@ -641,7 +656,8 @@ The execution-policy API is intentionally source-breaking. Calls to
 `Runtime_entry.create` must now pass `~execution_policy`; use `Dispatch_enabled`
 unless intentionally binding a typed quarantine. Exhaustive patterns over the
 private `Runtime_entry.t` record must add `execution_policy` or end with `_`, and
-exhaustive `Runtime_dispatch.error` matches must handle `Backend_quarantined`.
+exhaustive `Runtime_dispatch.error` matches must handle `Backend_quarantined`,
+`Runtime_entry_invalid`, and `Expected_entry_mismatch`.
 There is no optional default because trusted registration must not silently omit
 the security state.
 

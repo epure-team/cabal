@@ -9,6 +9,18 @@ by the date a change merged to `main`.
 ## Unreleased
 
 ### Added
+- **Exact runtime-entry identity guard.** `Backend_completer.make_rich`,
+  `Task_runtime`, and `Runtime_dispatch` accept an additive optional
+  `expected_entry`. Central dispatch performs its sole registry lookup, complete
+  entry consistency revalidation, physical-identity (`==`) comparison, and exact
+  entry/backend capture in one non-yielding section. The expected value never
+  mints authority: raw, unregistered, forged, equal-looking, stale, and wrong-id
+  values fail with typed sanitized errors. No registry lookup occurs after
+  capture, so replacement during version/availability work or between schema
+  attempts cannot change the executed backend. Omitting the guard preserves
+  dynamic call-time resolution. Exhaustive `Runtime_dispatch.error` matches must
+  add `Runtime_entry_invalid` and `Expected_entry_mismatch` or use a deliberate
+  forward-compatible wildcard.
 - **Quarantined Copilot CLI transport investigation (CBL-07E).** Copilot CLI
   remains pinned to baseline `1.0.54` but advertises no media or structured-output
   support. Hardened bootstrap binds a typed incomplete-MCP-isolation quarantine,
@@ -40,8 +52,9 @@ by the date a change merged to `main`.
 - **Runtime execution-policy migration.** `Runtime_entry.create` now requires
   explicit `~execution_policy`; exhaustive patterns over its private record must
   add the readable field or `_`, and exhaustive `Runtime_dispatch.error` matches
-  must handle `Backend_quarantined`. There is deliberately no enabling default
-  that would let trusted registration omit quarantine state.
+  must handle `Backend_quarantined`, `Runtime_entry_invalid`, and
+  `Expected_entry_mismatch`. There is deliberately no enabling default that would
+  let trusted registration omit quarantine state.
 - **Additional exhaustive/API migrations.** Exhaustive
   `Backend_config_writer.write_result` / `Backend_config_gen.write_result`
   matches must add `Unsafe_project_path`, and exhaustive

@@ -337,6 +337,15 @@ standalone OCaml library and as the backend abstraction layer vendored under
   handle. It must not invoke `Agentic_backend` or `Json_schema_enforcer`
   directly. `Runtime_dispatch.prepare` resolves one validated effective entry,
   and that immutable backend snapshot owns every CBL-05 attempt.
+- `make_rich ?expected_entry` passes the optional guard on every invocation.
+  Central dispatch performs exactly one registry lookup, then revalidates the
+  current entry, compares it to the expected token with physical identity
+  (`==`), and captures the exact entry/backend in the same non-yielding section.
+  The expected value is not authority: raw, unregistered, forged, equal-looking,
+  stale, and wrong-id values fail through typed sanitized dispatch errors. There
+  is no later registry lookup for version, availability, preflight, or schema
+  retries. Omitting the guard preserves dynamic call-time replacement. This
+  guarantee assumes the documented single-domain registry mutation model.
 - `Runtime_dispatch.run_task_detailed`, `Task_runtime.run_task_detailed`, and
   `Task_runtime.await_detailed` share the legacy handle's CBL-03/04 preflight,
   version policy, availability, absolute deadline, cancellation/process
@@ -502,7 +511,8 @@ standalone OCaml library and as the backend abstraction layer vendored under
 - `Runtime_entry.create` requires explicit `~execution_policy`; do not add a
   default that lets trusted registration silently omit quarantine state. Its
   private record gained the readable `execution_policy` field, and
-  `Runtime_dispatch.error` gained `Backend_quarantined`; update exhaustive
+  `Runtime_dispatch.error` gained `Backend_quarantined`,
+  `Runtime_entry_invalid`, and `Expected_entry_mismatch`; update exhaustive
   patterns or deliberately use `_`.
 - Exhaustive config-writer results must handle `Unsafe_project_path`, and
   exhaustive preflight capability errors must handle `Mcp_unsupported`. The
