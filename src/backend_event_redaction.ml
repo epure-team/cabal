@@ -219,6 +219,8 @@ type extended_safe_json =
   | `Tuple of Yojson.Safe.t list
   | `Variant of string * Yojson.Safe.t option ]
 
+type extended_safe_json_probe = [ extended_safe_json | `Unsupported ]
+
 let rec shape_of_json (json : Yojson.Safe.t) =
   match (json :> extended_safe_json) with
   | `Assoc fields ->
@@ -252,16 +254,16 @@ let compute_shape_hash json =
 (** Walk the JSON tree and redact sensitive string values.  [parent_field] is
     the field name under which this value appears (used for policy lookup).
     [count] accumulates the number of redactions performed. *)
-let legacy_tuple items =
-  Yojson.Safe.from_string
-    ("(" ^ String.concat "," (List.map Yojson.Safe.to_string items) ^ ")")
+let safe_json_of_extended (json : extended_safe_json) =
+  (* The type pattern narrows without a cast when the installed [Safe.t] row
+     admits the legacy constructor. The fallback is unreachable for values
+     derived from [Safe.t], but remains fail-closed if that relation changes. *)
+  match (json :> extended_safe_json_probe) with
+  | #Yojson.Safe.t as json -> json
+  | _ -> `String "[redacted:unsupported JSON extension]"
 
-let legacy_variant tag value =
-  let tag = Yojson.Safe.to_string (`String tag) in
-  let argument =
-    Option.fold ~none:"" ~some:(fun json -> ":" ^ Yojson.Safe.to_string json) value
-  in
-  Yojson.Safe.from_string ("<" ^ tag ^ argument ^ ">")
+let legacy_tuple items = safe_json_of_extended (`Tuple items)
+let legacy_variant tag value = safe_json_of_extended (`Variant (tag, value))
 
 let rec redact_json ~parent_field (count : int ref) (json : Yojson.Safe.t) :
     Yojson.Safe.t =

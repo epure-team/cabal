@@ -120,7 +120,7 @@
   eio_posix
   yojson
   unix)
- (deps ../bin/process_group_launcher.exe)
+ (deps ../bin/process_group_launcher.exe ../tools/probe_claude_media_web.py)
  (modules test_claude_code))
 
 (test
@@ -141,7 +141,7 @@
 (test
  (name test_copilot_cli)
  (libraries cabal cabal_process_test_helper alcotest eio eio_posix unix)
- (deps ../bin/process_group_launcher.exe)
+ (deps ../bin/process_group_launcher.exe ../tools/probe_copilot_media_web.py)
  (modules test_copilot_cli))
 
 (test

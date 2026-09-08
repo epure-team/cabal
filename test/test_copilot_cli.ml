@@ -584,6 +584,22 @@ let test_protocol_rejects_non_object_and_legacy_json_values () =
   expect_legacy_rejection {|("tuple")|} ;
   expect_legacy_rejection {|<"Variant">|}
 
+let test_protocol_rejects_non_finite_numbers () =
+  let rejection = "Copilot protocol rejected: non-standard JSON value" in
+  ["NaN"; "Infinity"; "-Infinity"]
+  |> List.iter (fun literal ->
+         let stream =
+           replace_first (successful_tool_jsonl ())
+             ~needle:{|"arguments":{"path":"/private/image.png"}|}
+             ~replacement:
+               (Printf.sprintf
+                  {|"arguments":{"path":"/private/image.png","score":%s}|}
+                  literal)
+         in
+         match Copilot_cli.Private.verify_terminal_stdout stream with
+         | Error message -> Alcotest.(check string) literal rejection message
+         | Ok _ -> Alcotest.fail (literal ^ " was accepted as standard JSON"))
+
 let test_normalized_events_require_paired_successful_tools () =
   let private_path = "/private/image.png" in
   (match
@@ -1342,6 +1358,7 @@ let test_media_web_probe_offline_self_test () =
   let candidates =
     [
       relative;
+      Filename.concat ".." relative;
       Filename.concat "../../.." relative;
       Filename.concat (Filename.dirname __FILE__) ("../" ^ relative);
     ]
@@ -1384,6 +1401,9 @@ let command_tests =
     ( "standard non-object and legacy JSON values fail closed",
       `Quick,
       test_protocol_rejects_non_object_and_legacy_json_values );
+    ( "non-finite numbers fail closed",
+      `Quick,
+      test_protocol_rejects_non_finite_numbers );
     ( "normalized events require paired successful tools",
       `Quick,
       test_normalized_events_require_paired_successful_tools );

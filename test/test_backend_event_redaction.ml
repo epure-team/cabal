@@ -17,6 +17,21 @@ module R = Cabal.Backend_event_redaction
 let json_eq =
   Alcotest.testable (Fmt.of_to_string Yojson.Safe.to_string) Yojson.Safe.equal
 
+type extended_safe_json =
+  [ Yojson.Safe.t
+  | `Tuple of Yojson.Safe.t list
+  | `Variant of string * Yojson.Safe.t option ]
+
+type extended_safe_json_probe = [ extended_safe_json | `Unsupported ]
+
+let supported_safe_json (json : extended_safe_json) =
+  match (json :> extended_safe_json_probe) with
+  | #Yojson.Safe.t as json -> Some json
+  | _ -> None
+
+let legacy_tuple items = supported_safe_json (`Tuple items)
+let legacy_variant tag value = supported_safe_json (`Variant (tag, value))
+
 (** Helper: extract sanitized JSON from a redaction result. *)
 let sanitize (json : Yojson.Safe.t) : Yojson.Safe.t =
   (R.redact_event ~backend_id:"test" json).sanitized
@@ -140,29 +155,50 @@ let test_nested_environment_inside_object_redacted () =
   in
   Alcotest.(check bool) "nested env leaks" false (leaks "ghp_secrettoken" j)
 
-let test_legacy_yojson_containers_are_redacted_when_supported () =
-  [
-    ( "tuple secret redacted",
-      "tuple-secret",
-      {|({"prompt":"tuple-secret"})|},
-      {|({"prompt":"[redacted:12 chars]"})|} );
-    ( "variant secret redacted",
-      "variant-secret",
-      {|<"Envelope":{"token":"variant-secret"}>|},
-      {|<"Envelope":{"token":"[redacted:14 chars]"}>|} );
-  ]
-  |> List.iter (fun (label, secret, source, expected_source) ->
-         match
-           try Some (Yojson.Safe.from_string source)
-           with Yojson.Json_error _ -> None
-         with
-         | None -> ()
-         | Some json ->
-             Alcotest.(check bool) label false (leaks secret json) ;
-             Alcotest.check json_eq
-               (label ^ " without changing the legacy container")
-               (Yojson.Safe.from_string expected_source)
-               (sanitize json))
+let expect_legacy_redaction label input expected =
+  match (input, expected) with
+  | None, None -> ()
+  | Some input, Some expected -> Alcotest.check json_eq label expected (sanitize input)
+  | None, Some _ | Some _, None ->
+      Alcotest.fail "inconsistent legacy Yojson constructor support"
+
+let test_legacy_tuple_preserves_intlit_when_supported () =
+  expect_legacy_redaction "tuple and Intlit preserved"
+    (legacy_tuple [`Intlit "1"; `Assoc [("prompt", `String "tuple-secret")]])
+    (legacy_tuple
+       [`Intlit "1"; `Assoc [("prompt", `String "[redacted:12 chars]")]])
+
+let test_legacy_variant_preserves_escaping_when_supported () =
+  let tag = "Envelope \"quoted\" \\ newline\n" in
+  let detail = "line one\n\"quoted\"\\tail" in
+  expect_legacy_redaction "variant tag and payload escaping preserved"
+    (legacy_variant tag
+       (Some
+          (`Assoc
+            [("token", `String "variant-secret"); ("detail", `String detail)])))
+    (legacy_variant tag
+       (Some
+          (`Assoc
+            [
+              ("token", `String "[redacted:14 chars]");
+              ("detail", `String detail);
+            ])))
+
+let nested_legacy_value prompt =
+  match
+    legacy_variant "Inner"
+      (Some (`Assoc [("prompt", `String prompt); ("count", `Intlit "1")]))
+  with
+  | None -> None
+  | Some inner -> (
+      match legacy_tuple [`Intlit "1"; inner] with
+      | None -> None
+      | Some tuple -> legacy_variant "Outer" (Some tuple))
+
+let test_nested_legacy_containers_are_exact_when_supported () =
+  expect_legacy_redaction "nested legacy containers preserved"
+    (nested_legacy_value "nested-secret")
+    (nested_legacy_value "[redacted:13 chars]")
 
 (* ---- error fields ---------------------------------------------------------*)
 
@@ -244,8 +280,16 @@ let () =
             `Quick
             test_nested_environment_inside_object_redacted;
           Alcotest.test_case
-            "legacy tuple and variant containers when supported"
+            "legacy tuple preserves Intlit when supported"
             `Quick
-            test_legacy_yojson_containers_are_redacted_when_supported;
+            test_legacy_tuple_preserves_intlit_when_supported;
+          Alcotest.test_case
+            "legacy variant preserves escaping when supported"
+            `Quick
+            test_legacy_variant_preserves_escaping_when_supported;
+          Alcotest.test_case
+            "nested legacy containers are exact when supported"
+            `Quick
+            test_nested_legacy_containers_are_exact_when_supported;
         ] );
     ]

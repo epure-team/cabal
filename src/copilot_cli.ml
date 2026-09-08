@@ -447,6 +447,8 @@ let rec validate_no_duplicate_object_fields (json : Yojson.Safe.t) =
             | Ok () -> validate_values rest)
       in
       validate_values values
+  | `Float value when not (Float.is_finite value) ->
+      protocol_error "non-standard JSON value"
   | `Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `String _ -> Ok ()
   | `Tuple _ | `Variant _ -> protocol_error "non-standard JSON value"
 
