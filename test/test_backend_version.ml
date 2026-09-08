@@ -178,7 +178,7 @@ let test_baseline_copilot_cli_parseable () =
   Alcotest.check
     result_semver
     "copilot-cli baseline parses"
-    (ok 1 0 34)
+    (ok 1 0 54)
     (Backend_version.of_string d.Backend_registry.baseline_version)
 
 (** {1 AC3 — Gate blocks below-baseline; error message includes --force-backend} *)
@@ -233,7 +233,7 @@ let test_gate_passes_above_baseline () =
 let test_gate_message_contains_baseline () =
   let d = find_desc "copilot-cli" in
   let below =
-    {Backend_version.major = 1; minor = 0; patch = 33; prerelease = None}
+    {Backend_version.major = 1; minor = 0; patch = 53; prerelease = None}
   in
   match Backend_version.check_gate ~descriptor:d ~installed:below with
   | Error msg ->
@@ -241,7 +241,7 @@ let test_gate_message_contains_baseline () =
         "message contains baseline version"
         true
         (let len = String.length msg in
-         let needle = "1.0.34" in
+         let needle = "1.0.54" in
          let nlen = String.length needle in
          let rec loop i =
            i + nlen <= len && (String.sub msg i nlen = needle || loop (i + 1))
@@ -678,7 +678,7 @@ let () =
             `Quick
             test_baseline_gemini_cli_parseable;
           Alcotest.test_case
-            "copilot-cli 1.0.34"
+            "copilot-cli 1.0.54"
             `Quick
             test_baseline_copilot_cli_parseable;
         ] );

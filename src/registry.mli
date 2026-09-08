@@ -24,11 +24,13 @@ type entry =
   | Raw of Agentic_backend.t
       (** Legacy runtime-only registration. Central dispatch must reject it. *)
   | Validated of Runtime_entry.t
-      (** Immutable backend/descriptor/capability/origin/version-policy binding. *)
+      (** Immutable backend/descriptor/capability/origin/execution-policy/
+          version-policy binding. *)
 
 (** [register backend] adds a legacy raw backend. If the same ID already has a
     validated entry, the entire entry is replaced and its trusted descriptor,
-    provenance, capability snapshot, and version policy are discarded. This
+    provenance, capability snapshot, execution policy, and version policy are
+    discarded. This
     preserves low-level compatibility without allowing a runtime-only override
     to inherit trusted dispatch metadata.
 

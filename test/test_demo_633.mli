@@ -14,10 +14,10 @@
 
     {b Coverage:}
     - AC1: Investigation note exists at the canonical path, cites
-           baseline_version 1.0.34, records at least one source URL and an
+           baseline_version 1.0.54, records at least one source URL and an
            accessed-on date (NFR-U3).
     - AC2(b): copilot-cli descriptor has [native_json_schema_output = false]
-              (NFR-R1 pinning test).  At baseline [1.0.34], copilot-cli exposes
+              (NFR-R1 pinning test).  At baseline [1.0.54], copilot-cli exposes
               no CLI surface for forwarding a JSON schema into the GitHub
               Copilot API invocation — no [--json-schema], [--response-format],
               or equivalent flag is documented.  Per D-15, hint-style

@@ -58,9 +58,10 @@ let attachment ?(id = "image") ?(path = "image.png")
   }
 
 let spec ?(attachments = []) ?(web_access = Backend_types.Web_disabled)
-    ?(read_only = false) ?resume_session_id ?json_schema working_dir =
+    ?(mcp_servers = []) ?(read_only = false) ?resume_session_id ?json_schema
+    working_dir =
   Backend_types.make_task_spec ~prompt:"test" ~working_dir ~attachments
-    ~web_access ~read_only ?resume_session_id ?json_schema ()
+    ~web_access ~mcp_servers ~read_only ?resume_session_id ?json_schema ()
 
 let expect_input_error expected result =
   match result with
@@ -1085,6 +1086,35 @@ let test_session_resume_gate () =
     (validate_capabilities descriptor
        (spec "/tmp" ~resume_session_id:"session-1"))
 
+let test_mcp_gate () =
+  let base = base_descriptor () in
+  let descriptor =
+    {
+      base with
+      capabilities =
+        {base.capabilities with mcp_support = Backend_registry.Mcp_none};
+    }
+  in
+  let server : Backend_types.mcp_server_config =
+    {name = "hostile"; command = "must-not-run"; args = []; env = []}
+  in
+  expect_capability_error
+    (function Task_preflight.Mcp_unsupported -> true | _ -> false)
+    (validate_capabilities descriptor (spec "/tmp" ~mcp_servers:[server])) ;
+  List.iter
+    (fun mcp_support ->
+      let supported =
+        {
+          descriptor with
+          capabilities = {descriptor.capabilities with mcp_support};
+        }
+      in
+      Alcotest.(check bool)
+        "supported MCP mode accepts task servers" true
+        (validate_capabilities supported (spec "/tmp" ~mcp_servers:[server])
+        = Ok ()))
+    [Backend_registry.Mcp_config_file; Backend_registry.Mcp_user_settings]
+
 let test_non_native_json_schema_uses_fallback () =
   let descriptor = base_descriptor () in
   let schema = `Assoc [ ("type", `String "object") ] in
@@ -1092,33 +1122,48 @@ let test_non_native_json_schema_uses_fallback () =
     "non-native JSON schema does not fail capability preflight" true
     (validate_capabilities descriptor (spec "/tmp" ~json_schema:schema) = Ok ())
 
-let test_codex_proven_media_and_disabled_web_capabilities () =
-  let descriptor =
-    match Backend_registry.find "codex" with
-    | Some descriptor -> descriptor
-    | None -> Alcotest.fail "Codex descriptor missing"
-  in
+let test_proven_media_and_disabled_web_capabilities () =
   let attachments =
     [
       attachment ~id:"png" ~path:"cover.png" png;
       attachment ~id:"jpeg" ~path:"back.jpg" ~media_type:Backend_types.Jpeg jpeg;
     ]
   in
-  Alcotest.(check bool)
-    "Codex accepts proven PNG/JPEG with disabled web" true
-    (validate_capabilities descriptor
-       (spec "/tmp" ~attachments ~web_access:Backend_types.Web_disabled)
-    = Ok ());
   List.iter
-    (fun web_access ->
-      expect_capability_error
-        (function
-          | Task_preflight.Unsupported_web_access
-              {requested; maximum = Backend_types.Web_disabled} ->
-              requested = web_access
-          | _ -> false)
-        (validate_capabilities descriptor (spec "/tmp" ~attachments ~web_access)))
-    [ Backend_types.Web_search; Backend_types.Web_search_and_fetch ]
+    (fun backend_id ->
+      let descriptor =
+        match Backend_registry.find backend_id with
+        | Some descriptor -> descriptor
+        | None -> Alcotest.fail (backend_id ^ " descriptor missing")
+      in
+      Alcotest.(check bool)
+        (backend_id ^ " accepts proven PNG/JPEG with disabled web") true
+        (validate_capabilities descriptor
+           (spec "/tmp" ~attachments ~web_access:Backend_types.Web_disabled)
+        = Ok ()) ;
+      List.iter
+        (fun web_access ->
+          expect_capability_error
+            (function
+              | Task_preflight.Unsupported_web_access
+                  {requested; maximum = Backend_types.Web_disabled} ->
+                  requested = web_access
+              | _ -> false)
+            (validate_capabilities descriptor
+               (spec "/tmp" ~attachments ~web_access)))
+        [Backend_types.Web_search; Backend_types.Web_search_and_fetch])
+    ["codex"] ;
+  let copilot =
+    match Backend_registry.find "copilot-cli" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "copilot-cli descriptor missing"
+  in
+  expect_capability_error
+    (function
+      | Task_preflight.Unsupported_media_type Backend_types.Png -> true
+      | _ -> false)
+    (validate_capabilities copilot
+       (spec "/tmp" ~attachments ~web_access:Backend_types.Web_disabled))
 
 let input_tests =
   [
@@ -1208,12 +1253,13 @@ let capability_tests =
     ("web access hierarchy", `Quick, test_web_access_hierarchy);
     ("read-only gate", `Quick, test_read_only_gate);
     ("session-resume gate", `Quick, test_session_resume_gate);
+    ("MCP gate", `Quick, test_mcp_gate);
     ( "non-native JSON schema fallback",
       `Quick,
       test_non_native_json_schema_uses_fallback );
-    ( "Codex proven media and disabled web capabilities",
+    ( "proven media and disabled web capabilities",
       `Quick,
-      test_codex_proven_media_and_disabled_web_capabilities );
+      test_proven_media_and_disabled_web_capabilities );
   ]
 
 let () =

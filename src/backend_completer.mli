@@ -167,8 +167,9 @@ val make :
     {!Backend_types.make_task_spec}, then uses call-time validated registry
     resolution, effective-descriptor input/capability preflight, bound version
     policy, availability checking, one absolute deadline/cancellation owner, and
-    {!Json_schema_enforcer.run_task_detailed}. The one prepared immutable backend
-    snapshot is retained for every schema attempt.
+    {!Json_schema_enforcer.run_task_detailed}. The one prepared immutable entry
+    snapshot is retained for every schema attempt. As the unguarded compatibility
+    API, a whole-entry registry replacement is visible on the next invocation.
 
     [limits] is mandatory caller policy; Cabal supplies no media limits.
     [read_only=true] is checked against the resolved effective descriptor during
@@ -190,6 +191,27 @@ val make_rich :
   limits:Task_preflight.limits ->
   backend_name:string ->
   working_dir:string ->
+  ?model:string ->
+  ?mcp_servers:Backend_types.mcp_server_config list ->
+  ?read_only:bool ->
+  unit ->
+  (rich_completer, string) result
+
+(** Guarded sibling of {!make_rich}. Each invocation requires the current
+    trusted registry entry to be physically identical to [expected_entry]. The
+    sole registry lookup, complete entry revalidation, identity comparison, and
+    backend derivation from that entry occur in one non-yielding central
+    dispatch section. A stale, unregistered, raw, forged, equal-looking, or
+    wrong-id value grants no authority and fails through typed sanitized
+    dispatch errors. Once captured, later registry mutation cannot affect
+    version, availability, preflight, or either schema attempt. *)
+val make_rich_with_entry :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_name:string ->
+  working_dir:string ->
+  expected_entry:Runtime_entry.t ->
   ?model:string ->
   ?mcp_servers:Backend_types.mcp_server_config list ->
   ?read_only:bool ->

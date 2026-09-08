@@ -10,20 +10,31 @@
     Every call resolves one bound {!Registry.Validated} entry snapshot. Raw
     runtime-only registrations are rejected and no independent descriptor lookup
     can lend static claims to an override. Dispatch applies the caller's
-    explicit {!Task_preflight.limits}, checks the entry's effective capabilities
-    before allocating or reading sealed inputs, applies its installed-version
-    policy, checks availability, and only then invokes
-    {!Json_schema_enforcer.run_task}. Whole-entry replacements
-    installed after a dispatcher/completer is constructed are visible on the
-    next invocation. The resolved entry and one sealed attachment set are
-    retained across the complete schema-enforcement attempt, including retry,
-    then cleaned before outcome delivery. *)
+    explicit {!Task_preflight.limits}, rejects a typed entry quarantine before
+    any preflight or process side effect, checks the entry's effective
+    capabilities before allocating or reading sealed inputs, applies its
+    installed-version policy, checks availability, and only then invokes
+    {!Json_schema_enforcer.run_task}. Whole-entry replacements are visible on the
+    next invocation only through the unguarded compatibility entry points.
+    Guarded [_with_entry] entry points instead return the typed
+    [Expected_entry_mismatch] failure when the current entry is not the required
+    exact identity. The resolved entry and one sealed attachment set are retained
+    across the complete schema-enforcement attempt, including retry, then cleaned
+    before outcome delivery. *)
 
 (** Typed invocation failure. *)
 type error =
   | Invalid_timeout
   | Backend_not_registered
   | Runtime_registration_untrusted
+  | Runtime_entry_invalid of Runtime_entry.validation_error
+      (** The looked-up validated token no longer passes its complete pure
+          runtime/descriptor/capability consistency checks. *)
+  | Expected_entry_mismatch
+      (** The trusted current entry is not physically identical to the entry
+          required by a guarded caller. *)
+  | Backend_quarantined of Runtime_entry.quarantine_reason
+      (** The resolved validated entry disables central task dispatch. *)
   | Preflight_failed of Task_preflight.error
   | Backend_version_unsupported
   | Version_check_failed
@@ -34,6 +45,11 @@ type error =
   | Schema_enforcement_failed of string
       (** Untrusted low-level error. Use {!render_error}, which redacts it,
           rather than displaying this payload directly. *)
+
+(** {b Migration note:} {!error} gained [Runtime_entry_invalid] and
+    [Expected_entry_mismatch] in addition to [Backend_quarantined]. Exhaustive
+    matches must add those constructors, normally rendering them through
+    {!render_error}, or deliberately use a wildcard for forward compatibility. *)
 
 (** Central detailed failure. [Dispatch_failure] covers resolution, preflight,
     version, availability, and protected execution-boundary failures before a
@@ -75,17 +91,38 @@ val render_detailed_error : detailed_error -> string
     authorization before retryable physical cleanup begins. *)
 type prepared
 
-(** Resolve, validate capabilities, preflight and seal attachment bytes,
-    version-check, and availability-check a task exactly once, returning the
-    entry snapshot used by execution and retries. Capability rejection occurs
-    before staging allocation or attachment reads. Abandoned pending values are
-    cleaned when [sw] releases; an executing owner retains sole cleanup
-    responsibility. *)
+(** Resolve, reject any typed quarantine, validate capabilities, preflight and
+    seal attachment bytes, version-check, and availability-check a task exactly
+    once, returning the immutable entry snapshot used by execution and retries.
+    The initial registry lookup, complete entry revalidation, and backend
+    derivation from that exact entry are one non-yielding section. There is no
+    later registry lookup for this invocation, so mutation after capture cannot
+    change version, availability, preflight, or schema-attempt execution. A
+    replacement installed before the next unguarded call is dynamically visible
+    to that call. Quarantine rejection occurs immediately after capture;
+    capability rejection occurs before staging allocation or attachment reads.
+    Abandoned pending values are cleaned when [sw] releases; an executing owner
+    retains sole cleanup responsibility. This atomicity assumes the registry's
+    documented single-domain mutation model. *)
 val prepare :
   sw:Eio.Switch.t ->
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?context:Task_execution_context.t ->
+  Backend_types.task_spec ->
+  (prepared, error) result
+
+(** Guarded sibling of {!prepare}. The sole registry lookup, complete entry
+    revalidation, physical-identity comparison using [(==)], and backend
+    derivation from the current entry are one non-yielding section. A mismatch
+    fails without granting trust to [expected_entry]. *)
+val prepare_with_entry :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  expected_entry:Runtime_entry.t ->
   ?context:Task_execution_context.t ->
   Backend_types.task_spec ->
   (prepared, error) result
@@ -105,7 +142,7 @@ val execute_prepared :
   prepared ->
   (Backend_types.task_result, error) result
 
-(** Execute one prepared immutable backend snapshot through
+(** Execute one prepared immutable entry snapshot through
     {!Json_schema_enforcer.run_task_detailed}. Registry state is not consulted
     between attempts. The returned execution reports sanitized central cleanup
     status. Persistent cleanup failure does not replace a non-success terminal
@@ -135,6 +172,7 @@ module Private : sig
     limits:Task_preflight.limits ->
     backend_id:string ->
     ?context:Task_execution_context.t ->
+    ?on_prepare_inputs:(unit -> unit) ->
     ?on_staging_directory:(string -> unit) ->
     ?on_staged_file:(string -> Unix.file_descr -> unit) ->
     ?on_cleanup_attempt:(unit -> unit) ->
@@ -148,6 +186,7 @@ module Private : sig
     backend_id:string ->
     ?on_event:(Task_event.t -> unit) ->
     ?on_raw_line:(string -> unit) ->
+    ?on_prepare_inputs:(unit -> unit) ->
     ?on_staging_directory:(string -> unit) ->
     ?on_staged_file:(string -> Unix.file_descr -> unit) ->
     ?on_cleanup_attempt:(unit -> unit) ->
@@ -159,6 +198,18 @@ module Private : sig
     env:Eio_unix.Stdenv.base ->
     limits:Task_preflight.limits ->
     backend_id:string ->
+    ?on_event:(Task_event.t -> unit) ->
+    ?on_raw_line:(string -> unit) ->
+    Backend_types.task_spec ->
+    task_handle
+
+  (** Guarded handle primitive used by {!Task_runtime.start_task_with_entry}. *)
+  val start_task_with_entry :
+    sw:Eio.Switch.t ->
+    env:Eio_unix.Stdenv.base ->
+    limits:Task_preflight.limits ->
+    backend_id:string ->
+    expected_entry:Runtime_entry.t ->
     ?on_event:(Task_event.t -> unit) ->
     ?on_raw_line:(string -> unit) ->
     Backend_types.task_spec ->
@@ -183,7 +234,9 @@ end
     versions below the effective descriptor baseline fail before backend task
     execution; missing or unparseable output skips only the comparison. Under
     {!Runtime_entry.No_version_gate}, stability probing/comparison is skipped.
-    Availability must still pass under both policies.
+    Availability must still pass under both policies. This compatibility entry
+    point uses dynamic call-time resolution; a whole-entry replacement is
+    visible on the next invocation.
 
     [limits] is mandatory caller policy; Cabal supplies no product default.
     Attachment size, digest, magic, and staged bytes come from one authorized
@@ -213,6 +266,19 @@ val run_task :
   Backend_types.task_spec ->
   (Backend_types.task_result, error) result
 
+(** Guarded counterpart of {!run_task}. [expected_entry] is required and checked
+    independently on every invocation as documented on {!prepare_with_entry}. *)
+val run_task_with_entry :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  expected_entry:Runtime_entry.t ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  Backend_types.task_spec ->
+  (Backend_types.task_result, error) result
+
 (** [run_task_detailed] is the central structured counterpart of {!run_task}. It
     uses the same cancellable owner, one absolute deadline, normalized event
     sink, validated preflight and version/availability ordering, and one
@@ -230,6 +296,19 @@ val run_task_detailed :
   env:Eio_unix.Stdenv.base ->
   limits:Task_preflight.limits ->
   backend_id:string ->
+  ?on_event:(Task_event.t -> unit) ->
+  ?on_raw_line:(string -> unit) ->
+  Backend_types.task_spec ->
+  detailed_outcome
+
+(** Guarded counterpart of {!run_task_detailed}; it otherwise preserves the
+    same structured outcome and event behavior. *)
+val run_task_detailed_with_entry :
+  sw:Eio.Switch.t ->
+  env:Eio_unix.Stdenv.base ->
+  limits:Task_preflight.limits ->
+  backend_id:string ->
+  expected_entry:Runtime_entry.t ->
   ?on_event:(Task_event.t -> unit) ->
   ?on_raw_line:(string -> unit) ->
   Backend_types.task_spec ->

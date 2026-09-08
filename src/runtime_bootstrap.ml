@@ -68,6 +68,7 @@ let validate_backend_capabilities ~runtime_capabilities ~descriptor ~backend =
        ~descriptor
        ~runtime_capabilities
        ~origin:Runtime_entry.Custom
+       ~execution_policy:Runtime_entry.Dispatch_enabled
        ~version_policy:Runtime_entry.Enforce_baseline)
 
 let validate_backend ~descriptor ~backend =
@@ -168,7 +169,7 @@ let approved_runtime_capabilities = function
             structured_output = false;
             streaming_output = false;
             session_resume = false;
-            mcp_support = Mcp_config_file;
+            mcp_support = Mcp_none;
             read_only_support = false;
             project_config_surface = Config_fixed_path;
             precedence_confidence = Low;
@@ -235,6 +236,15 @@ let approved_runtime_capabilities = function
           }
   | _ -> None
 
+let approved_execution_policy = function
+  | "copilot-cli" ->
+      Some
+        (Runtime_entry.Dispatch_quarantined
+           Runtime_entry.Incomplete_mcp_isolation)
+  | "claude-code" | "codex" | "gemini-cli" | "opencode" | "pi" ->
+      Some Runtime_entry.Dispatch_enabled
+  | _ -> None
+
 let same_approved_set backends =
   let ids =
     List.map Agentic_backend.id backends |> List.sort_uniq String.compare
@@ -266,16 +276,15 @@ let hardened_candidates () =
             if id = "pi" then Runtime_entry.Yaml else Runtime_entry.Handwritten
           in
           (match
-             Backend_registry.find id, approved_runtime_capabilities id
+             ( Backend_registry.find id,
+               approved_runtime_capabilities id,
+               approved_execution_policy id )
            with
-          | None, _ | _, None -> Error Descriptor_missing
-          | Some descriptor, Some runtime_capabilities -> (
+          | None, _, _ | _, None, _ | _, _, None -> Error Descriptor_missing
+          | Some descriptor, Some runtime_capabilities, Some execution_policy -> (
               match
-                Runtime_entry.create
-                  ~backend
-                  ~descriptor
-                  ~runtime_capabilities
-                  ~origin
+                Runtime_entry.create ~backend ~descriptor ~runtime_capabilities
+                  ~origin ~execution_policy
                   ~version_policy:Runtime_entry.Enforce_baseline
               with
               | Ok entry ->
@@ -325,6 +334,7 @@ let register_custom ~descriptor ~backend =
       ~descriptor
       ~runtime_capabilities:descriptor.Backend_registry.capabilities
       ~origin:Runtime_entry.Custom
+      ~execution_policy:Runtime_entry.Dispatch_enabled
       ~version_policy:Runtime_entry.Enforce_baseline
   with
   | Error error -> Error (Candidate_invalid error)

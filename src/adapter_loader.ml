@@ -258,6 +258,7 @@ let register_external_config cfg =
         ~descriptor
         ~runtime_capabilities:descriptor.capabilities
         ~origin:Runtime_entry.Yaml
+        ~execution_policy:Runtime_entry.Dispatch_enabled
         ~version_policy:Runtime_entry.No_version_gate
     with
     | Error error -> Error (Runtime_entry.render_validation_error error)

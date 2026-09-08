@@ -46,9 +46,18 @@ let replace_byte bytes offset value =
 
 let test_capability_driven_selection () =
   let descriptors = Backend_registry.all () in
+  Alcotest.(check (list string))
+    "quarantined Copilot is excluded from default executable E2Es"
+    ["claude-code"; "codex"; "opencode"]
+    E2e_harness_config.all_backend_ids ;
   let media =
     E2e_harness_config.media_schema_descriptors ~descriptors ()
   in
+  Alcotest.(check (list string))
+    "all positive media transports"
+    ["codex"]
+    (E2e_harness_config.media_descriptors ~descriptors ()
+    |> List.map (fun (d : Backend_registry.descriptor) -> d.id)) ;
   Alcotest.(check (list string))
     "current positive media/schema matrix"
     ["codex"]
@@ -72,6 +81,17 @@ let test_capability_driven_selection () =
     "Codex P0 uses native schema"
     true
     codex.capabilities.native_json_schema_output ;
+  let copilot =
+    match Backend_registry.find "copilot-cli" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Copilot descriptor is missing"
+  in
+  Alcotest.(check bool)
+    "Copilot media remains disabled without complete MCP isolation"
+    true
+    (copilot.capabilities.media_support.media_types = []
+    && copilot.capabilities.media_support.evidence = None
+    && not copilot.capabilities.native_json_schema_output) ;
   let structured_without_native_schema =
     {
       codex with
@@ -449,6 +469,21 @@ let test_fixture_schema_and_semantic_marker () =
   (match Media_web_schema_fixture.validate_fixture_semantics wrong_jpeg with
   | Error _ -> ()
   | Ok () -> Alcotest.fail "arbitrary JPEG color assignment was accepted") ;
+  let plain_prompt =
+    Media_web_schema_fixture.prompt_without_native_schema fixtures
+  in
+  List.iter
+    (fun field ->
+      Alcotest.(check bool)
+        ("plain media prompt names " ^ field) true
+        (contains plain_prompt field))
+    ["png_dominant_color"; "jpeg_dominant_color"] ;
+  List.iter
+    (fun answer ->
+      Alcotest.(check bool)
+        "plain media prompt does not disclose the expected answer" false
+        (contains plain_prompt answer))
+    ["\"blue\""; "\"red\""] ;
   let expected = Media_web_schema_fixture.expected_document_text fixtures in
   (match
      Json_schema_validator.validate
@@ -460,6 +495,12 @@ let test_fixture_schema_and_semantic_marker () =
   (match Media_web_schema_fixture.validate_response fixtures expected with
   | Ok () -> ()
   | Error _ -> Alcotest.fail "expected image-derived response was rejected") ;
+  (match
+     Media_web_schema_fixture.validate_response fixtures
+       ("```json\n" ^ expected ^ "\n```")
+   with
+  | Ok () -> ()
+  | Error _ -> Alcotest.fail "public JSON code fence was not normalized") ;
   let constant_but_wrong =
     {|{"png_dominant_color":"blue","jpeg_dominant_color":"blue"}|}
   in
@@ -549,7 +590,7 @@ let test_tool_lifecycle_identity_pairing () =
      Media_web_schema_e2e_support.validate_tool_lifecycle ~attempt_numbers:[1]
        valid
    with
-  | Ok 2 -> ()
+   | Ok ["read"; "fallback-name"] -> ()
   | Ok _ -> Alcotest.fail "valid tool lifecycle returned the wrong start count"
   | Error _ -> Alcotest.fail "valid stable-id/name fallback pairing was rejected") ;
   expect_invalid_tool_lifecycle "mismatched stable id"
@@ -621,12 +662,14 @@ let test_attempt_numbering_and_native_contract () =
   Alcotest.(check bool)
     "exact native initial attempt"
     true
-    (Media_web_schema_e2e_support.valid_attempts ~native:true ~attachments
+    (Media_web_schema_e2e_support.valid_attempts
+       ~schema_execution:Media_web_schema_e2e_support.Native_schema ~attachments
        valid_native) ;
   let reject_native label attempt final_result =
     Alcotest.(check bool)
       label false
-      (Media_web_schema_e2e_support.valid_attempts ~native:true ~attachments
+      (Media_web_schema_e2e_support.valid_attempts
+         ~schema_execution:Media_web_schema_e2e_support.Native_schema ~attachments
          (execution final_result [attempt]))
   in
   reject_native "native attempt number starts at one"
@@ -652,23 +695,135 @@ let test_attempt_numbering_and_native_contract () =
   reject_native "native attempt status succeeded"
     {native_attempt with result = failed}
     failed ;
-  let first = make_attempt 1 Initial_attempt failed upload in
+  Alcotest.(check bool)
+    "schema-less non-native execution accepts one initial attempt"
+    true
+    (Media_web_schema_e2e_support.valid_attempts
+       ~schema_execution:Media_web_schema_e2e_support.No_schema ~attachments
+       valid_native) ;
+  let first =
+    make_attempt ~schema_validation_error:(Some "sanitized validator rejection") 1
+      Initial_attempt success upload
+  in
   let second = make_attempt 2 Fresh_attempt success upload in
   Alcotest.(check bool)
-    "generic retry attempts are contiguous from one"
-    true
-    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments
+    "schema-less non-native execution rejects a second attempt"
+    false
+    (Media_web_schema_e2e_support.valid_attempts
+       ~schema_execution:Media_web_schema_e2e_support.No_schema ~attachments
        (execution success [first; second])) ;
+  Alcotest.(check bool)
+    "validate-and-retry attempts are contiguous from one"
+    true
+    (Media_web_schema_e2e_support.valid_attempts
+       ~schema_execution:Media_web_schema_e2e_support.Validate_and_retry
+       ~attachments (execution success [first; second])) ;
   Alcotest.(check bool)
     "generic retry attempt gap is rejected"
     false
-    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments
-       (execution success [first; {second with number = 3}])) ;
+    (Media_web_schema_e2e_support.valid_attempts
+       ~schema_execution:Media_web_schema_e2e_support.Validate_and_retry
+       ~attachments (execution success [first; {second with number = 3}])) ;
   Alcotest.(check bool)
     "generic retry attempt reordering is rejected"
     false
-    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments
+    (Media_web_schema_e2e_support.valid_attempts
+       ~schema_execution:Media_web_schema_e2e_support.Validate_and_retry
+       ~attachments
        (execution success [{first with number = 2}; {second with number = 1}]))
+
+let test_schema_less_non_native_media_plan_is_one_call () =
+  let codex =
+    match Backend_registry.find "codex" with
+    | Some descriptor -> descriptor
+    | None -> Alcotest.fail "Codex descriptor is missing"
+  in
+  let descriptor =
+    {
+      codex with
+      id = "hypothetical-non-native-media";
+      capabilities =
+        {
+          codex.capabilities with
+          native_json_schema_output = false;
+          native_json_schema_output_evidence = None;
+        };
+    }
+  in
+  Alcotest.(check (list string))
+    "hypothetical descriptor remains positive-media eligible"
+    [descriptor.id]
+    (E2e_harness_config.media_descriptors ~descriptors:[descriptor] ()
+    |> List.map (fun (candidate : Backend_registry.descriptor) -> candidate.id)) ;
+  let fixtures = Media_web_schema_fixture.all in
+  let attachments =
+    List.map
+      (fun fixture -> fixture.Media_web_schema_fixture.attachment)
+      fixtures
+  in
+  let plan =
+    Media_web_schema_e2e_support.make_media_task_plan ~descriptor ~fixtures
+      ~working_dir:"/tmp" ~attachments ~model:None
+  in
+  Alcotest.(check bool)
+    "non-native plan is explicitly schema-less" true
+    (plan.schema_execution = Media_web_schema_e2e_support.No_schema) ;
+  Alcotest.(check string)
+    "schema-less prompt is selected"
+    (Media_web_schema_fixture.prompt_without_native_schema fixtures)
+    plan.spec.prompt ;
+  Alcotest.(check bool) "schema is absent" true
+    (plan.spec.json_schema = None) ;
+  Alcotest.(check bool) "attachments are preserved" true
+    (plan.spec.attachments = attachments) ;
+  let call_count = ref 0 in
+  let captured_spec = ref None in
+  let response =
+    Backend_types.make_task_result ~status:Success
+      ~agent_text:(Media_web_schema_fixture.expected_document_text fixtures)
+      ()
+  in
+  let module Mock = struct
+    let id = descriptor.id
+    let name = "Hypothetical non-native media backend"
+    let models = []
+    let models_probe = None
+    let available ~sw:_ ~env:_ = true
+    let supports_session_resume = false
+    let native_json_schema_output = false
+    let is_resume_failure _ = false
+
+    let check_project_config ~sw:_ ~env:_ ~project_dir:_ ~setup_result:_ =
+      Agentic_backend.Config_check_unsupported "test mock"
+
+    let run_task ~sw:_ ~env:_ ?context:_ ?on_raw_line:_ spec =
+      incr call_count ;
+      captured_spec := Some spec ;
+      response
+  end in
+  let backend : Agentic_backend.t = (module Mock) in
+  Eio_posix.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  match
+    Json_schema_enforcer.run_task_detailed ~sw ~env ~backend plan.spec
+  with
+  | Error _ -> Alcotest.fail "schema-less mock execution failed"
+  | Ok execution ->
+      Alcotest.(check int) "backend is called exactly once" 1 !call_count ;
+      (match !captured_spec with
+      | None -> Alcotest.fail "mock did not capture its task spec"
+      | Some spec ->
+          Alcotest.(check string) "mock receives the schema-less prompt"
+            plan.spec.prompt spec.prompt ;
+          Alcotest.(check bool) "mock receives no schema" true
+            (spec.json_schema = None) ;
+          Alcotest.(check bool) "mock receives every attachment" true
+            (spec.attachments = attachments)) ;
+      Alcotest.(check bool)
+        "schema-less detailed execution has one initial attempt" true
+        (Media_web_schema_e2e_support.valid_attempts
+           ~schema_execution:Media_web_schema_e2e_support.No_schema ~attachments
+           execution)
 
 let test_event_trace_contract () =
   let text = {|{"png_dominant_color":"blue","jpeg_dominant_color":"red"}|} in
@@ -734,6 +889,104 @@ let test_event_trace_contract () =
   with
   | Error _ -> ()
   | Ok () -> Alcotest.fail "attempt start/finish disagreement was accepted"
+
+(* Investigation-only regression for historical Copilot observations. It is not
+   positive capability evidence: quarantined Copilot remains excluded from the
+   CBL-08 descriptor selection and executable E2E run. *)
+let test_historical_copilot_observation_requires_two_view_lifecycles () =
+  let text = {|{"png_dominant_color":"blue","jpeg_dominant_color":"red"}|} in
+  let result =
+    Backend_types.make_task_result ~status:Success ~agent_text:text
+      ~session_id:"session" ~cost:result_cost ()
+  in
+  let attempt : Backend_types.task_attempt =
+    {
+      number = 1;
+      kind = Initial_attempt;
+      result;
+      attempt_elapsed = 1.0;
+      schema_validation_error = None;
+      delivery =
+        {
+          attachment_references = [];
+          attachment_delivery = Upload_attachments;
+          web_access_policy = Web_disabled;
+        };
+    }
+  in
+  let execution =
+    Backend_types.make_task_execution ~final_result:result ~attempts:[attempt]
+      ~cleanup_status:Cleanup_succeeded ()
+  in
+  let requirements =
+    Media_web_schema_e2e_support.protocol_requirements_for_backend "copilot-cli"
+  in
+  let tool seq id name payload =
+    event seq 1
+      (payload
+         (Task_event.{id = Some id; name}))
+  in
+  let started seq id name = tool seq id name (fun tool -> Tool_started tool) in
+  let finished seq id name =
+    event seq 1 (Tool_finished {id = Some id; name = Some name})
+  in
+  let trace tools =
+    [event 0 0 Task_started; event 1 1 (Attempt_started Initial_attempt)]
+    @ tools
+    @ [
+        event 20 1 (Session_id "session");
+        event 21 1 (Agent_text_delta text);
+        event 22 1 (Token_usage result_cost);
+        event 23 1 (Attempt_finished Attempt_succeeded);
+        event 24 1 (Terminal Succeeded);
+      ]
+  in
+  let expect_ok events =
+    match
+      Media_web_schema_e2e_support.validate_event_trace ~requirements execution
+        events
+    with
+    | Ok () -> ()
+    | Error _ -> Alcotest.fail "two exact view lifecycles were rejected"
+  in
+  let expect_rejected label events =
+    match
+      Media_web_schema_e2e_support.validate_event_trace ~requirements execution
+        events
+    with
+    | Error _ -> ()
+    | Ok () ->
+        Alcotest.fail
+          (label ^ " satisfied the historical Copilot observation contract")
+  in
+  expect_ok
+    (trace
+       [
+         started 2 "view-1" "view";
+         finished 3 "view-1" "view";
+         started 4 "view-2" "view";
+         finished 5 "view-2" "view";
+       ]) ;
+  expect_rejected "one view"
+    (trace [started 2 "view-1" "view"; finished 3 "view-1" "view"]) ;
+  expect_rejected "grep and glob"
+    (trace
+       [
+         started 2 "grep-1" "grep";
+         finished 3 "grep-1" "grep";
+         started 4 "glob-1" "glob";
+         finished 5 "glob-1" "glob";
+       ]) ;
+  expect_rejected "unexpected extra tool"
+    (trace
+       [
+         started 2 "view-1" "view";
+         finished 3 "view-1" "view";
+         started 4 "view-2" "view";
+         finished 5 "view-2" "view";
+         started 6 "glob-1" "glob";
+         finished 7 "glob-1" "glob";
+       ])
 
 let test_tool_events_respect_attempt_boundaries () =
   let text = {|{"result":"ok"}|} in
@@ -849,8 +1102,9 @@ let test_multi_attempt_tool_trace () =
   Alcotest.(check bool)
     "generic two-attempt helper accepts contiguous attempts"
     true
-    (Media_web_schema_e2e_support.valid_attempts ~native:false ~attachments:[]
-       execution) ;
+    (Media_web_schema_e2e_support.valid_attempts
+       ~schema_execution:Media_web_schema_e2e_support.Validate_and_retry
+       ~attachments:[] execution) ;
   let tool_started seq attempt =
     event seq attempt
       (Task_event.Tool_started {id = Some "reused-id"; name = "read"})
@@ -888,6 +1142,7 @@ let test_multi_attempt_tool_trace () =
 let test_e2e_binary_is_credential_gated_and_sequential () =
   let dune = read_test_file "dune" in
   let source = read_test_file "test_media_web_schema_backends.ml" in
+  let support_source = read_test_file "media_web_schema_e2e_support.ml" in
   List.iter
     (fun needle ->
       Alcotest.(check bool)
@@ -951,6 +1206,13 @@ let test_e2e_binary_is_credential_gated_and_sequential () =
     true
     (contains source "Task_runtime.start_task") ;
   Alcotest.(check bool)
+    "live proof uses the shared media task planner" true
+    (contains source "Media_web_schema_e2e_support.make_media_task_plan") ;
+  Alcotest.(check bool)
+    "shared schema inclusion uses evidence and compatible draft" true
+    (contains support_source
+       "E2e_harness_config.valid_native_schema_descriptor descriptor") ;
+  Alcotest.(check bool)
     "live proof never invokes the low-level backend"
     false
     (contains source "Agentic_backend.run_task") ;
@@ -984,11 +1246,18 @@ let () =
             test_fixture_schema_and_semantic_marker;
           Alcotest.test_case "generated bytes pass central preflight" `Quick
             test_generated_fixtures_pass_central_input_validation;
+          Alcotest.test_case
+            "schema-less non-native media executes exactly once" `Quick
+            test_schema_less_non_native_media_plan_is_one_call;
         ] );
       ( "events",
         [
           Alcotest.test_case "terminal and attempts are consistent" `Quick
             test_event_trace_contract;
+          Alcotest.test_case
+            "historical Copilot observation requires exactly two view lifecycles"
+            `Quick
+            test_historical_copilot_observation_requires_two_view_lifecycles;
           Alcotest.test_case "tools stay within attempt boundaries" `Quick
             test_tool_events_respect_attempt_boundaries;
           Alcotest.test_case "multi-attempt tools remain isolated" `Quick

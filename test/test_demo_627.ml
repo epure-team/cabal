@@ -21,8 +21,8 @@
       {li [CABAL_E2E_TESTS=1] — required to build and run this binary at all.}
       {li [CABAL_E2E_BACKEND] — optional backend id filter
           (e.g. ["claude-code"], ["codex"], ["opencode"],
-          ["gemini-cli"], ["copilot-cli"]). If unset, all default E2E
-          backends are exercised.}
+          ["gemini-cli"]). If unset, all default E2E backends are exercised.
+          Quarantined Copilot CLI 1.0.54 is not an executable E2E target.}
       {li [CABAL_E2E_MODEL_<BACKEND>] — optional per-backend model override,
           where backend ids are uppercased and non-alphanumerics become
           underscores (for example [CABAL_E2E_MODEL_CLAUDE_CODE]). Defaults

@@ -208,6 +208,8 @@ let write_outcome_reason = function
       ".codex/config.toml was backed up and written"
   | Some (Backend_config_writer.Invalid_managed_namespace _) ->
       "managed namespace was invalid"
+  | Some (Backend_config_writer.Unsafe_project_path _) ->
+      "project path was unsafe"
 
 let mcp_config_error_if_needed setup mcp_servers =
   match mcp_servers with
