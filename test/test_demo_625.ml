@@ -13,27 +13,14 @@
              → Ok result, exactly 1 backend call (validate-and-retry NOT
              executed; no schema validation on native path).
     - AC-N2: native backend + json_schema = Some + Failed result
-             → Error immediately with "native" in message, exactly 1 call
-             (fail-fast; no fallback to validate-and-retry).
+             → preserves Failed status, exactly 1 call (no fallback to
+             validate-and-retry).
     - AC-N3: native backend + json_schema = None
              → Ok result, exactly 1 backend call (pass-through unchanged).
     - AC-N4: native backend + json_schema = Some + Success result
              → Ok result, session_id propagated correctly. *)
 
 open Cabal
-
-(** Substring search helper. *)
-let contains s needle =
-  let sl = String.length s and nl = String.length needle in
-  if nl = 0 then true
-  else if sl < nl then false
-  else
-    let rec loop i =
-      if i + nl > sl then false
-      else if String.sub s i nl = needle then true
-      else loop (i + 1)
-    in
-    loop 0
 
 (** Build a minimal inline mock backend that declares
     [native_json_schema_output = true].
@@ -129,10 +116,10 @@ let test_native_no_validation_no_retry () =
     !call_count ;
   Alcotest.(check bool) "AC-N1: result is Ok" true (Result.is_ok result)
 
-(** {1 AC-N2 — native rejection is returned as Error immediately}
+(** {1 AC-N2 — native rejection preserves its backend status}
 
-    When the native backend returns [Failed], the enforcer must return
-    [Error] containing the word "native" and must NOT make a second call. *)
+    When the native backend returns [Failed], the enforcer must return that
+    status unchanged and must NOT make a second call. *)
 
 let test_native_rejection_fail_fast () =
   let backend, call_count, _ =
@@ -153,12 +140,17 @@ let test_native_rejection_fail_fast () =
     1
     !call_count ;
   match result with
-  | Ok _ -> Alcotest.fail "AC-N2: expected Error (native rejection) but got Ok"
   | Error msg ->
-      Alcotest.(check bool)
-        "AC-N2: error message identifies native rejection"
-        true
-        (contains msg "native")
+      Alcotest.failf "AC-N2: expected backend result, got Error: %s" msg
+  | Ok task_result ->
+      Alcotest.(check string)
+        "AC-N2: Failed status preserved"
+        "Failed"
+        (match task_result.Backend_types.status with
+        | Backend_types.Failed _ -> "Failed"
+        | Backend_types.Success -> "Success"
+        | Backend_types.Timeout -> "Timeout"
+        | Backend_types.Cancelled -> "Cancelled")
 
 (** {1 AC-N3 — json_schema = None is still a plain pass-through}
 
@@ -246,10 +238,10 @@ let () =
             `Quick
             test_native_no_validation_no_retry;
         ] );
-      ( "AC-N2 native rejection — fail-fast, no fallback",
+      ( "AC-N2 native rejection — preserves status, no fallback",
         [
           Alcotest.test_case
-            "Failed result returns Error with native message, 1 call"
+            "Failed result is returned unchanged after 1 call"
             `Quick
             test_native_rejection_fail_fast;
         ] );

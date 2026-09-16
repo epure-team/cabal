@@ -187,7 +187,7 @@ let test_native_schema_path_is_single_call () =
         (Some object_schema)
         (List.hd (List.rev !captured_schemas))
 
-let test_native_schema_rejection_returns_error () =
+let test_native_backend_failure_returns_error () =
   let backend, call_count, _, _ =
     make_mock
       ~supports_resume:false
@@ -211,24 +211,22 @@ let test_native_schema_rejection_returns_error () =
       ~json_schema:(Some object_schema)
       ~resume_session_id:None
   with
-  | Ok _ -> Alcotest.fail "expected Error on native schema rejection"
+  | Ok _ -> Alcotest.fail "expected Error on native backend failure"
   | Error msg ->
-      Alcotest.(check int) "native rejection is single-call" 1 !call_count ;
-      (* The message must NOT claim the schema was at fault: this path is
-         reached for any non-zero exit while a schema was in force. Asserting
-         the cause sends a diagnosis after the schema when the real failure was
-         a rate limit or a dead socket. *)
+      Alcotest.(check int) "native failure is single-call" 1 !call_count ;
+      (* A schema-enabled native backend can fail for operational reasons such
+         as a rate limit.  The completer must report the backend result rather
+         than attributing that failure to the schema. *)
       Alcotest.(check bool)
         "error does not assert the schema was rejected"
         false
         (contains msg "schema rejection") ;
       Alcotest.(check bool)
-        "error says a call failed with a schema in force"
+        "error reports the backend failure"
         true
-        (contains msg "failed with a schema in force") ;
-      (* The backend's stderr is the only part of this that says what went
-         wrong. It was on the result and unused; a failure whose cause is
-         unreadable costs more than one whose cause is ugly. *)
+        (contains msg "Process exited with code 1") ;
+      (* Backend stderr carries operational detail and must stay visible to
+         the caller. *)
       Alcotest.(check bool)
         "backend stderr reaches the caller"
         true
@@ -253,8 +251,8 @@ let () =
             `Quick
             test_native_schema_path_is_single_call;
           Alcotest.test_case
-            "native schema rejection returns error"
+            "native backend failure returns error"
             `Quick
-            test_native_schema_rejection_returns_error;
+            test_native_backend_failure_returns_error;
         ] );
     ]

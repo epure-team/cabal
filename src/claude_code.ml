@@ -379,8 +379,9 @@ let build_command ?(streaming = false) ?(project_config_path = None)
     | None -> []
   in
   (* Native JSON Schema constraint — passed when spec.json_schema is set.
-     The CLI validates the schema at invocation; unsupported keywords cause a
-     non-zero exit which the enforcer surfaces as native rejection (D-5). *)
+     The CLI validates the schema at invocation; unsupported keywords can
+     cause a non-zero exit.  The enforcer preserves that backend status for
+     callers to classify, without a fallback call (D-5). *)
   let schema_args =
     match spec.json_schema with
     | Some s ->

@@ -15,11 +15,11 @@
     {b Native path} (Story #625, when [backend] declares
     [native_json_schema_output = true]): the schema is already present in
     [spec.json_schema]; the backend's own [run_task] wires it to the CLI
-    flag.  The validate-and-retry loop is NOT executed.  Any [Failed] result
-    is returned as [Error] immediately; no fallback is performed (D-5).  The
-    error does not claim the schema was at fault — this path is reached for
-    any non-zero exit while a schema was in force — and it carries the
-    backend's own stderr, bounded, so the caller can tell which it was.
+    flag.  The validate-and-retry loop is NOT executed.  The original backend
+    result is returned in [Ok], including [Failed], [Timeout], and
+    [Cancelled]; callers must inspect its status.  No fallback is performed
+    (D-5), because a non-success result can be a schema rejection but can
+    equally be a rate limit, network failure, bad flag, or killed process.
 
     {b Validate-and-retry path} (Story #624, when [backend] declares
     [native_json_schema_output = false]): the enforcer validates
@@ -64,9 +64,8 @@ val fresh_retry_template : string
       [Ok result] identical to calling [Agentic_backend.run_task] directly.
     - When [spec.json_schema = Some _] and backend declares
       [native_json_schema_output = true] (native path): exactly one backend
-      call; returns [Ok result] on [Success]/[Timeout]/[Cancelled], or
-      [Error "native-backend call failed with a schema in force: <msg>"]
-      (plus the backend's bounded stderr) on [Failed] — no retry.
+      call; returns [Ok result] with the backend's original status, including
+      [Failed], [Timeout], and [Cancelled] — no retry.
     - When [spec.json_schema = Some _] and backend declares
       [native_json_schema_output = false] (validate-and-retry path):
       exactly one call when the first response is valid; otherwise at most one
