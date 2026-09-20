@@ -109,13 +109,25 @@ type settings_json = {
    run with no human present to notice or refuse.
 
    Patterns use Claude Code's `Bash(<prefix>)` deny syntax, which matches on
-   a command-string prefix.  This is inherently imperfect for arbitrary SQL
-   passed as a `sqlite3` argument or heredoc (e.g. `sqlite3 db "DROP TABLE
-   x"` is one shell token and not reliably prefix-matchable the way a bare
-   `DROP TABLE` invocation is) — the sqlite3 patterns below cover the
-   common direct-invocation and `-cmd`/`-A` argument shapes but do not
-   guarantee blocking every way DROP/TRUNCATE/DELETE text could reach
-   sqlite3.  Treat this list as defense in depth, not a complete sandbox. *)
+   the whole command text, with a bare trailing `*` standing in for any
+   text (verified: `:*` is a PowerShell-only convention, not required here).
+   This is inherently imperfect against invocation shapes Claude Code's own
+   permissions docs document as bypasses of ANY `Bash(...)` prefix rule —
+   full/absolute-path invocation (`/bin/rm -rf ...`), shell-wrapping
+   (`bash -c '...'`, `sh -c "..."`), or `git`/other-tool flag/subcommand
+   reordering (`git -C . push --force ...`) all sail past every pattern
+   below, not just the sqlite3 ones.  For sqlite3 specifically: a real
+   `sqlite3 db "DROP TABLE x"` invocation quotes the SQL statement as one
+   shell token, so the pattern must not require a literal space before the
+   keyword (`sqlite3 *DROP TABLE*`, not `sqlite3 * DROP TABLE*` — the
+   latter only matches an already-invalid, unquoted sqlite3 invocation and
+   blocks nothing real). Writing SQL to a file first and running
+   `sqlite3 db < script.sql` also bypasses every sqlite3 pattern here, since
+   no destructive text appears in the Bash command itself. `find -exec`/
+   `-delete` and mixed-case SQL keywords are likewise unaddressed. Treat
+   this list as defense in depth against the naive, unwrapped form of each
+   command — which is what an LLM actually types the overwhelming majority
+   of the time — never as a complete sandbox. *)
 let default_deny_patterns =
   [
     (* Destructive file operations *)
@@ -131,16 +143,19 @@ let default_deny_patterns =
     "Bash(git clean -fd*)";
     (* Force-push via refspec syntax (e.g. `git push origin +branch`) *)
     "Bash(git push * +*)";
-    (* Destructive SQL via the sqlite3 CLI — prefix/substring coverage only;
+    (* Destructive SQL via the sqlite3 CLI — no literal space before the
+       keyword: a real invocation quotes the SQL statement as one shell
+       token (`sqlite3 db "DROP TABLE x"`), so the keyword is preceded by a
+       quote character, not whitespace. Prefix/substring coverage only —
        see the module-level comment above for the limitation. *)
-    "Bash(sqlite3 * DROP TABLE*)";
-    "Bash(sqlite3 * drop table*)";
-    "Bash(sqlite3 * DROP DATABASE*)";
-    "Bash(sqlite3 * drop database*)";
-    "Bash(sqlite3 * TRUNCATE*)";
-    "Bash(sqlite3 * truncate*)";
-    "Bash(sqlite3 * DELETE FROM*)";
-    "Bash(sqlite3 * delete from*)";
+    "Bash(sqlite3 *DROP TABLE*)";
+    "Bash(sqlite3 *drop table*)";
+    "Bash(sqlite3 *DROP DATABASE*)";
+    "Bash(sqlite3 *drop database*)";
+    "Bash(sqlite3 *TRUNCATE*)";
+    "Bash(sqlite3 *truncate*)";
+    "Bash(sqlite3 *DELETE FROM*)";
+    "Bash(sqlite3 *delete from*)";
   ]
 
 let settings_body lsp_servers =

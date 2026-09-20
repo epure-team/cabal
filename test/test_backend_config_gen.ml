@@ -216,12 +216,31 @@ let test_claude_code_deny_list_blocks_destructive_ops () =
       true
       (contains_str content needle)
   in
-  assert_contains "rm -rf" "rm -rf" ;
-  assert_contains "git push --force" "git push --force" ;
-  assert_contains "git reset --hard" "git reset --hard" ;
-  assert_contains "git clean -f" "git clean -f" ;
-  assert_contains "sqlite3 DROP TABLE" "DROP TABLE" ;
-  assert_contains "sqlite3 TRUNCATE" "TRUNCATE" ;
+  assert_contains "rm -rf" "Bash(rm -rf*)" ;
+  assert_contains "git push --force" "Bash(git push --force*)" ;
+  assert_contains "git reset --hard" "Bash(git reset --hard*)" ;
+  assert_contains "git clean -f" "Bash(git clean -f*)" ;
+  (* No literal space before the keyword: a real invocation quotes the SQL
+     statement as one shell token (`sqlite3 db "DROP TABLE x"`), so the
+     keyword is preceded by a quote character, not whitespace. A pattern
+     with a space here (`sqlite3 * DROP TABLE*`) matches nothing a real
+     caller would ever type -- this is the exact regression this assertion
+     exists to catch. *)
+  assert_contains
+    "sqlite3 DROP TABLE (no space before keyword)"
+    "Bash(sqlite3 *DROP TABLE*)" ;
+  assert_contains
+    "sqlite3 TRUNCATE (no space before keyword)"
+    "Bash(sqlite3 *TRUNCATE*)" ;
+  Alcotest.(check bool)
+    "no sqlite3 pattern has a space before the keyword"
+    false
+    (contains_str content "sqlite3 * DROP"
+    || contains_str content "sqlite3 * drop"
+    || contains_str content "sqlite3 * TRUNCATE"
+    || contains_str content "sqlite3 * truncate"
+    || contains_str content "sqlite3 * DELETE"
+    || contains_str content "sqlite3 * delete") ;
   Alcotest.(check bool)
     "claude-code settings.json deny list is not empty"
     false
