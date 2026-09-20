@@ -99,6 +99,50 @@ type settings_json = {
 }
 [@@deriving yojson]
 
+(* Épure invokes claude-code with [--dangerously-skip-permissions], which
+   bypasses every interactive permission prompt.  The [permissions.deny] list
+   in the generated settings.json is therefore the ONLY safety layer left
+   between an unattended builder/diagnostician attempt and the target
+   project's working tree or database — see
+   `.claude/rules/escalation.md`'s "Deny-rules are the primary safety layer"
+   guidance, which applies with extra force here because these subprocesses
+   run with no human present to notice or refuse.
+
+   Patterns use Claude Code's `Bash(<prefix>)` deny syntax, which matches on
+   a command-string prefix.  This is inherently imperfect for arbitrary SQL
+   passed as a `sqlite3` argument or heredoc (e.g. `sqlite3 db "DROP TABLE
+   x"` is one shell token and not reliably prefix-matchable the way a bare
+   `DROP TABLE` invocation is) — the sqlite3 patterns below cover the
+   common direct-invocation and `-cmd`/`-A` argument shapes but do not
+   guarantee blocking every way DROP/TRUNCATE/DELETE text could reach
+   sqlite3.  Treat this list as defense in depth, not a complete sandbox. *)
+let default_deny_patterns =
+  [
+    (* Destructive file operations *)
+    "Bash(rm -rf*)";
+    "Bash(rm -fr*)";
+    "Bash(rm -Rf*)";
+    (* Destructive git operations *)
+    "Bash(git push --force*)";
+    "Bash(git push -f*)";
+    "Bash(git push --force-with-lease*)";
+    "Bash(git reset --hard*)";
+    "Bash(git clean -f*)";
+    "Bash(git clean -fd*)";
+    (* Force-push via refspec syntax (e.g. `git push origin +branch`) *)
+    "Bash(git push * +*)";
+    (* Destructive SQL via the sqlite3 CLI — prefix/substring coverage only;
+       see the module-level comment above for the limitation. *)
+    "Bash(sqlite3 * DROP TABLE*)";
+    "Bash(sqlite3 * drop table*)";
+    "Bash(sqlite3 * DROP DATABASE*)";
+    "Bash(sqlite3 * drop database*)";
+    "Bash(sqlite3 * TRUNCATE*)";
+    "Bash(sqlite3 * truncate*)";
+    "Bash(sqlite3 * DELETE FROM*)";
+    "Bash(sqlite3 * delete from*)";
+  ]
+
 let settings_body lsp_servers =
   let lsp =
     match lsp_servers with
@@ -112,7 +156,8 @@ let settings_body lsp_servers =
   in
   let json =
     match
-      settings_json_to_yojson {permissions = {allow = []; deny = []}; lsp}
+      settings_json_to_yojson
+        {permissions = {allow = []; deny = default_deny_patterns}; lsp}
     with
     | `Assoc fields ->
         `Assoc (List.filter (fun (_name, value) -> value <> `Null) fields)

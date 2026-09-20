@@ -201,6 +201,32 @@ let test_claude_code_path_under_epure () =
     true
     (contains_str a.Backend_config_gen.project_relative_path ".cabal/")
 
+(* claude-code runs with --dangerously-skip-permissions, so the generated
+   settings.json's [permissions.deny] list is the only safety layer left
+   against a destructive builder/diagnostician attempt (rm -rf, force-push,
+   DROP TABLE via sqlite3, ...). Regression coverage for the empty-deny-list
+   defect: the list must be non-empty and must actually name the destructive
+   operations documented in .claude/rules/escalation.md. *)
+let test_claude_code_deny_list_blocks_destructive_ops () =
+  let a = get_artifact "claude-code" in
+  let content = a.Backend_config_gen.content in
+  let assert_contains label needle =
+    Alcotest.(check bool)
+      ("claude-code settings.json denies " ^ label)
+      true
+      (contains_str content needle)
+  in
+  assert_contains "rm -rf" "rm -rf" ;
+  assert_contains "git push --force" "git push --force" ;
+  assert_contains "git reset --hard" "git reset --hard" ;
+  assert_contains "git clean -f" "git clean -f" ;
+  assert_contains "sqlite3 DROP TABLE" "DROP TABLE" ;
+  assert_contains "sqlite3 TRUNCATE" "TRUNCATE" ;
+  Alcotest.(check bool)
+    "claude-code settings.json deny list is not empty"
+    false
+    (contains_str content "\"deny\": []")
+
 (** {1 AC5/AC6 — Config_fixed_path → Backend_project ownership} *)
 
 let test_backend_project_ownership backend_id () =
@@ -1946,6 +1972,10 @@ let () =
             "claude-code: path under .cabal/"
             `Quick
             test_claude_code_path_under_epure;
+          Alcotest.test_case
+            "claude-code: deny list blocks destructive ops"
+            `Quick
+            test_claude_code_deny_list_blocks_destructive_ops;
           Alcotest.test_case
             "codex: Backend_project"
             `Quick
