@@ -13,8 +13,8 @@
 
     {b Configuration:}
     Codex CLI is expected to be installed and accessible in the PATH.
-    The backend uses [codex exec --json --full-auto] for non-interactive
-    sandboxed execution.
+    The backend uses [codex exec --json -s workspace-write] (or
+    [-s read-only]) for non-interactive sandboxed execution.
 
     {b MCP Integration:}
     Codex 0.122.0 supports MCP via [.codex/config.toml].  Épure generates
@@ -93,7 +93,8 @@ val parse_stdout_text : string -> string
 
 (** [build_command ~mcp_config_path spec] constructs the Codex CLI command and
     stdin content for a task invocation.  When [spec.read_only] is [true],
-    passes [-s read-only] (OS-level sandbox); otherwise [--full-auto].
+    passes [-s read-only] (OS-level sandbox); otherwise [-s workspace-write]
+    ([--full-auto] is rejected by codex-cli 0.160.0).
     Exported for testing.
 
     {pre}
@@ -101,7 +102,8 @@ val parse_stdout_text : string -> string
 
     {post}
     Returns [(cmd_list, stdin_content)].  When [spec.read_only = true] the
-    command includes [-s read-only]; when [false] it includes [--full-auto].
+    command includes [-s read-only]; when [false] it includes
+    [-s workspace-write].
 
     {violators}
     (none)
