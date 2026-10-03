@@ -377,10 +377,13 @@ let build_command ~mcp_config_path:_ (spec : task_spec) =
   (* Codex reads prompt from stdin with - argument *)
   let model_flags = match spec.model with Some m -> ["-m"; m] | None -> [] in
   (* Read-only agents (validators) get --sandbox read-only so they cannot
-     execute shell commands or write files.  Builders keep --full-auto
-     (workspace-write sandbox). *)
+     execute shell commands or write files.  Builders get the
+     workspace-write sandbox, spelled [-s workspace-write]: the older
+     [--full-auto] alias is rejected by codex-cli 0.160.0 ("unexpected
+     argument '--full-auto'", exit 2), while [-s] is accepted by every
+     version since the 0.122.0 baseline. *)
   let sandbox_flags =
-    if spec.read_only then ["-s"; "read-only"] else ["--full-auto"]
+    if spec.read_only then ["-s"; "read-only"] else ["-s"; "workspace-write"]
   in
   (* Native JSON Schema constraint — written to a temp file and passed via
      --output-schema <path>.  The temp file is cleaned up on process exit.

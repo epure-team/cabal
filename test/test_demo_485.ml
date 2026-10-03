@@ -135,17 +135,34 @@ let test_ac2_codex_read_only_sandbox_flag () =
     true
     (List.mem "read-only" args)
 
-(* AC2: Codex with read_only=false uses --full-auto (builder/mutable mode). *)
+(* [-s X] as an adjacent pair, so "read-only" elsewhere in argv cannot
+   satisfy the check. *)
+let rec sandbox_mode = function
+  | "-s" :: mode :: _ -> Some mode
+  | _ :: rest -> sandbox_mode rest
+  | [] -> None
+
+(* AC2: Codex with read_only=false gets the workspace-write sandbox (builder
+   mode). Spelled [-s workspace-write]: codex-cli 0.160.0 rejects the old
+   [--full-auto] alias outright. *)
 let test_ac2_codex_read_write_full_auto () =
   let args, _ = Codex_cli.build_command ~mcp_config_path:None (spec_rw ()) in
+  Alcotest.(check (option string))
+    "AC2: workspace-write sandbox for codex read-write"
+    (Some "workspace-write")
+    (sandbox_mode args) ;
   Alcotest.(check bool)
-    "AC2: --full-auto present for codex read-write"
-    true
+    "AC2: --full-auto never emitted (rejected by codex-cli 0.160.0)"
+    false
     (List.mem "--full-auto" args)
 
-(* AC2: Codex read-only does not include --full-auto. *)
+(* AC2: Codex read-only does not get the writable sandbox. *)
 let test_ac2_codex_read_only_no_full_auto () =
   let args, _ = Codex_cli.build_command ~mcp_config_path:None (spec_ro ()) in
+  Alcotest.(check (option string))
+    "AC2: read-only sandbox in codex read-only"
+    (Some "read-only")
+    (sandbox_mode args) ;
   Alcotest.(check bool)
     "AC2: --full-auto absent in codex read-only"
     false
@@ -322,11 +339,11 @@ let () =
             `Quick
             test_ac2_codex_read_only_sandbox_flag;
           Alcotest.test_case
-            "--full-auto present for builder"
+            "workspace-write sandbox for builder"
             `Quick
             test_ac2_codex_read_write_full_auto;
           Alcotest.test_case
-            "--full-auto absent in read-only mode"
+            "read-only sandbox, no --full-auto, in read-only mode"
             `Quick
             test_ac2_codex_read_only_no_full_auto;
         ] );

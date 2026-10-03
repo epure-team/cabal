@@ -57,8 +57,8 @@ val complete_with_workspace :
     every call whose status is not [Success] (non-zero exit, signal,
     timeout, cancellation), before the completer returns [Error].  It lets
     a caller classify a provider failure from the structured [exit_code]
-    and [status] rather than from the flattened error string.  Defaults to
-    a no-op.
+    and [status] rather than from the flattened error string.  It must not
+    raise: an exception escapes the completer.  Defaults to a no-op.
 
     {pre}
     The switch [sw] must be active. [backend] must be available.
