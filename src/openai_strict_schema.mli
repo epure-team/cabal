@@ -31,7 +31,17 @@
     - only allowlisted keywords appear ([oneOf], [allOf], [not], [const],
       [format], [$ref], [$defs], [patternProperties], [if]/[then]/[else], …
       are all outside it);
-    - nesting depth stays within {!max_depth}. *)
+    - a type-specific keyword ([properties], [items], [maxLength],
+      [minimum], …) appears only on a node whose [type] admits it, and
+      [$schema] only at the root — otherwise it would escape inspection;
+    - nesting depth (object properties, array items and [anyOf] branches,
+      leaves included) stays within {!max_depth}.
+
+    The checker is necessarily an approximation of the provider's rules:
+    its tests can only show it rejects known-bad shapes.  Whether it ever
+    accepts a schema the API rejects is covered by the live smoke
+    ([EPURE_REAL_BACKEND_SMOKE=1], [test_real_backend_smoke]), which should
+    be re-run on codex version bumps. *)
 
 (** Maximum nesting depth of object/array schemas accepted (OpenAI documents
     a limit of 10 levels). *)

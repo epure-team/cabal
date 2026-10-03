@@ -93,6 +93,41 @@ let check_required_covers path props fields =
       if keys = [] then Ok ()
       else fail path "object without required listing every property"
 
+(* Type-specific keywords are only inspected when the node's type admits
+   them (an object's [properties], an array's [items], ...).  A keyword on a
+   node whose type does not admit it would escape every recursive check, so
+   it is rejected outright — that keeps the check fail-closed. *)
+let keyword_types =
+  [
+    ("properties", ["object"]);
+    ("required", ["object"]);
+    ("additionalProperties", ["object"]);
+    ("items", ["array"]);
+    ("minItems", ["array"]);
+    ("maxItems", ["array"]);
+    ("minLength", ["string"]);
+    ("maxLength", ["string"]);
+    ("pattern", ["string"]);
+    ("minimum", ["number"; "integer"]);
+    ("maximum", ["number"; "integer"]);
+    ("exclusiveMinimum", ["number"; "integer"]);
+    ("exclusiveMaximum", ["number"; "integer"]);
+    ("multipleOf", ["number"; "integer"]);
+  ]
+
+let check_keyword_types path ~is_root types fields =
+  iter_result
+    (fun (k, _) ->
+      if String.equal k "$schema" && not is_root then
+        fail path "$schema is only accepted at the root"
+      else
+        match List.assoc_opt k keyword_types with
+        | Some admitted
+          when not (List.exists (fun t -> List.mem t types) admitted) ->
+            fail path "keyword %S on a node whose type does not admit it" k
+        | Some _ | None -> Ok ())
+    fields
+
 let rec check_node ~depth path (node : Yojson.Safe.t) =
   if depth > max_depth then fail path "nesting deeper than %d" max_depth
   else
@@ -106,6 +141,9 @@ let rec check_node ~depth path (node : Yojson.Safe.t) =
               if List.mem t known_types then Ok ()
               else fail path "unknown type %S" t)
             types
+        in
+        let* () =
+          check_keyword_types path ~is_root:(String.equal path "$") types fields
         in
         let any_of = List.assoc_opt "anyOf" fields in
         let* () =
@@ -126,7 +164,7 @@ and check_any_of ~depth path = function
   | Some (`List branches) ->
       List.mapi (fun i b -> (i, b)) branches
       |> iter_result (fun (i, b) ->
-          check_node ~depth (Printf.sprintf "%s.anyOf[%d]" path i) b)
+          check_node ~depth:(depth + 1) (Printf.sprintf "%s.anyOf[%d]" path i) b)
   | Some _ -> fail path "anyOf is not an array"
 
 and check_object ~depth path fields =

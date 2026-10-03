@@ -183,10 +183,65 @@ let test_rejects_untyped_and_non_object_root () =
     ~mentions:"items"
     (obj [("a", `Assoc [("type", `String "array")])])
 
+let test_rejects_keywords_on_mismatched_types () =
+  (* Before the keyword/type rule these escaped inspection entirely: the
+     nested free-form object and oneOf were never visited. *)
+  check_rejects
+    "properties on an anyOf-only node"
+    ~mentions:"properties"
+    (obj
+       [
+         ( "a",
+           `Assoc
+             [
+               ("anyOf", `List [str]);
+               ( "properties",
+                 `Assoc [("x", `Assoc [("type", `String "object")])] );
+             ] );
+       ]) ;
+  check_rejects
+    "items on a string"
+    ~mentions:"items"
+    (obj
+       [
+         ( "a",
+           `Assoc
+             [
+               ("type", `String "string");
+               ("items", `Assoc [("oneOf", `List [str])]);
+             ] );
+       ]) ;
+  check_rejects
+    "maxLength on an integer"
+    ~mentions:"maxLength"
+    (obj [("a", `Assoc [("type", `String "integer"); ("maxLength", `Int 3)])]) ;
+  check_rejects
+    "$schema below the root"
+    ~mentions:"$schema"
+    (obj
+       [
+         ( "a",
+           `Assoc
+             [
+               ( "$schema",
+                 `String "https://json-schema.org/draft/2020-12/schema" );
+               ("type", `String "string");
+             ] );
+       ])
+
+let test_any_of_counts_toward_depth () =
+  let rec nest n =
+    if n = 0 then str else `Assoc [("anyOf", `List [nest (n - 1)])]
+  in
+  check_rejects
+    "anyOf nesting beyond max"
+    ~mentions:"nesting"
+    (obj [("a", nest (Openai_strict_schema.max_depth + 1))])
+
 let test_rejects_excessive_depth () =
   let rec nest n = if n = 0 then str else obj [("x", nest (n - 1))] in
   Alcotest.(check bool)
-    "depth = max accepted"
+    "leaf at depth max_depth accepted"
     true
     (is_ok
        (Openai_strict_schema.check (nest (Openai_strict_schema.max_depth - 1)))) ;
@@ -365,6 +420,10 @@ let () =
             `Quick,
             test_rejects_untyped_and_non_object_root );
           ("rejects excessive depth", `Quick, test_rejects_excessive_depth);
+          ( "rejects keywords on mismatched types",
+            `Quick,
+            test_rejects_keywords_on_mismatched_types );
+          ("anyOf counts toward depth", `Quick, test_any_of_counts_toward_depth);
         ] );
       ( "codex build_command",
         [

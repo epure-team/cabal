@@ -428,13 +428,13 @@ let build_command ~mcp_config_path:_ (spec : task_spec) =
   (* A schema outside the strict subset gets no flag (it would fail the
      request); the model still receives it in the prompt, and the caller
      (Json_schema_enforcer's validate-and-retry path) validates the answer
-     against the original schema.  The heading matches the enforcer's retry
-     prompts so both attempts present the schema the same way. *)
+     against the original schema.  [Json_schema_prompt.block] is shared with
+     the enforcer's retry prompts so both attempts present it identically. *)
   let full_prompt =
     match spec.json_schema with
     | Some s when not (native_json_schema_accepts s) ->
-        full_prompt ^ "\n\n## Required output schema\n\n"
-        ^ Yojson.Safe.to_string ~std:true s
+        full_prompt ^ "\n\n"
+        ^ Json_schema_prompt.block (Yojson.Safe.to_string ~std:true s)
         ^ "\n\n\
            Respond with a single JSON value conforming exactly to this schema."
     | Some _ | None -> full_prompt

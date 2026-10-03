@@ -37,10 +37,11 @@ let compliance_suffix err =
      schema shown under \"## Required output schema\" above."
 
 let build_resume_prompt ~schema_json ~err =
-  "## Required output schema\n\n" ^ schema_json ^ compliance_suffix err
+  Json_schema_prompt.block schema_json ^ compliance_suffix err
 
 let build_fresh_prompt ~original_prompt ~schema_json ~err =
-  original_prompt ^ "\n\n## Required output schema\n\n" ^ schema_json
+  original_prompt ^ "\n\n"
+  ^ Json_schema_prompt.block schema_json
   ^ compliance_suffix err
 
 let make_resume_retry_spec ~base ~session_id ~schema_json ~err =
@@ -75,10 +76,16 @@ let both_attempts_error ~attempt1 ~attempt2 =
    strict structured outputs, which rejects (HTTP 400, exit 1) any schema
    outside the strict subset; such a schema must take validate-and-retry
    instead of failing every call.  Other native backends accept any schema. *)
+let native_flag_rejection ~backend schema =
+  if String.equal (Agentic_backend.id backend) Codex_cli.id then
+    match Openai_strict_schema.check schema with
+    | Ok () -> None
+    | Error reason -> Some reason
+  else None
+
 let native_path_applies ~backend schema =
   Agentic_backend.native_json_schema_output backend
-  && ((not (String.equal (Agentic_backend.id backend) Codex_cli.id))
-     || Codex_cli.native_json_schema_accepts schema)
+  && Option.is_none (native_flag_rejection ~backend schema)
 
 let run_task ~sw ~env ?on_raw_line ~backend spec =
   match spec.Backend_types.json_schema with
@@ -105,15 +112,15 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
            [native_path_applies]); [spec] keeps [json_schema] so that backend
            can still present the schema in its prompt. *)
         let () =
-          if Agentic_backend.native_json_schema_output backend then
-            match Openai_strict_schema.check schema with
-            | Error reason ->
-                Diagnostics.debug
-                  "[schema] %s: schema outside the native subset (%s); using \
-                   validate-and-retry"
-                  (Agentic_backend.id backend)
-                  reason
-            | Ok () -> ()
+          match native_flag_rejection ~backend schema with
+          | Some reason when Agentic_backend.native_json_schema_output backend
+            ->
+              Diagnostics.debug
+                "[schema] %s: native schema flag cannot carry this schema \
+                 (%s); using validate-and-retry"
+                (Agentic_backend.id backend)
+                reason
+          | Some _ | None -> ()
         in
         (* Validate-and-retry path (Story #624): run the task, validate
            agent_text, and make at most one corrective re-invocation on failure.
