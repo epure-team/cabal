@@ -8,7 +8,20 @@ by the date a change merged to `main`.
 
 ## Unreleased
 
+### Added
+- **`Backend_completer.make` / `make_by_name` take `?on_failure`.** It is
+  called with the raw `Backend_types.task_result` of every call whose status
+  is not `Success`, before the completer returns `Error`, so a caller can
+  classify a provider failure from `exit_code`/`status` instead of the
+  flattened error string. Defaults to a no-op; existing callers are
+  unchanged.
+
 ### Changed
+- **Static Claude model fallbacks moved to the Claude 5 family**
+  (`claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`,
+  `claude-haiku-4-5-20251001`) in `Claude_code`, `Copilot_cli`,
+  `Opencode_cli` and their YAML adapters. These lists only apply when the
+  live models probe is unavailable.
 - **`Claude_code.check_project_config` and `Opencode_cli.check_project_config`
   no longer report `Config_invalid` when the CLI returns no verdict.** A
   non-zero exit, a timeout, or a cancellation previously all became

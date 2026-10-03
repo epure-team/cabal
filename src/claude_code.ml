@@ -16,15 +16,14 @@ let name = "Claude Code"
    https://docs.anthropic.com/en/docs/about-claude/models/overview *)
 let models =
   [
-    "claude-opus-4-7";
-    "claude-sonnet-4-6";
+    "claude-fable-5-1";
+    "claude-opus-5-5";
+    "claude-sonnet-5-5";
     "claude-haiku-4-5-20251001";
-    "claude-opus-4-6";
-    "claude-sonnet-4-5-20250929";
   ]
 
 (* Parse the model id strings out of a GET /v1/models JSON response.
-   Shape: {"data": [{"id": "claude-opus-4-7", ...}, ...], ...} *)
+   Shape: {"data": [{"id": "claude-opus-5-5", ...}, ...], ...} *)
 let parse_anthropic_models_json json_str =
   try
     match Yojson.Safe.from_string json_str with

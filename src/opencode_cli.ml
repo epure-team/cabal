@@ -15,8 +15,9 @@ let name = "OpenCode"
    model slugs documented for `opencode run --model`. *)
 let models =
   [
-    "claude-opus-4-7";
-    "claude-sonnet-4-6";
+    "claude-fable-5-1";
+    "claude-opus-5-5";
+    "claude-sonnet-5-5";
     "claude-haiku-4-5-20251001";
     "gpt-4o";
     "gpt-4o-mini";

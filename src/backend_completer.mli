@@ -53,6 +53,12 @@ val complete_with_workspace :
     @param env Eio environment for process spawning
     @param backend The agentic backend to delegate to
     @param working_dir Target project directory for the backend
+    @param on_failure Called with the raw {!Backend_types.task_result} of
+    every call whose status is not [Success] (non-zero exit, signal,
+    timeout, cancellation), before the completer returns [Error].  It lets
+    a caller classify a provider failure from the structured [exit_code]
+    and [status] rather than from the flattened error string.  Defaults to
+    a no-op.
 
     {pre}
     The switch [sw] must be active. [backend] must be available.
@@ -72,6 +78,7 @@ val make :
   working_dir:string ->
   ?model:string ->
   ?mcp_servers:Backend_types.mcp_server_config list ->
+  ?on_failure:(Backend_types.task_result -> unit) ->
   unit ->
   completer
 
@@ -134,6 +141,7 @@ val run_version_gate :
 
     @param model Optional model to pass to the backend (e.g., "opus", "sonnet")
     @param mcp_servers Optional MCP servers to make available to the backend
+    @param on_failure Forwarded to {!make}.
     Returns [Error msg] if the backend is not found or not available.
 
     {pre}
@@ -154,6 +162,7 @@ val make_by_name :
   working_dir:string ->
   ?model:string ->
   ?mcp_servers:Backend_types.mcp_server_config list ->
+  ?on_failure:(Backend_types.task_result -> unit) ->
   unit ->
   (completer, string) result
 

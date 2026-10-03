@@ -40,19 +40,19 @@ let expected_models =
   [
     ( "claude-code",
       [
-        "claude-opus-4-7";
-        "claude-sonnet-4-6";
+        "claude-fable-5-1";
+        "claude-opus-5-5";
+        "claude-sonnet-5-5";
         "claude-haiku-4-5-20251001";
-        "claude-opus-4-6";
-        "claude-sonnet-4-5-20250929";
       ] );
     ( "codex",
       ["gpt-5"; "gpt-4o"; "gpt-4o-mini"; "o3"; "o3-mini"; "o1"; "o1-mini"] );
     ("gemini-cli", ["gemini-2.5-pro"; "gemini-2.5-flash"; "gemini-2.0-flash"]);
     ( "copilot-cli",
       [
-        "claude-opus-4-7";
-        "claude-sonnet-4-6";
+        "claude-fable-5-1";
+        "claude-opus-5-5";
+        "claude-sonnet-5-5";
         "claude-haiku-4-5-20251001";
         "gpt-4o";
         "gpt-4o-mini";
@@ -60,8 +60,9 @@ let expected_models =
       ] );
     ( "opencode",
       [
-        "claude-opus-4-7";
-        "claude-sonnet-4-6";
+        "claude-fable-5-1";
+        "claude-opus-5-5";
+        "claude-sonnet-5-5";
         "claude-haiku-4-5-20251001";
         "gpt-4o";
         "gpt-4o-mini";
@@ -191,11 +192,10 @@ let test_claude_code_models () =
     ~id:"claude-code"
     ~expected:
       [
-        "claude-opus-4-7";
-        "claude-sonnet-4-6";
+        "claude-fable-5-1";
+        "claude-opus-5-5";
+        "claude-sonnet-5-5";
         "claude-haiku-4-5-20251001";
-        "claude-opus-4-6";
-        "claude-sonnet-4-5-20250929";
       ]
 
 let test_codex_models () =
@@ -214,8 +214,9 @@ let test_copilot_cli_models () =
     ~id:"copilot-cli"
     ~expected:
       [
-        "claude-opus-4-7";
-        "claude-sonnet-4-6";
+        "claude-fable-5-1";
+        "claude-opus-5-5";
+        "claude-sonnet-5-5";
         "claude-haiku-4-5-20251001";
         "gpt-4o";
         "gpt-4o-mini";
@@ -227,8 +228,9 @@ let test_opencode_models () =
     ~id:"opencode"
     ~expected:
       [
-        "claude-opus-4-7";
-        "claude-sonnet-4-6";
+        "claude-fable-5-1";
+        "claude-opus-5-5";
+        "claude-sonnet-5-5";
         "claude-haiku-4-5-20251001";
         "gpt-4o";
         "gpt-4o-mini";
@@ -393,11 +395,10 @@ let test_claude_code_module_models () =
   Alcotest.(check string_list)
     "Claude_code.models"
     [
-      "claude-opus-4-7";
-      "claude-sonnet-4-6";
+      "claude-fable-5-1";
+      "claude-opus-5-5";
+      "claude-sonnet-5-5";
       "claude-haiku-4-5-20251001";
-      "claude-opus-4-6";
-      "claude-sonnet-4-5-20250929";
     ]
     Claude_code.models
 
@@ -417,8 +418,9 @@ let test_copilot_module_models () =
   Alcotest.(check string_list)
     "Copilot_cli.models"
     [
-      "claude-opus-4-7";
-      "claude-sonnet-4-6";
+      "claude-fable-5-1";
+      "claude-opus-5-5";
+      "claude-sonnet-5-5";
       "claude-haiku-4-5-20251001";
       "gpt-4o";
       "gpt-4o-mini";
@@ -430,8 +432,9 @@ let test_opencode_module_models () =
   Alcotest.(check string_list)
     "Opencode_cli.models"
     [
-      "claude-opus-4-7";
-      "claude-sonnet-4-6";
+      "claude-fable-5-1";
+      "claude-opus-5-5";
+      "claude-sonnet-5-5";
       "claude-haiku-4-5-20251001";
       "gpt-4o";
       "gpt-4o-mini";

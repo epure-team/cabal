@@ -25,7 +25,8 @@ let complete_with_workspace completer ~workspace ~system_prompt ~prompt
     ~json_schema
     ~resume_session_id
 
-let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
+let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers
+    ?(on_failure = fun (_ : Backend_types.task_result) -> ()) () =
  fun ~system_prompt ~prompt ~json_schema ~resume_session_id ->
   let full_prompt =
     match resume_session_id with
@@ -64,6 +65,11 @@ let make ~sw ~env ~backend ~working_dir ?model ?mcp_servers () =
           in
           Printf.sprintf "%s\nStderr: %s" msg trimmed
       in
+      (match result.status with
+      | Backend_types.Success -> ()
+      | Backend_types.Failed _ | Backend_types.Timeout | Backend_types.Cancelled
+        ->
+          on_failure result) ;
       match result.status with
       | Backend_types.Success ->
           (* Prefer the adapter-normalised agent text; fall back to raw stdout for
@@ -100,7 +106,8 @@ let run_version_gate ~env ~backend_name =
       | Error _ -> Ok ()
       | Ok output -> run_gate_for_output ~backend_name ~version_output:output)
 
-let make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers () =
+let make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers
+    ?on_failure () =
   match Registry.get backend_name with
   | None ->
       let available = Registry.list_ids () in
@@ -117,7 +124,17 @@ let make_by_name ~sw ~env ~backend_name ~working_dir ?model ?mcp_servers () =
           (Printf.sprintf
              "Backend '%s' is not available (CLI tool not installed?)"
              backend_name)
-      else Ok (make ~sw ~env ~backend ~working_dir ?model ?mcp_servers ())
+      else
+        Ok
+          (make
+             ~sw
+             ~env
+             ~backend
+             ~working_dir
+             ?model
+             ?mcp_servers
+             ?on_failure
+             ())
 
 let check_read_only_routing ?(role_str = "validator") ~backend_name () =
   if not (Backend_registry.supports_read_only backend_name) then
