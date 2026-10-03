@@ -77,6 +77,13 @@ let supports_session_resume = true
 
 let native_json_schema_output = true
 
+(* [--output-schema] is forwarded to OpenAI structured outputs in strict
+   mode, which rejects the whole request (HTTP 400 invalid_json_schema, codex
+   exit 1) for any schema outside the strict subset.  The native constraint is
+   therefore per-schema, not per-backend: see {!Openai_strict_schema}. *)
+let native_json_schema_accepts schema =
+  Result.is_ok (Openai_strict_schema.check schema)
+
 let config_body =
   "# MCP servers are disabled by default — activate only approved\n\
    # registry-backed entries.  Codex uses top-level [mcp_servers.<name>]\n\
@@ -391,14 +398,14 @@ let build_command ~mcp_config_path:_ (spec : task_spec) =
      Feature ships since codex @openai/codex@0.41.0 / rust-v0.41.0 (PR #4079). *)
   let schema_args =
     match spec.json_schema with
-    | Some s ->
+    | Some s when native_json_schema_accepts s ->
         let path = Filename.temp_file "cabal_schema_" ".json" in
         at_exit (fun () -> try Sys.remove path with _ -> ()) ;
         let oc = open_out path in
         output_string oc (Yojson.Safe.to_string ~std:true s) ;
         close_out oc ;
         ["--output-schema"; path]
-    | None -> []
+    | Some _ | None -> []
   in
   let base =
     match spec.resume_session_id with
@@ -417,6 +424,20 @@ let build_command ~mcp_config_path:_ (spec : task_spec) =
         spec.prompt
         spec.instructions
     else spec.prompt
+  in
+  (* A schema outside the strict subset gets no flag (it would fail the
+     request); the model still receives it in the prompt, and the caller
+     (Json_schema_enforcer's validate-and-retry path) validates the answer
+     against the original schema.  The heading matches the enforcer's retry
+     prompts so both attempts present the schema the same way. *)
+  let full_prompt =
+    match spec.json_schema with
+    | Some s when not (native_json_schema_accepts s) ->
+        full_prompt ^ "\n\n## Required output schema\n\n"
+        ^ Yojson.Safe.to_string ~std:true s
+        ^ "\n\n\
+           Respond with a single JSON value conforming exactly to this schema."
+    | Some _ | None -> full_prompt
   in
   (* Return command and stdin content separately to avoid arg list too long *)
   (base, full_prompt)

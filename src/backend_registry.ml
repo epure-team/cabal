@@ -92,6 +92,10 @@ let builtin_backends =
           precedence_confidence = Medium;
           generated_lsp_config = false;
           file_reading = false;
+          (* Native only for the OpenAI strict-mode subset of JSON Schema:
+             any other schema is rejected by the API (invalid_json_schema,
+             exit 1).  Json_schema_enforcer.native_path_applies routes such
+             schemas to validate-and-retry; see Openai_strict_schema. *)
           native_json_schema_output = true;
           native_json_schema_output_evidence =
             Some

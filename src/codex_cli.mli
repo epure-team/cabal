@@ -30,6 +30,26 @@ include Agentic_backend.S
 
 (** {1 Additional Utilities} *)
 
+(** [native_json_schema_accepts schema] is [true] when [schema] can be passed
+    to [codex exec --output-schema] without the API rejecting the request,
+    i.e. when {!Openai_strict_schema.check} accepts it.  [native_json_schema_output]
+    is [true] for this backend, but only schemas for which this holds take
+    the native path; {!Json_schema_enforcer} routes the others through
+    validate-and-retry.
+
+    {pre}
+    (none)
+
+    {post}
+    Pure; equals [Result.is_ok (Openai_strict_schema.check schema)].
+
+    {violators}
+    (none)
+
+    {violates}
+    (none) *)
+val native_json_schema_accepts : Yojson.Safe.t -> bool
+
 (** [project_config_artifacts ~mcp_servers ~lsp_servers] returns the
     Codex project config artifact owned by this backend provider.
 
@@ -103,7 +123,11 @@ val parse_stdout_text : string -> string
     {post}
     Returns [(cmd_list, stdin_content)].  When [spec.read_only = true] the
     command includes [-s read-only]; when [false] it includes
-    [-s workspace-write].
+    [-s workspace-write].  When [spec.json_schema = Some s]: if
+    [native_json_schema_accepts s], [s] is written to a temp file passed via
+    [--output-schema]; otherwise no [--output-schema] flag is emitted and [s]
+    is appended to [stdin_content] under a [## Required output schema]
+    heading, so the model still receives it.
 
     {violators}
     (none)

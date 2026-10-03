@@ -70,11 +70,21 @@ let both_attempts_error ~attempt1 ~attempt2 =
     ("Both schema enforcement attempts failed.\nAttempt 1: " ^ attempt1
    ^ "\nAttempt 2: " ^ attempt2)
 
+(* A backend's [native_json_schema_output] says it HAS a native schema flag,
+   not that every schema fits it.  Codex forwards [--output-schema] to OpenAI
+   strict structured outputs, which rejects (HTTP 400, exit 1) any schema
+   outside the strict subset; such a schema must take validate-and-retry
+   instead of failing every call.  Other native backends accept any schema. *)
+let native_path_applies ~backend schema =
+  Agentic_backend.native_json_schema_output backend
+  && ((not (String.equal (Agentic_backend.id backend) Codex_cli.id))
+     || Codex_cli.native_json_schema_accepts schema)
+
 let run_task ~sw ~env ?on_raw_line ~backend spec =
   match spec.Backend_types.json_schema with
   | None -> Ok (Agentic_backend.run_task ~sw ~env ?on_raw_line backend spec)
   | Some schema -> (
-      if Agentic_backend.native_json_schema_output backend then
+      if native_path_applies ~backend schema then
         (* Native path (Story #625): the schema is in spec.json_schema and the
            backend's run_task wires it to the CLI flag (e.g. --output-schema).
            The validate-and-retry loop is NOT executed on this path.
@@ -90,6 +100,21 @@ let run_task ~sw ~env ?on_raw_line ~backend spec =
         in
         Ok result
       else
+        (* Validate-and-retry path (Story #624).  Also taken by a native
+           backend whose native flag cannot carry this schema (see
+           [native_path_applies]); [spec] keeps [json_schema] so that backend
+           can still present the schema in its prompt. *)
+        let () =
+          if Agentic_backend.native_json_schema_output backend then
+            match Openai_strict_schema.check schema with
+            | Error reason ->
+                Diagnostics.debug
+                  "[schema] %s: schema outside the native subset (%s); using \
+                   validate-and-retry"
+                  (Agentic_backend.id backend)
+                  reason
+            | Ok () -> ()
+        in
         (* Validate-and-retry path (Story #624): run the task, validate
            agent_text, and make at most one corrective re-invocation on failure.
            Hard cap of two backend calls per run_task invocation. *)

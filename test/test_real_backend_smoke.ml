@@ -619,8 +619,161 @@ let test_real_backend case () =
     Eio_posix.run @@ fun env ->
     Eio.Switch.run @@ fun sw -> run_backend ~sw ~env case
 
+(* Strategist-shaped schema: the constructs that made codex exit 1 with
+   invalid_json_schema on 2026-10-03 (free-form object, optional properties,
+   oneOf of const-tagged variants, bounded integer). *)
+let strategist_shaped_schema : Yojson.Safe.t =
+  let variant name extra =
+    `Assoc
+      [
+        ("type", `String "object");
+        ("additionalProperties", `Bool false);
+        ( "required",
+          `List (`String "action" :: List.map (fun (k, _) -> `String k) extra)
+        );
+        ( "properties",
+          `Assoc (("action", `Assoc [("const", `String name)]) :: extra) );
+      ]
+  in
+  `Assoc
+    [
+      ("$schema", `String "https://json-schema.org/draft/2020-12/schema");
+      ("type", `String "object");
+      ("additionalProperties", `Bool false);
+      ( "properties",
+        `Assoc
+          [
+            ("thinking", `Assoc [("type", `String "object")]);
+            ("talk", `Assoc [("type", `String "string")]);
+            ( "actions",
+              `Assoc
+                [
+                  ("type", `String "array");
+                  ( "items",
+                    `Assoc
+                      [
+                        ( "oneOf",
+                          `List
+                            [
+                              variant "pass" [];
+                              variant
+                                "support"
+                                [
+                                  ( "confidence",
+                                    `Assoc
+                                      [
+                                        ("type", `String "integer");
+                                        ("minimum", `Int 0);
+                                        ("maximum", `Int 5);
+                                      ] );
+                                ];
+                            ] );
+                      ] );
+                ] );
+          ] );
+    ]
+
+let strict_schema : Yojson.Safe.t =
+  `Assoc
+    [
+      ("type", `String "object");
+      ("additionalProperties", `Bool false);
+      ("required", `List [`String "talk"]);
+      ("properties", `Assoc [("talk", `Assoc [("type", `String "string")])]);
+    ]
+
+let run_codex_schema ~sw ~env ~model ~dir ~label schema =
+  let spec =
+    Backend_types.make_task_spec
+      ~prompt:
+        "You are a round-table persona. Say hello in `talk`, put one `pass` \
+         action in `actions`. Reply with JSON only."
+      ~working_dir:dir
+      ~timeout:180.0
+      ~expected_outputs:[]
+      ?model
+      ~read_only:true
+      ~json_schema:schema
+      ()
+  in
+  let route =
+    if
+      Json_schema_enforcer.native_path_applies
+        ~backend:(module Codex_cli : Agentic_backend.S)
+        schema
+    then "native --output-schema"
+    else "validate-and-retry"
+  in
+  match
+    Json_schema_enforcer.run_task
+      ~sw
+      ~env
+      ~backend:(module Codex_cli : Agentic_backend.S)
+      spec
+  with
+  | Error e -> Alcotest.failf "codex %s schema (%s): %s" label route e
+  | Ok r -> (
+      match r.Backend_types.status with
+      | Success -> (
+          match
+            Json_schema_validator.validate
+              ~schema
+              ~document:r.Backend_types.agent_text
+          with
+          | Ok () ->
+              Printf.printf
+                "[real-backend-smoke] codex %s schema via %s: exit=%d OK %s\n%!"
+                label
+                route
+                r.exit_code
+                r.agent_text
+          | Error e ->
+              Alcotest.failf "codex %s schema: invalid answer %s" label e)
+      | st ->
+          Alcotest.failf
+            "codex %s schema (%s): status=%s exit=%d stdout=%S"
+            label
+            route
+            (status_text st)
+            r.exit_code
+            r.stdout)
+
+let test_codex_schema_shapes () =
+  if not (smoke_enabled ()) then Alcotest.skip ()
+  else
+    Eio_posix.run @@ fun env ->
+    Eio.Switch.run @@ fun sw ->
+    let case = backend_case Codex_cli.id in
+    match availability_with_timeout ~sw ~env case with
+    | Error reason ->
+        report_skip case reason ;
+        Alcotest.skip ()
+    | Ok () -> (
+        match resolve_model case with
+        | Error msg -> fail_backend case msg
+        | Ok model ->
+            with_tmpdir case (fun dir ->
+                match init_git_repo dir with
+                | Error msg -> fail_backend case msg
+                | Ok () ->
+                    run_codex_schema
+                      ~sw
+                      ~env
+                      ~model
+                      ~dir
+                      ~label:"strict"
+                      strict_schema ;
+                    run_codex_schema
+                      ~sw
+                      ~env
+                      ~model
+                      ~dir
+                      ~label:"strategist-shaped"
+                      strategist_shaped_schema))
+
 let smoke_tests =
   List.map (fun case -> (case.id, `Slow, test_real_backend case)) backends
+  @ [("codex schema shapes", `Slow, test_codex_schema_shapes)]
 
 let () =
   Alcotest.run
