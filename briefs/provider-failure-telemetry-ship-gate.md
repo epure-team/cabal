@@ -9,3 +9,11 @@ Branch: `fix/provider-failure-telemetry`. Contribution repository: `epure-team/c
 The user authorized upstream draft PR creation. The requested stopping point is an open draft; merge and branch deletion are out of scope. Cabal's trusted same-repository PR must follow its automatic Épure mirror and may not merge independently. CWR adoption requires the Cabal helper/correction contribution.
 
 Only owned source, tests and generic review/QA/ship artifacts are staged. Incidental Cabal package regeneration, private staged install and locally installed review tooling are excluded.
+
+## Draft handoff
+
+Draft PR opened and independently read back: https://github.com/epure-team/cabal/pull/38 (OPEN, draft, base main). Reviewed source correction: f7e0992c; initial review artifact head: 333aa83c. CI and automatic Épure mirror were queued at handoff; they are not claimed passing. No merge was attempted.
+
+Actual pre-push commands: canonical Roster check-review-convergence.js with --static --max-rounds 5 --strikes 2 --timeout 120; check-qa-convergence.js with --max-rounds 5; git diff --check. All exited zero. Both build and dune runtest --force had already passed against the scoped source. Canonical main remained 6ffa08ca96079120d06e0b5ce68780979138ef74; ancestry and absence of duplicate branch PRs were checked before push.
+
+Explicit GitHub-URL git push -u succeeded; gh pr create --draft succeeded; gh pr view verified draft state and expected head. Shipping stops at draft under the user's authorization. Metabolism increment skipped: no harness.json. Advisory cost snapshot skipped: ledger dates lack ISO time bounds; no unbounded account-history query made.
