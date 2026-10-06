@@ -302,8 +302,15 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
                   done
                 with End_of_file -> ())
             | None ->
-                (* No streaming, read all at once *)
-                Buffer.add_string stdout_buf (Eio.Buf_read.take_all buf))
+                (* Preserve exact bytes incrementally, including output observed
+                   before a timeout. [take_all] commits nothing until EOF. *)
+                (try
+                   while true do
+                     Eio.Buf_read.ensure buf 1 ;
+                     Buffer.add_string stdout_buf
+                       (Eio.Buf_read.take (Eio.Buf_read.buffered_bytes buf) buf)
+                   done
+                 with End_of_file -> ()))
           (fun () ->
             (* Capture stderr silently - no live streaming to avoid TUI corruption.
                The full stderr is returned in process_result.stderr for callers
@@ -329,6 +336,13 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
   let stdout_str = Buffer.contents stdout_buf in
   let stderr_str = Buffer.contents stderr_buf in
   let elapsed = duration_of_seconds elapsed_seconds in
+  (* A transport failure does not erase usage already reported by the CLI.
+     Parsing is best-effort and must not replace the process outcome. *)
+  let cost =
+    match parse_cost with
+    | Some f -> (try f stdout_str with _ -> None)
+    | None -> None
+  in
   match timeout_result with
   | Error `Timeout ->
       (* On timeout, try graceful termination first, then force kill. *)
@@ -349,15 +363,12 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
         stderr = stderr_str;
         exit_code = -1;
         elapsed;
-        cost = None;
+        cost;
         session_id = None;
       }
   | Ok () -> (
       match !result with
       | Some (`Exited 0) ->
-          let cost =
-            match parse_cost with Some f -> f stdout_str | None -> None
-          in
           {
             status = Success;
             stdout = stdout_str;
@@ -374,7 +385,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             stderr = stderr_str;
             exit_code = n;
             elapsed;
-            cost = None;
+            cost;
             session_id = None;
           }
       | Some (`Signaled n) ->
@@ -384,7 +395,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             stderr = stderr_str;
             exit_code = 128 + n;
             elapsed;
-            cost = None;
+            cost;
             session_id = None;
           }
       | None ->
@@ -394,7 +405,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             stderr = stderr_str;
             exit_code = -1;
             elapsed;
-            cost = None;
+            cost;
             session_id = None;
           })
 

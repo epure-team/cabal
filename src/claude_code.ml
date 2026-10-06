@@ -297,11 +297,25 @@ let get_git_diff_content = Backend_process.get_git_diff_content
 
 (* Parse cost from stdout string *)
 let parse_cost_from_stdout stdout =
-  try
-    let json = Yojson.Safe.from_string stdout in
-    let _, cost = parse_json_output json in
-    cost
-  with _ -> None
+  let terminal json =
+    match Yojson.Safe.Util.member "type" json with
+    | `Null | `String "result" -> snd (parse_json_output json)
+    | _ -> None
+  in
+  try terminal (Yojson.Safe.from_string stdout)
+  with _ ->
+    (* The result contains cumulative usage: choose the last complete result,
+       never add message snapshots or duplicate terminal reports. *)
+    String.split_on_char '\n' stdout
+    |> List.fold_left
+         (fun acc line ->
+           try
+             let json = Yojson.Safe.from_string line in
+             match Yojson.Safe.Util.member "type" json with
+             | `String "result" -> terminal json
+             | _ -> acc
+           with _ -> acc)
+         None
 
 (* Build the claude command with all required arguments.
    Returns (command, prompt) where prompt should be passed via stdin.

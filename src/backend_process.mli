@@ -52,7 +52,9 @@ val validate_task_namespace : task_spec -> task_result option
     spawns a subprocess with the given command, captures stdout/stderr
     concurrently, and handles timeout via [Eio.Time.with_timeout].
 
-    @param parse_cost Optional function to extract cost from stdout.
+    @param parse_cost Optional best-effort function to extract observed usage
+    from available stdout on success, nonzero exit, signal or timeout. Parser
+    exceptions produce missing usage without changing the process status.
       If not provided, cost is always [None].
     @param on_stdout Optional callback called for each line of stdout as it arrives.
       Used for streaming output to UI in real-time.

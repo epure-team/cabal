@@ -104,6 +104,12 @@ val write_mcp_config :
     (none) *)
 val parse_json_output : Yojson.Safe.t -> string * Backend_types.cost option
 
+(** Extract usage from a terminal JSON object or the last complete terminal
+    [result] in a JSONL stream. Missing fields remain [None], observed zero
+    remains [Some 0]. Malformed/truncated input and streams without a terminal
+    usage report return [None]; message snapshots are not added to totals. *)
+val parse_cost_from_stdout : string -> Backend_types.cost option
+
 (** [get_git_diff ~sw ~env ~working_dir] runs [git diff --name-only] in the
     working directory and returns the list of changed files.
 
