@@ -159,6 +159,8 @@ let lines_of_output output =
   output |> String.split_on_char '\n'
   |> List.filter (fun s -> String.length (String.trim s) > 0)
 
+let max_stdout_capture_bytes = 128 * 1024 * 1024
+
 (** Pathspec exclusions appended to every [git diff] call. These directories are
     build artefacts that should never appear in the diff shown to review agents
     — they inflate context, cause context-window overflows, and contain no
@@ -288,7 +290,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
         Eio.Fiber.both
           (fun () ->
             let buf =
-              Eio.Buf_read.of_flow ~max_size:(128 * 1024 * 1024) stdout_r
+              Eio.Buf_read.of_flow ~max_size:max_stdout_capture_bytes stdout_r
             in
             (* If streaming callback provided, read line by line *)
             match on_stdout with
@@ -302,8 +304,21 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
                   done
                 with End_of_file -> ())
             | None ->
-                (* No streaming, read all at once *)
-                Buffer.add_string stdout_buf (Eio.Buf_read.take_all buf))
+                (* Preserve exact bytes incrementally, including output observed
+                   before a timeout. [take_all] commits nothing until EOF. *)
+                (try
+                   while true do
+                     Eio.Buf_read.ensure buf 1 ;
+                     let available = Eio.Buf_read.buffered_bytes buf in
+                     (* [take_all] previously retained everything in the Eio
+                        buffer and refused the limit itself while checking EOF.
+                        Incremental drains must retain that aggregate bound. *)
+                     if available >= max_stdout_capture_bytes - Buffer.length stdout_buf then
+                       raise Eio.Buf_read.Buffer_limit_exceeded ;
+                     Buffer.add_string stdout_buf
+                       (Eio.Buf_read.take available buf)
+                   done
+                 with End_of_file -> ()))
           (fun () ->
             (* Capture stderr silently - no live streaming to avoid TUI corruption.
                The full stderr is returned in process_result.stderr for callers
@@ -329,6 +344,13 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
   let stdout_str = Buffer.contents stdout_buf in
   let stderr_str = Buffer.contents stderr_buf in
   let elapsed = duration_of_seconds elapsed_seconds in
+  (* A transport failure does not erase usage already reported by the CLI.
+     Parsing is best-effort and must not replace the process outcome. *)
+  let cost =
+    match parse_cost with
+    | Some f -> (try f stdout_str with _ -> None)
+    | None -> None
+  in
   match timeout_result with
   | Error `Timeout ->
       (* On timeout, try graceful termination first, then force kill. *)
@@ -349,15 +371,12 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
         stderr = stderr_str;
         exit_code = -1;
         elapsed;
-        cost = None;
+        cost;
         session_id = None;
       }
   | Ok () -> (
       match !result with
       | Some (`Exited 0) ->
-          let cost =
-            match parse_cost with Some f -> f stdout_str | None -> None
-          in
           {
             status = Success;
             stdout = stdout_str;
@@ -374,7 +393,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             stderr = stderr_str;
             exit_code = n;
             elapsed;
-            cost = None;
+            cost;
             session_id = None;
           }
       | Some (`Signaled n) ->
@@ -384,7 +403,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             stderr = stderr_str;
             exit_code = 128 + n;
             elapsed;
-            cost = None;
+            cost;
             session_id = None;
           }
       | None ->
@@ -394,7 +413,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
             stderr = stderr_str;
             exit_code = -1;
             elapsed;
-            cost = None;
+            cost;
             session_id = None;
           })
 

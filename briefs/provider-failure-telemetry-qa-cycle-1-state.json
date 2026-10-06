@@ -1,0 +1,1 @@
+{"task":"provider-failure-telemetry","date":"2026-10-06","status":"GO","round":1,"cycle":1,"qa_no_go_round":0,"rounds_audit":[{"round":1,"date":"2026-10-06","verdict":"GO","causes":[],"qualifying":false}],"cross_runtime":{},"max_qa_rounds_at_emission":5,"escalation":null}

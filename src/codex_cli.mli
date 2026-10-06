@@ -70,6 +70,10 @@ val project_config_artifacts :
 *)
 val parse_jsonl_output : string -> string * Backend_types.cost option
 
+(** Extract the observed session/thread identifier from JSONL output, including
+    an interrupted stream. Returns [None] when no identifier was reported. *)
+val parse_session_id_from_stdout : string -> string option
+
 (** [parse_stdout_text stdout] extracts the final [agent_message] text from
     Codex's JSONL stdout.  Codex emits one JSON event per line; the final
     assistant reply is the latest [{"type":"item.completed","item":{"type":

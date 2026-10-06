@@ -292,3 +292,7 @@
  (name test_live_session_names)
  (libraries cabal alcotest)
  (modules test_live_session_names))
+(test
+ (name test_provider_usage)
+ (modules test_provider_usage)
+ (libraries cabal alcotest eio_posix yojson))
