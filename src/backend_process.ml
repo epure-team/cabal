@@ -159,6 +159,8 @@ let lines_of_output output =
   output |> String.split_on_char '\n'
   |> List.filter (fun s -> String.length (String.trim s) > 0)
 
+let max_stdout_capture_bytes = 128 * 1024 * 1024
+
 (** Pathspec exclusions appended to every [git diff] call. These directories are
     build artefacts that should never appear in the diff shown to review agents
     — they inflate context, cause context-window overflows, and contain no
@@ -288,7 +290,7 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
         Eio.Fiber.both
           (fun () ->
             let buf =
-              Eio.Buf_read.of_flow ~max_size:(128 * 1024 * 1024) stdout_r
+              Eio.Buf_read.of_flow ~max_size:max_stdout_capture_bytes stdout_r
             in
             (* If streaming callback provided, read line by line *)
             match on_stdout with
@@ -307,8 +309,14 @@ let run_process ~sw ~env ~cmd ?(stdin_content = None) ~working_dir
                 (try
                    while true do
                      Eio.Buf_read.ensure buf 1 ;
+                     let available = Eio.Buf_read.buffered_bytes buf in
+                     (* [take_all] previously retained everything in the Eio
+                        buffer and refused the limit itself while checking EOF.
+                        Incremental drains must retain that aggregate bound. *)
+                     if available >= max_stdout_capture_bytes - Buffer.length stdout_buf then
+                       raise Eio.Buf_read.Buffer_limit_exceeded ;
                      Buffer.add_string stdout_buf
-                       (Eio.Buf_read.take (Eio.Buf_read.buffered_bytes buf) buf)
+                       (Eio.Buf_read.take available buf)
                    done
                  with End_of_file -> ()))
           (fun () ->

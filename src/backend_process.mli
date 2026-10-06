@@ -61,6 +61,9 @@ val validate_task_namespace : task_spec -> task_result option
     @param working_dir Directory to run the process in.
     @param timeout_seconds Maximum wall-clock seconds before SIGTERM.
 
+    Non-display stdout capture retains the historical aggregate limit:
+    [Eio.Buf_read.Buffer_limit_exceeded] is raised at 128 MiB.
+
     {pre}
     [sw] must be active. [cmd] must be a non-empty list with a valid
     executable as the first element. [working_dir] must be an existing

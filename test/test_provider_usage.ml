@@ -55,6 +55,18 @@ let () =
               {|{"type":"assistant","message":{"usage":{"input_tokens":6}}}|})));
       ]);
       ("failure metadata", [
+        Alcotest.test_case "non-display aggregate stdout bound" `Quick (fun () ->
+          let rejected =
+            try
+              Eio_posix.run (fun env ->
+                Eio.Switch.run (fun sw ->
+                  ignore (Backend_process.run_process ~sw ~env
+                    ~cmd:["head"; "-c"; "134217728"; "/dev/zero"]
+                    ~working_dir:"/tmp" ~timeout_seconds:10. ()))) ;
+              false
+            with Eio.Buf_read.Buffer_limit_exceeded -> true
+          in
+          Alcotest.(check bool) "128 MiB capture refused as before" true rejected);
         Alcotest.test_case "nonzero" `Quick (fun () ->
           check_failure "exit 9" 2. (function Backend_types.Failed _ -> true | _ -> false));
         Alcotest.test_case "signal" `Quick (fun () ->
