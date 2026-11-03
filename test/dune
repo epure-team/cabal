@@ -5,6 +5,11 @@
  (modules e2e_harness_config))
 
 (test
+ (name test_agent_batch)
+ (libraries cabal alcotest yojson)
+ (modules test_agent_batch))
+
+(test
  (name test_backend)
  (libraries cabal alcotest eio eio_posix yojson unix)
  (modules test_backend))

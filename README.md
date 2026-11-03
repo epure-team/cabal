@@ -8,6 +8,11 @@ loading, and session log utilities for OCaml projects that need to drive
 agentic command-line backends such as Claude Code, Codex, Gemini CLI, Copilot
 CLI, and OpenCode.
 
+The opt-in [`Agent_batch`](docs/agent-batch.md) API supports asynchronous
+Claude Message Batches with exact result correlation and caller-grouped
+map/reduce planning. It uses a host-supplied authenticated HTTP transport and
+does not change synchronous CLI execution.
+
 ## Purpose and boundaries
 
 Cabal owns the host-neutral backend layer:
@@ -66,6 +71,7 @@ Cabal does not embed their product logic.
 ## Layout
 
 - `src/backend_types.*` — shared result, usage, cost, and streaming event types.
+- `src/agent_batch.*` — asynchronous batch wire contract and grouped reduction.
 - `src/agentic_backend.*` and `src/registry.*` — backend module signature and
   runtime backend registry.
 - `src/backend_registry.*` — static backend descriptors and capability metadata.
