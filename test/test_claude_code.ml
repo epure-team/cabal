@@ -123,6 +123,68 @@ let test_parse_json_output_with_result () =
       Alcotest.(check (option int)) "output_tokens" (Some 50) c.tokens_output
   | None -> Alcotest.fail "Expected cost to be Some"
 
+let test_parse_json_output_total_cost () =
+  let json =
+    `Assoc
+      [
+        ("result", `String "done");
+        ("total_cost_usd", `Float 0.0125);
+        ("usage", `Assoc [("input_tokens", `Int 7)]);
+      ]
+  in
+  let _, cost = Claude_code.parse_json_output json in
+  match cost with
+  | Some c ->
+      Alcotest.(check (option (float 0.000001)))
+        "estimated USD cost"
+        (Some 0.0125)
+        c.cost_usd ;
+      Alcotest.(check (option int)) "tokens preserved" (Some 7) c.tokens_input
+  | None -> Alcotest.fail "expected cost record"
+
+let test_parse_json_output_zero_and_cost_only () =
+  List.iter
+    (fun amount ->
+      let json =
+        `Assoc [("result", `String "done"); ("total_cost_usd", amount)]
+      in
+      let _, cost = Claude_code.parse_json_output json in
+      match cost with
+      | Some c ->
+          Alcotest.(check (option (float 0.000001)))
+            "explicit zero is known"
+            (Some 0.)
+            c.cost_usd ;
+          Alcotest.(check (option int)) "no usage tokens" None c.tokens_input
+      | None -> Alcotest.fail "cost-only envelope lost")
+    [`Int 0; `Float 0.]
+
+let test_parse_json_output_invalid_total_cost () =
+  let invalid = [`String "0.3"; `Float (-1.); `Float nan; `Float infinity] in
+  List.iter
+    (fun amount ->
+      let json =
+        `Assoc
+          [
+            ("result", `String "done");
+            ("total_cost_usd", amount);
+            ("usage", `Assoc [("output_tokens", `Int 5)]);
+          ]
+      in
+      let _, cost = Claude_code.parse_json_output json in
+      match cost with
+      | Some c ->
+          Alcotest.(check (option (float 0.000001)))
+            "invalid cost stays unknown"
+            None
+            c.cost_usd ;
+          Alcotest.(check (option int))
+            "usage preserved"
+            (Some 5)
+            c.tokens_output
+      | None -> Alcotest.fail "valid token usage lost")
+    invalid
+
 let test_parse_json_output_no_usage () =
   let json = `Assoc [("result", `String "Simple result")] in
   let text, cost = Claude_code.parse_json_output json in
@@ -165,6 +227,13 @@ let test_parse_json_output_malformed () =
 let json_output_tests =
   [
     ("parse with result and usage", `Quick, test_parse_json_output_with_result);
+    ("parse total cost", `Quick, test_parse_json_output_total_cost);
+    ( "parse zero and cost only",
+      `Quick,
+      test_parse_json_output_zero_and_cost_only );
+    ( "parse invalid total cost",
+      `Quick,
+      test_parse_json_output_invalid_total_cost );
     ("parse without usage", `Quick, test_parse_json_output_no_usage);
     ( "parse structured_output as JSON",
       `Quick,

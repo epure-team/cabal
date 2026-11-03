@@ -272,8 +272,8 @@ let write_mcp_config = Backend_process.write_mcp_config
 let parse_json_output json =
   let open Yojson.Safe.Util in
   (* Claude Code JSON output contains a "result" field with the text response,
-     or a native-schema "structured_output" value, and optionally "usage" with
-     token counts. *)
+     or a native-schema "structured_output" value, optionally "usage" with
+     token counts, and optionally "total_cost_usd" at the top level. *)
   let result_text =
     match json |> member "structured_output" with
     | `Null -> (
@@ -283,10 +283,16 @@ let parse_json_output json =
           try Yojson.Safe.to_string json with _ -> ""))
     | structured -> Yojson.Safe.to_string structured
   in
+  let total_cost_usd =
+    match json |> member "total_cost_usd" with
+    | `Float n when Float.is_finite n && n >= 0. -> Some n
+    | `Int n when n >= 0 -> Some (float_of_int n)
+    | _ -> None
+  in
   let cost =
     try
       let usage = json |> member "usage" in
-      if usage = `Null then None
+      if usage = `Null && total_cost_usd = None then None
       else
         let input_tokens =
           try Some (usage |> member "input_tokens" |> to_int) with _ -> None
@@ -306,7 +312,7 @@ let parse_json_output json =
           {
             tokens_input = input_tokens;
             tokens_output = output_tokens;
-            cost_usd = None;
+            cost_usd = total_cost_usd;
             cache_creation_input_tokens = cache_creation;
             cache_read_input_tokens = cache_read;
           }

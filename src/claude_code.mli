@@ -87,7 +87,10 @@ val write_mcp_config :
     extracts relevant information for the task result.
 
     Returns [(stdout_text, cost_info)] where cost_info contains token counts
-    if available in the output.
+    and the nonnegative [total_cost_usd] estimate when available in the output.
+    Claude Code reports the whole conversation total after [--continue] or
+    [--resume], including previous turns; hosts needing a per-turn amount must
+    calculate a delta from their own prior total.
 
     {pre}
     [json] must be a valid JSON value produced by Claude Code's
@@ -95,7 +98,9 @@ val write_mcp_config :
 
     {post}
     Returns a [(text, cost option)] pair where [text] is the extracted
-    response text and [cost] contains token usage if present in [json].
+    response text and [cost] contains token usage or a valid total cost if
+    present in [json]. A malformed cost remains unknown, including when it
+    accompanies valid token usage.
 
     {violators}
     (none)
